@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint
+from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -27,36 +27,67 @@ class PaymentEventModel(Base):
 
     # The canonical domain event_id
     event_id = Column(UUID(as_uuid=True), primary_key=True)
-    
+
     # Domain identity mapped from source
     source_system = Column(String(50), nullable=False)
     source_event_id = Column(String(255), nullable=False)
-    
+
     # Core payment facts
     payment_id = Column(String(255), nullable=False)
     order_id = Column(String(255), nullable=True)
-    
+
     timestamp = Column(DateTime(timezone=True), nullable=False)
     event_type = Column(String(100), nullable=False)
-    
+
     currency = Column(String(3), nullable=False)
     amount_minor_units = Column(Integer, nullable=False)
-    
+
     payment_status = Column(String(50), nullable=False)
-    
+
     payment_method = Column(String(50), nullable=True)
     bank = Column(String(50), nullable=True)
     wallet = Column(String(50), nullable=True)
-    
+
     # Razorpay-specific / Provider error details, normalized loosely
     error_code = Column(String(255), nullable=True)
     error_description = Column(String(1024), nullable=True)
     error_source = Column(String(255), nullable=True)
     error_step = Column(String(255), nullable=True)
     error_reason = Column(String(255), nullable=True)
-    
+
     ingested_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         UniqueConstraint('source_system', 'source_event_id', name='uq_payment_event_source_identity'),
+    )
+
+class PaymentHealthSnapshotModel(Base):
+    __tablename__ = "payment_health_snapshots"
+
+    snapshot_id = Column(UUID(as_uuid=True), primary_key=True)
+
+    window_start = Column(DateTime(timezone=True), nullable=False)
+    window_end = Column(DateTime(timezone=True), nullable=False)
+
+    segment_dimension = Column(String(50), nullable=False)
+    segment_value = Column(String(255), nullable=False)
+
+    transaction_count = Column(Integer, nullable=False)
+    successful_transaction_count = Column(Integer, nullable=False)
+    failed_transaction_count = Column(Integer, nullable=False)
+
+    success_rate = Column(Float, nullable=True)
+    failure_rate = Column(Float, nullable=True)
+
+    total_gmv_minor_units = Column(Integer, nullable=False)
+    successful_gmv_minor_units = Column(Integer, nullable=False)
+    failed_gmv_minor_units = Column(Integer, nullable=False)
+
+    baseline_success_rate = Column(Float, nullable=True)
+    insufficient_volume = Column(Boolean, nullable=False)
+
+    calculated_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('window_start', 'window_end', 'segment_dimension', 'segment_value', name='uq_snapshot_identity'),
     )
