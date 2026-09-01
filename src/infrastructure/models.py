@@ -132,3 +132,91 @@ class DegradationEpisodeModel(Base):
     affected_window_count = Column(Integer, nullable=False)
 
     severity = Column(String(20), nullable=False) # MODERATE, HIGH, CRITICAL
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 — Root Cause Analysis (append-only tables)
+# ---------------------------------------------------------------------------
+
+class RCAEvaluationModel(Base):
+    """
+    Immutable, versioned RCA evaluation for a degradation episode.
+
+    APPEND-ONLY: This table must NEVER be mutated via UPDATE or DELETE.
+    Current truth is derived dynamically via MAX(evaluation_version) per episode_id.
+    Immutability is enforced at the repository layer (RCARepository exposes
+    only append methods) and verified by integration tests.
+    """
+    __tablename__ = "rca_evaluations"
+
+    evaluation_id = Column(UUID(as_uuid=True), primary_key=True)
+
+    # FK reference — episode must exist in degradation_episodes
+    episode_id = Column(UUID(as_uuid=True), nullable=False)
+
+    # Monotonically increasing per episode_id.
+    # Unique constraint enforced by the DB to prevent concurrent duplicate versions.
+    evaluation_version = Column(Integer, nullable=False)
+
+    # SYSTEMIC | SEGMENT_SPECIFIC | UNKNOWN
+    classification = Column(String(20), nullable=False)
+
+    analysis_window_start = Column(DateTime(timezone=True), nullable=False)
+    analysis_window_end = Column(DateTime(timezone=True), nullable=False)
+
+    # SHA-256 fingerprint of deterministic input state (§24 of design).
+    # Used to detect whether re-evaluation is necessary.
+    input_fingerprint = Column(String(71), nullable=False)  # 'sha256:' + 64 hex chars
+
+    # Wall-clock UTC insertion time. Informational only — never used for
+    # re-evaluation decisions (fingerprint is used instead).
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+    # Full reproducibility JSON snapshot (§20 of design).
+    # Stored immutably; must contain enough data to reconstruct the evaluation
+    # result without reading source code.
+    evidence_audit_payload = Column(JSON, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "episode_id",
+            "evaluation_version",
+            name="uq_rca_evaluation_version",
+        ),
+    )
+
+
+class CandidateCauseModel(Base):
+    """
+    A structural dimension/value pair that qualified as a candidate root cause
+    in an RCA evaluation.
+
+    APPEND-ONLY: Rows are never updated or deleted.
+    Each row is permanently owned by exactly one RCAEvaluationModel via evaluation_id.
+    Version N-1 rows are never reused or modified when version N is created.
+    """
+    __tablename__ = "rca_candidate_causes"
+
+    candidate_id = Column(UUID(as_uuid=True), primary_key=True)
+
+    # Immutable FK to the owning evaluation.
+    evaluation_id = Column(UUID(as_uuid=True), nullable=False)
+
+    # Structural dimension only (BANK, CURRENCY, PAYMENT_METHOD, WALLET).
+    # Supporting dimensions (ERROR_CODE, etc.) do NOT produce CandidateCause rows.
+    candidate_dimension = Column(String(50), nullable=False)
+    candidate_value = Column(String(255), nullable=False)
+
+    # STRONG | MODERATE | WEAK
+    evidence_strength = Column(String(20), nullable=False)
+
+    # Contribution score (float, unrounded)
+    excess_failure_contribution = Column(Float, nullable=False)
+
+    # Segment failure counts
+    actual_segment_failures = Column(Integer, nullable=False)
+    expected_segment_failures = Column(Float, nullable=False)  # retained as float
+    excess_segment_failures = Column(Float, nullable=False)    # retained as float
+
+    # 1-based rank within this evaluation (1 = highest contribution)
+    rank = Column(Integer, nullable=False)
