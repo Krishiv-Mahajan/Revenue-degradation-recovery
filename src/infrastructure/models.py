@@ -44,6 +44,10 @@ class PaymentEventModel(Base):
     
     payment_status = Column(String(50), nullable=False)
     
+    payment_method = Column(String(50), nullable=True)
+    bank = Column(String(50), nullable=True)
+    wallet = Column(String(50), nullable=True)
+    
     # Razorpay-specific / Provider error details, normalized loosely
     error_code = Column(String(255), nullable=True)
     error_description = Column(String(1024), nullable=True)

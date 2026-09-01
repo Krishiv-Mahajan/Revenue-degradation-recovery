@@ -38,6 +38,10 @@ class PaymentEvent(BaseModel):
     
     payment_status: str
     
+    payment_method: Optional[str] = None
+    bank: Optional[str] = None
+    wallet: Optional[str] = None
+    
     error_code: Optional[str] = None
     error_description: Optional[str] = None
     error_source: Optional[str] = None
