@@ -91,3 +91,44 @@ class PaymentHealthSnapshotModel(Base):
     __table_args__ = (
         UniqueConstraint('window_start', 'window_end', 'segment_dimension', 'segment_value', name='uq_snapshot_identity'),
     )
+
+class DegradationSignalModel(Base):
+    __tablename__ = "degradation_signals"
+
+    signal_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    snapshot_id = Column(UUID(as_uuid=True), nullable=False)
+
+    segment_dimension = Column(String(50), nullable=False)
+    segment_value = Column(String(255), nullable=False)
+    window_start = Column(DateTime(timezone=True), nullable=False)
+
+    evaluation_version = Column(Integer, nullable=False)
+
+    signal_type = Column(String(20), nullable=False)  # NORMAL, BAD, LOW_VOLUME, NO_BASELINE
+    baseline_success_rate = Column(Float, nullable=True)
+    absolute_drop = Column(Float, nullable=True)
+    relative_drop = Column(Float, nullable=True)
+
+    evaluation_timestamp = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('segment_dimension', 'segment_value', 'window_start', 'evaluation_version', name='uq_signal_evaluation_version'),
+    )
+
+class DegradationEpisodeModel(Base):
+    __tablename__ = "degradation_episodes"
+
+    episode_id = Column(UUID(as_uuid=True), primary_key=True)
+
+    segment_dimension = Column(String(50), nullable=False)
+    segment_value = Column(String(255), nullable=False)
+
+    started_at_window = Column(DateTime(timezone=True), nullable=False)
+    ended_at_window = Column(DateTime(timezone=True), nullable=True)
+
+    status = Column(String(20), nullable=False)  # ACTIVE, RECOVERED, INVALIDATED
+
+    peak_absolute_drop = Column(Float, nullable=False)
+    affected_window_count = Column(Integer, nullable=False)
+
+    severity = Column(String(20), nullable=False) # MODERATE, HIGH, CRITICAL
