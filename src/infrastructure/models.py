@@ -295,3 +295,70 @@ class FailurePredictionModel(Base):
             name="uq_failure_prediction_version",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 — Intervention Decisioning (append-only table)
+# ---------------------------------------------------------------------------
+
+class InterventionDecisionModel(Base):
+    """
+    Immutable, versioned intervention decision for a payment attempt.
+
+    APPEND-ONLY: This table must NEVER be mutated via UPDATE or DELETE.
+    """
+    __tablename__ = "intervention_decisions"
+
+    decision_id = Column(UUID(as_uuid=True), primary_key=True)
+
+    # The payment_attempt_id (or payment_id) being decided on
+    payment_attempt_id = Column(String(255), nullable=False)
+
+    # Monotonically increasing version per payment_attempt_id
+    decision_version = Column(Integer, nullable=False)
+
+    # Decision timestamp T_decide
+    decided_at = Column(DateTime(timezone=True), nullable=False)
+
+    # Decision verdict: NO_ACTION | MONITOR | ACT
+    decision_type = Column(String(20), nullable=False)
+
+    # Statically permitted route key. Null unless decision_type == ACT
+    selected_route_id = Column(String(50), nullable=True)
+
+    # Factual carry-forward from Stage 5 (calibrated failure probability)
+    failure_probability = Column(Float, nullable=True)
+
+    # Reference to underlying Stage 5 prediction
+    stage5_prediction_id = Column(UUID(as_uuid=True), nullable=True)
+
+    # Factual carry-forward from Stage 4 RCA (STRONG, MODERATE, WEAK, or None)
+    diagnosis_confidence = Column(String(20), nullable=True)
+
+    # Stage 6's confidence in its own decision verdict in [0.0, 1.0]
+    decision_confidence = Column(Float, nullable=False)
+
+    # Gate verdict: PASSED or specific failed gate code
+    gate_verdict = Column(String(50), nullable=False)
+
+    # Policy identification
+    policy_id = Column(String(50), nullable=False)
+    policy_version = Column(String(50), nullable=False)
+
+    # SHA-256 fingerprint of deterministic input state
+    input_fingerprint = Column(String(71), nullable=False)
+
+    # Full audit payload for decision reproducibility
+    evaluation_audit_payload = Column(JSON, nullable=False)
+
+    # Wall-clock UTC insertion time
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "payment_attempt_id",
+            "decision_version",
+            name="uq_intervention_decision_version",
+        ),
+    )
+

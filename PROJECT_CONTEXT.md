@@ -29,8 +29,11 @@ The repository development is strictly versioned by Git checkpoints.
 - **Stage 1 baseline (`4522b3f`)**: Razorpay ingestion foundation + canonical payment segmentation fields.
 - **Stage 2 (`cf81152`)**: Payment health analytics.
 - **Stage 3 (`ed8ea3f`)**: Degradation detection.
+- **Stage 4 (`c9f1e2d`)**: Root cause analysis (RCA).
+- **Stage 5 (`d91953e`)**: Failure prediction.
+- **Stage 6**: Intervention decisioning.
 
-The current repository should be treated as **Stage 3 complete and frozen** unless explicitly instructed otherwise.
+The current repository should be treated as **Stage 6 complete and frozen** unless explicitly instructed otherwise.
 
 ## Architecture & Implementation History
 
@@ -92,44 +95,49 @@ Stage 3 consumes Stage 2 `payment_health_snapshots` and produces `DegradationSig
 - Episodes are mutable aggregations and may become `ACTIVE`, `RECOVERED`, or `INVALIDATED`.
 - Late-event replay reconciles state without destroying audit history (invalidates stale episodes, upserts valid episodes).
 
+### Stage 6 — Intervention Decisioning (Frozen)
+
+Stage 6 consumes outputs from Stages 3, 4, and 5 and deterministically decides among:
+- `NO_ACTION`
+- `MONITOR`
+- `ACT` (selecting exactly one permitted intervention route from the static catalogue)
+
+**Important Invariants & Decisions:**
+- **Strict Separation of Probabilities & Confidences:**
+  - `failure_probability` = Stage 5 ML prediction outcome in $[0.0, 1.0]$
+  - `diagnosis_confidence` = Stage 4 RCA evidence strength (`STRONG`, `MODERATE`, `WEAK`)
+  - `decision_confidence` = Stage 6 confidence in its own verdict in $[0.0, 1.0]$, mathematically clamped and bounded
+- **Hard Safety Gates:**
+  Sequential checks (Kill Switch, Amount/Currency Validity, Pre-Terminal Invariance, Stage 5 Prediction Validity, Episode Invalidation / Traffic Shift, Global Rate Limit) that force an absolute `NO_ACTION` upon failure.
+- **Atomic Global Rate-Limit Admission:**
+  Rate limit checks and `ACT` insertions are serialized via a dedicated global advisory lock (`GLOBAL_RATE_LIMIT_LOCK`) to prevent concurrency races across competing payment attempts.
+- **Monetary Invariant & Policy Utility:**
+  `policy_utility` calculation uses `Decimal` fixed-point arithmetic rounded half-even to integer minor units. Utility functions strictly as an internal policy ranking heuristic and viability threshold, never as a financial forecast or `protected_gmv`.
+- **Append-Only Persistence & Idempotency:**
+  `intervention_decisions` table is immutable and append-only. Idempotency is keyed by SHA-256 fingerprint over evaluation identity (`payment_attempt_id` + $T_{decide}$ + upstream state + policy version). Monotonic versioning per payment attempt.
+- **Prohibitions:**
+  Zero intervention execution, zero external payment provider API calls, zero outcome observation, zero `protected_gmv` calculation, zero counterfactual attribution, zero LLMs, and zero dynamic route discovery.
+
 ## Strict Stage Boundary
 
 The following are **NOT IMPLEMENTED YET** and must not be added unless the appropriate stage has been explicitly designed and approved:
-- Stage 4 RCA / root-cause analysis
-- Stage 5 payment failure prediction
-- Stage 6 intervention decisioning
-- Stage 7 intervention execution
-- Stage 8 counterfactual attribution / recovery measurement
-- LLM-based reasoning
-- revenue-at-risk calculations
-- recoverable GMV
-- expected saved GMV
-- protected GMV
+- Stage 7 intervention execution + outcome observation
+- Stage 8 counterfactual attribution / recovered & protected GMV measurement
+- LLM-based reasoning or generative models
 
 Do not "helpfully" implement future stages early.
 
 ## Current State
 
-The repository is currently **Stage 3 complete and frozen**.
+The repository is currently **Stage 6 complete and frozen**.
 
 - **Branch:** `main`
-- **Latest Commit:** `ed8ea3f` (feat: implement stage 3 degradation detection)
-- **Test Count:** 39 tests passing cleanly.
+- **Test Count:** 157 tests passing cleanly.
 - **Working Tree:** Clean.
 
 ## Next Planned Step
 
-The next task is **Stage 4 — Root Cause Analysis design/review.**
-
-The next AI must **NOT immediately implement Stage 4**.
-First:
-1. Inspect `PROJECT_CONTEXT.md`.
-2. Inspect the actual repository.
-3. Verify Stage 1–3 checkpoints.
-4. Review the existing architecture and interfaces.
-5. Produce a Stage 4 design.
-6. Explicitly identify ambiguities, schema requirements, financial semantics, replay implications, and stage-boundary risks.
-7. Wait for explicit approval before implementation.
+The next task is **Stage 7 — Intervention Execution + Outcome Observation design/review.**
 
 ## AI Operating Rules
 
