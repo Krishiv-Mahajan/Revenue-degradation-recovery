@@ -12,36 +12,105 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.models import PaymentEventModel
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
-from src.core.domain.failure_prediction_models import PredictionStatus
+from src.core.domain.failure_prediction_models import (
+    PredictionStatus,
+    FailurePrediction,
+    make_prediction_id,
+    compute_input_fingerprint,
+)
+from src.core.ml.model import FailurePredictionModel
+from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
+import dataclasses
 
 
 class FailurePredictionService:
-    def __init__(self, session: AsyncSession, feature_reconstruction_service: FeatureReconstructionService) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        feature_reconstruction_service: FeatureReconstructionService,
+        prediction_repository: FailurePredictionRepository,
+        model: FailurePredictionModel,
+    ) -> None:
         self.session = session
         self.feature_service = feature_reconstruction_service
+        self.repository = prediction_repository
+        self.model = model
 
-    async def orchestrate_prediction(self, payment_attempt_id: str, T: datetime):
+    async def orchestrate_prediction(self, payment_attempt_id: str, T: datetime) -> FailurePrediction:
         """
-        Phase 2 implementation: Extract features and determine prediction status.
-        Model inference is deferred to Phase 3.
+        Phase 3 implementation: Extract features, determine prediction status, and persist prediction.
+        Idempotent based on identical input context.
         """
         # 1. Check eligibility
         is_eligible = await self.is_eligible_for_prediction(payment_attempt_id, T)
-        if not is_eligible:
-            return None, PredictionStatus.NOT_ELIGIBLE
-            
-        # 2. Reconstruct features
-        feature_snapshot = await self.feature_service.reconstruct_features(payment_attempt_id, T)
         
-        # 3. Check sufficiency
-        if feature_snapshot is None:
-            return None, PredictionStatus.NOT_ELIGIBLE
+        feature_snapshot = None
+        feature_dict = {}
+        status = PredictionStatus.PREDICTED
+        
+        if not is_eligible:
+            status = PredictionStatus.NOT_ELIGIBLE
+        else:
+            # 2. Reconstruct features
+            feature_snapshot = await self.feature_service.reconstruct_features(payment_attempt_id, T)
+            if feature_snapshot is None or feature_snapshot.insufficient_global_volume:
+                status = PredictionStatus.INSUFFICIENT_DATA
             
-        if feature_snapshot.insufficient_global_volume:
-            return feature_snapshot, PredictionStatus.INSUFFICIENT_DATA
+        if feature_snapshot is not None:
+            feature_dict = dataclasses.asdict(feature_snapshot)
             
-        # Returning PREDICTED status for Phase 2 verification
-        return feature_snapshot, PredictionStatus.PREDICTED
+        # 3. Construct input fingerprint
+        fingerprint = compute_input_fingerprint(
+            payment_attempt_id=payment_attempt_id,
+            predicted_at=T,
+            prediction_horizon="30m",
+            feature_snapshot=feature_dict,
+            model_name=self.model.model_name,
+            model_version=self.model.model_version,
+            feature_schema_version=self.model.get_feature_schema_version(),
+        )
+        
+        # 4. Idempotency Check: Get latest prediction for this attempt
+        latest_prediction = await self.repository.get_latest_prediction(payment_attempt_id)
+        if latest_prediction is not None and latest_prediction.input_fingerprint == fingerprint:
+            return latest_prediction
+            
+        # 5. Inference (only if PREDICTED)
+        probability = None
+        risk_band = None
+        if status == PredictionStatus.PREDICTED:
+            probability = self.model.predict(feature_dict)
+            if probability >= 0.7:
+                risk_band = "HIGH"
+            elif probability >= 0.3:
+                risk_band = "ELEVATED"
+            else:
+                risk_band = "LOW"
+                
+        # 6. Persist new prediction version
+        await self.repository.acquire_version_allocation_lock(payment_attempt_id)
+        max_version = await self.repository.get_max_prediction_version(payment_attempt_id)
+        new_version = max_version + 1
+        
+        prediction = FailurePrediction(
+            prediction_id=make_prediction_id(payment_attempt_id, new_version),
+            payment_attempt_id=payment_attempt_id,
+            prediction_version=new_version,
+            predicted_at=T,
+            prediction_horizon="30m",
+            failure_probability=probability,
+            risk_band=risk_band,
+            prediction_status=status.value,
+            model_name=self.model.model_name,
+            model_version=self.model.model_version,
+            feature_schema_version=self.model.get_feature_schema_version(),
+            feature_snapshot=feature_dict,
+            input_fingerprint=fingerprint,
+            created_at=datetime.now(T.tzinfo) if T.tzinfo else datetime.utcnow(),
+        )
+        
+        await self.repository.append_prediction(prediction)
+        return prediction
 
     async def is_eligible_for_prediction(self, payment_attempt_id: str, T: datetime) -> bool:
         """

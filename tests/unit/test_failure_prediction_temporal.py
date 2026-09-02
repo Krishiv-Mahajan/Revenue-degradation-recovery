@@ -8,6 +8,8 @@ from src.infrastructure.models import Base, PaymentEventModel
 from src.core.services.failure_prediction_service import FailurePredictionService
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
+from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
+from src.core.ml.model import DeterministicBaselineModel
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
@@ -48,7 +50,9 @@ async def test_temporal_eligibility_late_event(db_session: AsyncSession):
     """
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
-    svc = FailurePredictionService(db_session, feat_svc)
+    pred_repo = FailurePredictionRepository(db_session)
+    model = DeterministicBaselineModel()
+    svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_temporal_1"
     
     # Authorized event is available at T
@@ -85,7 +89,9 @@ async def test_temporal_label_lookup_excludes_future_horizon(db_session: AsyncSe
     """
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
-    svc = FailurePredictionService(db_session, feat_svc)
+    pred_repo = FailurePredictionRepository(db_session)
+    model = DeterministicBaselineModel()
+    svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_temporal_2"
     
     T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
