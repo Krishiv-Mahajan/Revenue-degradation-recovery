@@ -22,6 +22,23 @@ from src.core.ml.model import FailurePredictionModel, SyntheticLogisticRegressio
 logger = logging.getLogger(__name__)
 
 
+from sklearn.frozen import FrozenEstimator
+
+
+class PredefinedCalibrationSplit:
+    """
+    Temporally safe single-split generator for probability calibration.
+    Yields all validation indices as the evaluation fold for calibration,
+    avoiding standard K-fold temporal mixing where future observations
+    are used to train models that predict past observations.
+    """
+    def split(self, X, y=None, groups=None):
+        yield np.arange(len(X)), np.arange(len(X))
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return 1
+
+
 class Stage5PipelineValidator:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -117,27 +134,58 @@ class Stage5PipelineValidator:
     def run_pipeline(self, X_raw, y_raw, times):
         logger.info("SYNTHETIC / DEVELOPMENT - Running Training Pipeline")
         
-        # Chronological Split
-        # Train (used for train+calibration via cv=3): first 80%, Test: last 20%
+        # Chronological Split (§11A):
+        # Training set: first 60% (older)
+        # Validation set: middle 20% (intermediate, used strictly for calibration per §11C)
+        # Test set: last 20% (strictly newer, held-out evaluation)
         n = len(X_raw)
-        train_idx = int(n * 0.8)
+        train_end = int(n * 0.6)
+        val_end = int(n * 0.8)
         
         X, feature_names, encoders = self.preprocess_features(X_raw)
         y = np.array(y_raw)
         
-        X_train, y_train = X[:train_idx], y[:train_idx]
-        X_test, y_test = X[train_idx:], y[train_idx:]
+        X_train, y_train = X[:train_end], y[:train_end]
+        X_val, y_val = X[train_end:val_end], y[train_end:val_end]
+        X_test, y_test = X[val_end:], y[val_end:]
         
-        logger.info(f"Chronological Split: Train={len(y_train)}, Test={len(y_test)}")
+        train_times = times[:train_end]
+        val_times = times[train_end:val_end]
+        test_times = times[val_end:]
         
-        # Train and Calibrate
-        # We use cv=3 on the training data so it cross-validates internally
+        # Enforce chronological ordering and temporal non-overlap (§11A)
+        if len(train_times) > 0 and len(val_times) > 0:
+            assert max(train_times) <= min(val_times), (
+                "Temporal leakage: training period overlaps validation period"
+            )
+        if len(val_times) > 0 and len(test_times) > 0:
+            assert max(val_times) <= min(test_times), (
+                "Temporal leakage: validation period overlaps test period"
+            )
+        
+        logger.info(
+            f"Chronological Split: Train={len(y_train)}, Val={len(y_val)}, Test={len(y_test)}"
+        )
+        
+        # Step 1: Fit base model on older training data only (§11A, §11B)
         base_model = LogisticRegression(class_weight='balanced', max_iter=1000)
-        calibrated_model = CalibratedClassifierCV(estimator=base_model, cv=3)
-        calibrated_model.fit(X_train, y_train)
+        base_model.fit(X_train, y_train)
         
-        # Evaluate on Test Set
-        probs = calibrated_model.predict_proba(X_test)[:, 1]
+        # Step 2: Calibrate on intermediate validation data only (§11C)
+        # Uses FrozenEstimator and PredefinedCalibrationSplit to prevent refitting or temporal mixing
+        if len(np.unique(y_val)) >= 2:
+            calibrated_model = CalibratedClassifierCV(
+                estimator=FrozenEstimator(base_model),
+                method='sigmoid',
+                cv=PredefinedCalibrationSplit()
+            )
+            calibrated_model.fit(X_val, y_val)
+            eval_model = calibrated_model
+        else:
+            eval_model = base_model
+            
+        # Step 3: Evaluate on held-out test data strictly in the future of train and val (§12)
+        probs = eval_model.predict_proba(X_test)[:, 1]
         
         try:
             pr_auc = average_precision_score(y_test, probs)
@@ -157,6 +205,6 @@ class Stage5PipelineValidator:
         
         logger.info(f"SYNTHETIC / DEVELOPMENT - Metrics: {metrics}")
         
-        model_instance = SyntheticLogisticRegressionModel(calibrated_model, feature_names, encoders)
+        model_instance = SyntheticLogisticRegressionModel(eval_model, feature_names, encoders)
         
         return model_instance, metrics

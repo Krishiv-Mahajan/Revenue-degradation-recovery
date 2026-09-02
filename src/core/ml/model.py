@@ -79,7 +79,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from typing import Optional
+
+DEFAULT_SYNTHETIC_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "../../../models/synthetic-development-v1.joblib"
+)
+
+
 class SyntheticLogisticRegressionModel(FailurePredictionModel):
+    """
+    SYNTHETIC / DEVELOPMENT — NOT EMPIRICAL
+
+    A logistic regression model trained strictly on synthetic development data
+    for pipeline validation. It does NOT represent empirical Razorpay payment traffic
+    and must never be treated as an empirical production model.
+    """
+    status: str = "SYNTHETIC / DEVELOPMENT — NOT EMPIRICAL"
+
     def __init__(self, model, feature_names, encoders):
         self.model = model
         self.feature_names = feature_names
@@ -87,6 +103,7 @@ class SyntheticLogisticRegressionModel(FailurePredictionModel):
         self.model_name = "SyntheticLogisticRegressionModel"
         self.model_version = "synthetic-development-v1"
         self._feature_schema_version = "v1.0.0-synthetic"
+        self.status = "SYNTHETIC / DEVELOPMENT — NOT EMPIRICAL"
 
     def predict(self, feature_vector: Dict[str, Any]) -> float:
         row = []
@@ -108,18 +125,84 @@ class SyntheticLogisticRegressionModel(FailurePredictionModel):
         return self._feature_schema_version
 
 
-def get_production_model() -> FailurePredictionModel:
+def load_synthetic_development_model(
+    artifact_path: Optional[str] = None,
+) -> SyntheticLogisticRegressionModel:
     """
-    Attempts to load the persisted synthetic development model.
-    Falls back to the DeterministicBaselineModel if the artifact doesn't exist.
+    Explicit synthetic-development model loader.
+    Loads the synthetic-development-v1 artifact.
+    Fails clearly if the artifact does not exist.
     """
-    model_path = os.path.join(os.path.dirname(__file__), "../../../models/synthetic-development-v1.joblib")
-    if os.path.exists(model_path):
-        try:
-            logger.info("SYNTHETIC / DEVELOPMENT - Loading synthetic model")
-            return joblib.load(model_path)
-        except Exception as e:
-            logger.error(f"Failed to load synthetic model: {e}")
-            
-    logger.info("Falling back to DeterministicBaselineModel")
-    return DeterministicBaselineModel()
+    path = os.path.abspath(artifact_path or DEFAULT_SYNTHETIC_MODEL_PATH)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"SYNTHETIC / DEVELOPMENT — Synthetic model artifact not found at {path}. "
+            "Train and persist the model first using scripts/train_synthetic_model.py."
+        )
+    logger.info("SYNTHETIC / DEVELOPMENT — Loading synthetic model from %s", path)
+    model = joblib.load(path)
+    if not isinstance(model, SyntheticLogisticRegressionModel):
+        raise TypeError(
+            f"Expected SyntheticLogisticRegressionModel artifact, got {type(model).__name__}"
+        )
+    return model
+
+
+def load_production_model(
+    artifact_path: Optional[str] = None,
+) -> FailurePredictionModel:
+    """
+    Loads the production/empirical model artifact.
+    Requires an explicitly configured artifact path (via parameter or STAGE5_MODEL_PATH).
+    Fails clearly rather than silently falling back to a heuristic or placeholder.
+    """
+    path = artifact_path or os.getenv("STAGE5_MODEL_PATH")
+    if not path:
+        raise ValueError(
+            "Production model artifact path not configured. "
+            "Set the STAGE5_MODEL_PATH environment variable or pass artifact_path explicitly."
+        )
+    path = os.path.abspath(path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Required production model artifact not found at {path}. "
+            "Production prediction cannot proceed without the configured model artifact."
+        )
+    logger.info("Loading production model from %s", path)
+    model = joblib.load(path)
+    if not isinstance(model, FailurePredictionModel):
+        raise TypeError(
+            f"Loaded model from {path} does not implement FailurePredictionModel interface."
+        )
+    return model
+
+
+def get_production_model(
+    artifact_path: Optional[str] = None,
+) -> FailurePredictionModel:
+    """
+    Production prediction path.
+    Requires an explicitly configured model artifact and fails clearly if missing.
+    Must NOT silently fall back to DeterministicBaselineModel or change model semantics.
+    """
+    return load_production_model(artifact_path=artifact_path)
+
+
+def get_development_model(
+    mode: str = "synthetic",
+    artifact_path: Optional[str] = None,
+) -> FailurePredictionModel:
+    """
+    Explicit development and test model loader.
+    Modes:
+      - 'synthetic': loads synthetic-development-v1 artifact (fails clearly if missing)
+      - 'deterministic': returns DeterministicBaselineModel heuristic for unit/contract tests
+    """
+    if mode == "synthetic":
+        return load_synthetic_development_model(artifact_path=artifact_path)
+    elif mode == "deterministic":
+        return DeterministicBaselineModel()
+    else:
+        raise ValueError(
+            f"Unknown development model mode: {mode}. Must be 'synthetic' or 'deterministic'."
+        )

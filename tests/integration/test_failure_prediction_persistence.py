@@ -10,7 +10,7 @@ from src.core.services.failure_prediction_service import FailurePredictionServic
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
-from src.core.ml.model import get_production_model
+from src.core.ml.model import DeterministicBaselineModel
 from src.core.domain.failure_prediction_models import PredictionStatus
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
@@ -34,7 +34,7 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = get_production_model()
+    model = DeterministicBaselineModel()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     
     T = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
