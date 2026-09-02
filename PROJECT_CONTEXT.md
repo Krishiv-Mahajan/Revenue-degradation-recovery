@@ -32,9 +32,10 @@ The repository development is strictly versioned by Git checkpoints.
 - **Stage 4 (`c9f1e2d`)**: Root cause analysis (RCA).
 - **Stage 5 (`d91953e`)**: Failure prediction.
 - **Stage 6 (`f5965c3`)**: Intervention decisioning.
-- **Stage 7**: Intervention execution + outcome observation.
+- **Stage 7 (`e74785e`)**: Intervention execution + outcome observation.
+- **Stage 8**: Counterfactual attribution + protected GMV measurement.
 
-The current repository should be treated as **Stage 7 complete and frozen** unless explicitly instructed otherwise.
+The current repository should be treated as **Stage 8 complete and frozen** unless explicitly instructed otherwise.
 
 ## Architecture & Implementation History
 
@@ -148,25 +149,50 @@ Stage 7 operationalizes Stage 6 `ACT` decisions without compromising safety, ide
   - Zero LLMs.
   - Zero Stage 8 counterfactual attribution, uplift estimation, or `protected_gmv` calculation.
 
-## Strict Stage Boundary
+### Stage 8 — Counterfactual Attribution + Protected GMV (Frozen)
 
-The following are **NOT IMPLEMENTED YET** and must not be added unless the appropriate stage has been explicitly designed and approved:
-- Stage 8 counterfactual attribution / recovered & protected GMV measurement
-- LLM-based reasoning or generative models
+Stage 8 operationalizes the measurement of protected GMV using an auditable, risk-weighted counterfactual model under explicit assumptions:
 
-Do not "helpfully" implement future stages early.
+**Important Invariants & Decisions:**
+- **Semantic Separation:**
+  - `p0` is the **Stage 5 pre-intervention failure-risk estimate used as the counterfactual risk proxy**. It is NOT an empirically validated causal probability of $Y(0)$.
+  - `attribution_confidence` / $\alpha$ is a deterministic **evidence-weighting factor**, NOT a statistical confidence interval.
+  - Protected GMV is an **auditable risk-weighted attribution estimate under explicit assumptions**, not experimentally proven causal impact.
+- **Strict Inequality Bounding Invariant:**
+  - $0 \le \text{attributed\_protected\_gmv} \le \text{counterfactual\_loss\_exposure} \le \text{payment\_amount}$
+  - Under no circumstances can protected GMV exceed the counterfactual revenue at risk ($A_i \cdot p_0$).
+- **Numeric Typing Rules:**
+  - Monetary amounts are strictly integer minor units (`INTEGER` / paise).
+  - Probability and confidence are fixed-point `Decimal` backed by PostgreSQL `NUMERIC(6, 4)`.
+  - Zero binary floating-point arithmetic is permitted in the attribution calculator.
+- **Treatment Prerequisites:**
+  - Requires: Decision ACT + Execution SUCCESS + Temporal Precedence ($T_{\text{exec\_completed}} \le T_{\text{terminal\_event}}$).
+  - If execution failed, timed out, or completed after terminal outcome: treatment status is not `TREATED`, and protected GMV is strictly 0.
+- **Factual Payment Outcome Gate:**
+  - Outcome must be factually `CAPTURED`. If `FAILED` or `UNKNOWN_IN_FLIGHT`, protected GMV is strictly 0.
+- **Deterministic Evidence Scoring ($\alpha_{\text{confidence}}$):**
+  - $\alpha_{\text{confidence}} = c_{\text{prediction}} \times c_{\text{diagnosis}} \times c_{\text{timing}}$.
+  - Model provenance is explicitly discounted: `SYNTHETIC_DEVELOPMENT` evaluates at $0.6000$; `EMPIRICAL_PRODUCTION` at $1.0000$.
+  - Confidence floor: if $\alpha < 0.2500$, status is `INDETERMINATE_INSUFFICIENT_EVIDENCE` and protected GMV is 0.
+- **Append-Only & Versioned:**
+  - `counterfactual_attributions` records are append-only. Late-arriving events append a new version without mutating historical versions.
+- **Audit Preservation:**
+  - Audit payload preserves methodology name/version, Stage 5 model provenance, risk proxy $p_0$, execution evidence, outcome evidence, conflicting events, timing delta, timestamps, and explicit methodology assumptions.
+- **Prohibitions:**
+  - Zero LLMs, zero new external ML models, zero mutation of Stages 1–7 tables.
+  - Stage 8 is the final terminal stage of the approved product flow.
 
 ## Current State
 
-The repository is currently **Stage 7 complete and frozen**.
+The repository is currently **Stage 8 complete and frozen**.
 
 - **Branch:** `main`
-- **Test Count:** 187 tests passing cleanly.
+- **Test Count:** 210 tests passing cleanly.
 - **Working Tree:** Clean.
 
-## Next Planned Step
+## Terminal Status
 
-The next task is **Stage 8 — Counterfactual Attribution + Protected GMV design/review.**
+Stages 1–8 of the Revenue Protection & Recovery Engine are complete, verified, and frozen.
 
 ## AI Operating Rules
 

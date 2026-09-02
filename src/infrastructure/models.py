@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float
+from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -461,5 +461,54 @@ class PaymentOutcomeObservationModel(Base):
             name="uq_outcome_observation_temporal",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 — Counterfactual Attribution + Protected GMV
+# ---------------------------------------------------------------------------
+
+class CounterfactualAttributionModel(Base):
+    """
+    Append-only factual and risk-weighted counterfactual attribution record.
+    Preserves integer minor-unit money and Numeric(6, 4) probability/confidence.
+    """
+    __tablename__ = "counterfactual_attributions"
+
+    attribution_id = Column(UUID(as_uuid=True), primary_key=True)
+    command_id = Column(UUID(as_uuid=True), nullable=False)
+    payment_attempt_id = Column(String(255), nullable=False)
+    decision_id = Column(UUID(as_uuid=True), nullable=False)
+    attribution_version = Column(Integer, nullable=False)
+    attributed_at = Column(DateTime(timezone=True), nullable=False)
+    as_of_timestamp = Column(DateTime(timezone=True), nullable=False)
+    attribution_status = Column(String(50), nullable=False)
+    methodology_name = Column(String(50), nullable=False)
+    methodology_version = Column(String(50), nullable=False)
+    treatment_status = Column(String(30), nullable=False)
+    observed_payment_outcome = Column(String(30), nullable=False)
+    payment_amount_minor_units = Column(Integer, nullable=False)
+    counterfactual_failure_probability = Column(Numeric(6, 4), nullable=True)
+    counterfactual_loss_exposure_minor_units = Column(Integer, nullable=False)
+    counterfactual_natural_success_gmv_minor_units = Column(Integer, nullable=False)
+    attributed_protected_gmv_minor_units = Column(Integer, nullable=False)
+    attribution_confidence = Column(Numeric(6, 4), nullable=False)
+    is_synthetic_baseline = Column(Boolean, nullable=False)
+    is_simulated_execution = Column(Boolean, nullable=False)
+    attribution_audit_payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "command_id",
+            "attribution_version",
+            name="uq_attribution_version",
+        ),
+        UniqueConstraint(
+            "command_id",
+            "as_of_timestamp",
+            name="uq_attribution_temporal",
+        ),
+    )
+
 
 
