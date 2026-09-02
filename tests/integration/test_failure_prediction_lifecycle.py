@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 
 from src.infrastructure.models import Base, PaymentEventModel
 from src.core.services.failure_prediction_service import FailurePredictionService
+from src.core.services.feature_reconstruction_service import FeatureReconstructionService
+from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
@@ -41,7 +43,9 @@ def create_payment_event(session: AsyncSession, payment_id: str, event_type: str
 @pytest.mark.asyncio
 async def test_lifecycle_authorized_to_failed(db_session: AsyncSession):
     """Fixture A: payment.authorized -> payment.failed"""
-    svc = FailurePredictionService(db_session)
+    repo = FeatureReconstructionRepository(db_session)
+    feat_svc = FeatureReconstructionService(repo)
+    svc = FailurePredictionService(db_session, feat_svc)
     payment_id = "pay_A"
     
     T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
@@ -67,7 +71,9 @@ async def test_lifecycle_authorized_to_failed(db_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_lifecycle_authorized_to_captured(db_session: AsyncSession):
     """Fixture B: payment.authorized -> payment.captured"""
-    svc = FailurePredictionService(db_session)
+    repo = FeatureReconstructionRepository(db_session)
+    feat_svc = FeatureReconstructionService(repo)
+    svc = FailurePredictionService(db_session, feat_svc)
     payment_id = "pay_B"
     
     T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
@@ -84,7 +90,9 @@ async def test_lifecycle_authorized_to_captured(db_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_future_terminal_information_leak(db_session: AsyncSession):
     """Fixture E: Future terminal information cannot leak into the prediction context."""
-    svc = FailurePredictionService(db_session)
+    repo = FeatureReconstructionRepository(db_session)
+    feat_svc = FeatureReconstructionService(repo)
+    svc = FailurePredictionService(db_session, feat_svc)
     payment_id = "pay_E"
     
     T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
@@ -103,7 +111,9 @@ async def test_future_terminal_information_leak(db_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_ineligible_prior_terminal_event(db_session: AsyncSession):
     """If a terminal event was ingested BEFORE T, it is ineligible."""
-    svc = FailurePredictionService(db_session)
+    repo = FeatureReconstructionRepository(db_session)
+    feat_svc = FeatureReconstructionService(repo)
+    svc = FailurePredictionService(db_session, feat_svc)
     payment_id = "pay_F"
     
     T_terminal = datetime(2026, 9, 1, 9, 50, tzinfo=timezone.utc)

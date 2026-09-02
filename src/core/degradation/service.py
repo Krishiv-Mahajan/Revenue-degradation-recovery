@@ -1,4 +1,5 @@
 from typing import List
+import uuid
 from datetime import datetime
 
 from src.infrastructure.degradation_repository import DegradationRepository
@@ -41,6 +42,8 @@ class DegradationService:
         # 3. Reconstruct state machine
         valid_episodes = reconcile_timeline(latest_signals)
         
+        reconciliation_run_id = uuid.uuid4()
+        
         # 4. Reconcile episodes (Invalidate stale ones)
         existing_episodes = await self.repository.get_episodes_for_segment(segment_dimension, segment_value)
         valid_episode_ids = {e.episode_id for e in valid_episodes}
@@ -48,8 +51,8 @@ class DegradationService:
         for ep in existing_episodes:
             if ep.episode_id not in valid_episode_ids and ep.status != EpisodeStatus.INVALIDATED:
                 ep.status = EpisodeStatus.INVALIDATED
-                await self.repository.upsert_episode(ep)
+                await self.repository.upsert_episode(ep, reconciliation_run_id, evaluation_timestamp)
                 
         # 5. Upsert valid episodes (creates or updates)
         for ep in valid_episodes:
-            await self.repository.upsert_episode(ep)
+            await self.repository.upsert_episode(ep, reconciliation_run_id, evaluation_timestamp)

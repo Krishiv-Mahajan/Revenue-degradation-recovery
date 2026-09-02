@@ -11,11 +11,37 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.models import PaymentEventModel
+from src.core.services.feature_reconstruction_service import FeatureReconstructionService
+from src.core.domain.failure_prediction_models import PredictionStatus
 
 
 class FailurePredictionService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, feature_reconstruction_service: FeatureReconstructionService) -> None:
         self.session = session
+        self.feature_service = feature_reconstruction_service
+
+    async def orchestrate_prediction(self, payment_attempt_id: str, T: datetime):
+        """
+        Phase 2 implementation: Extract features and determine prediction status.
+        Model inference is deferred to Phase 3.
+        """
+        # 1. Check eligibility
+        is_eligible = await self.is_eligible_for_prediction(payment_attempt_id, T)
+        if not is_eligible:
+            return None, PredictionStatus.NOT_ELIGIBLE
+            
+        # 2. Reconstruct features
+        feature_snapshot = await self.feature_service.reconstruct_features(payment_attempt_id, T)
+        
+        # 3. Check sufficiency
+        if feature_snapshot is None:
+            return None, PredictionStatus.NOT_ELIGIBLE
+            
+        if feature_snapshot.insufficient_global_volume:
+            return feature_snapshot, PredictionStatus.INSUFFICIENT_DATA
+            
+        # Returning PREDICTED status for Phase 2 verification
+        return feature_snapshot, PredictionStatus.PREDICTED
 
     async def is_eligible_for_prediction(self, payment_attempt_id: str, T: datetime) -> bool:
         """

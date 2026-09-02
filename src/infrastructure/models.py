@@ -133,6 +133,25 @@ class DegradationEpisodeModel(Base):
 
     severity = Column(String(20), nullable=False) # MODERATE, HIGH, CRITICAL
 
+class EpisodeStateHistoryModel(Base):
+    """
+    Immutable historical ledger of Stage 3 assertions.
+    """
+    __tablename__ = "episode_state_history"
+
+    history_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reconciliation_run_id = Column(UUID(as_uuid=True), nullable=False)
+    episode_id = Column(UUID(as_uuid=True), nullable=False)
+    
+    segment_dimension = Column(String(50), nullable=False)
+    segment_value = Column(String(255), nullable=False)
+    
+    status = Column(String(20), nullable=False)
+    severity = Column(String(20), nullable=False)
+    
+    effective_start_window = Column(DateTime(timezone=True), nullable=False)
+    evaluation_timestamp = Column(DateTime(timezone=True), nullable=False)
+
 
 # ---------------------------------------------------------------------------
 # Stage 4 — Root Cause Analysis (append-only tables)

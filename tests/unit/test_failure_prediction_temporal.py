@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 
 from src.infrastructure.models import Base, PaymentEventModel
 from src.core.services.failure_prediction_service import FailurePredictionService
+from src.core.services.feature_reconstruction_service import FeatureReconstructionService
+from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
@@ -44,7 +46,9 @@ async def test_temporal_eligibility_late_event(db_session: AsyncSession):
     Test that a late-arriving terminal event (timestamp < T, but ingested_at > T)
     does NOT retroactively disqualify an authorized event at T.
     """
-    svc = FailurePredictionService(db_session)
+    repo = FeatureReconstructionRepository(db_session)
+    feat_svc = FeatureReconstructionService(repo)
+    svc = FailurePredictionService(db_session, feat_svc)
     payment_id = "pay_temporal_1"
     
     # Authorized event is available at T
@@ -79,7 +83,9 @@ async def test_temporal_label_lookup_excludes_future_horizon(db_session: AsyncSe
     """
     Label lookup should not see terminal events that arrive after the observation window.
     """
-    svc = FailurePredictionService(db_session)
+    repo = FeatureReconstructionRepository(db_session)
+    feat_svc = FeatureReconstructionService(repo)
+    svc = FailurePredictionService(db_session, feat_svc)
     payment_id = "pay_temporal_2"
     
     T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)

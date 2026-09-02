@@ -181,29 +181,16 @@ The `payment_health_snapshots` table is **not safe for historical training**. Th
 
 Stage 5 must compute all health/behavioral features from immutable Stage 1 `payment_events` as-of `T`. The Stage 2 snapshot table is a read-optimization for real-time Stage 3 evaluation, not a historical archive.
 
-### §4D — Stage 3 (degradation signals) — safe; episodes PROHIBITED
+### §4D — Stage 3 (degradation state) — `episode_state_history` ONLY; episodes PROHIBITED
 
-**Signals:** `degradation_signals` is append-only (`DegradationRepository.append_signal` — insert only). Each re-evaluation appends a new row with an incremented `evaluation_version`. Historical signals are recoverable via:
+**State Ledger:** Stage 5 derives historical Stage 3 context strictly by querying the new append-only `episode_state_history` ledger. This table provides an immutable historical record of the exact assertions made by Stage 3 during each reconciliation run.
 
-```sql
-SELECT * FROM degradation_signals
-WHERE segment_dimension = ?
-  AND segment_value = ?
-  AND evaluation_timestamp < T
-ORDER BY window_start, evaluation_version DESC
-```
+**Reconstruction algorithm:** To determine the degradation state known at time `T` for a segment without recreating the Stage 3 state machine:
+1. Identify the exact historical Stage 3 reconciliation run by finding the maximum `evaluation_timestamp < T` in `episode_state_history`. This yields the `reconciliation_run_id`.
+2. Within that `reconciliation_run_id`, select the episode asserting `status = 'ACTIVE'`. (Stage 3 guarantees at most one ACTIVE episode per segment in a single run).
+3. Extract `severity` and `episode_id` directly from this asserted fact.
 
-This query gives the latest signal evaluation known for each window, as of `T`.
-
-**Episodes:** `degradation_episodes` is **mutable** via `upsert_episode`. The `status`, `ended_at_window`, `peak_absolute_drop`, `affected_window_count`, and `severity` fields can be overwritten at any time. Stage 5 must **not** read `degradation_episodes` for historical training.
-
-**Reconstruction rule:** To determine the degradation state known at time `T` for a segment:
-1. Query `degradation_signals` with `evaluation_timestamp < T`.
-2. For each `window_start`, select the signal with the highest `evaluation_version`.
-3. Derive historical degradation evidence from persisted Stage 3 append-only signals while respecting the historical `evaluation_timestamp < T` boundary and remaining semantically consistent with Stage 3. Stage 5 must **not independently recreate or second-guess the Stage 3 state machine**.
-4. Extract signal attributes (absolute_drop, relative_drop, signal_type) directly from the signal rows.
-
-Stage 5 must not reinterpret or recompute Stage 3's degradation verdict beyond extracting the persisted signal fields.
+Stage 5 must **not** independently recreate or second-guess the Stage 3 state machine. Stage 5 must **not** read `degradation_signals` to reconstruct episodes. Stage 5 must **not** read mutable `degradation_episodes` for historical training.
 
 ### §4E — Stage 4 (RCA) — safe
 
@@ -282,28 +269,24 @@ These are initial defaults and remain subject to empirical validation.
 
 ## §7 — Stage 3 feature contract
 
-Stage 5 reads degradation state from the append-only `degradation_signals` table with `evaluation_timestamp < T`. It does **not** modify or re-run Stage 3 logic.
+Stage 5 reads degradation state from the append-only `episode_state_history` ledger bounded by `evaluation_timestamp < T`. It does **not** read `degradation_signals` directly to reconstruct episode context and does **not** modify or re-run Stage 3 logic.
 
-The following Stage 3 fields, when a valid signal exists for the payment's segment at time T, are eligible as features:
+The following Stage 3 fields are eligible as features when an active episode exists for the payment's segment at time T:
 
 | Feature name | Source field | Type | Notes |
 |---|---|---|---|
-| `degradation_signal_type` | `signal_type` | Categorical (NORMAL/BAD/LOW_VOLUME/NO_BASELINE) | Latest signal type for relevant segment |
-| `degradation_absolute_drop` | `absolute_drop` | Float (nullable) | Null when signal is LOW_VOLUME or NO_BASELINE |
-| `degradation_relative_drop` | `relative_drop` | Float (nullable) | Null when signal is LOW_VOLUME or NO_BASELINE |
-| `degradation_baseline_success_rate` | `baseline_success_rate` | Float (nullable) | Historical baseline at time of evaluation |
-| `is_in_active_degradation` | Derived | Boolean | True if persisted Stage 3 degradation evidence indicates an active degradation condition as-of T |
+| `degradation_severity` | `severity` | Categorical | Extracted from the active ledger assertion |
+| `is_in_active_degradation` | Derived | Boolean | True if the latest eligible reconciliation run asserts an ACTIVE episode |
 
-**Derivation rule for `is_in_active_degradation`:** `is_in_active_degradation` represents whether persisted Stage 3 degradation evidence indicates an active degradation condition as-of T.
-- Stage 5 derives this only from persisted Stage 3 append-only signals and their historical evaluation information.
-- Stage 5 does NOT implement an independent degradation state machine.
+**Derivation rule for `is_in_active_degradation`:** Defined strictly as: "True if, and only if, the latest eligible persisted Stage 3 reconciliation run prior to `T` asserts that there is an episode with `status == 'ACTIVE'`."
+- Stage 5 derives this only from the `episode_state_history` ledger.
+- Stage 5 performs NO sequence counting and implements NO state machine rules.
 - Stage 5 does NOT recreate, modify, validate, or second-guess Stage 3 episodes.
-- Historical eligibility still requires `evaluation_timestamp < T`.
-This preserves semantic consistency with Stage 3.
+- Historical eligibility strictly requires `evaluation_timestamp < T` and grouping by `reconciliation_run_id`.
 
-**Critical constraint:** Stage 5 must not reinterpret Stage 3's verdict. It observes the signal state only. It does not compute new episodes or validate existing ones.
+**Critical constraint:** Stage 5 must not reinterpret Stage 3's verdict. It observes the asserted facts only.
 
-**Stage 3 feature selection:** Match the payment against the relevant structural dimensions: `GLOBAL/ALL`, `currency`, `payment_method`, `bank`, and `wallet` when non-null. Do NOT use `error_source` as a pre-terminal feature. Preserve separate dimension-specific features. Stage 5 consumes persisted Stage 3 signals and does NOT independently recreate or second-guess the Stage 3 state machine. Historical eligibility requires `evaluation_timestamp < T`.
+**Stage 3 feature selection:** Match the payment against the relevant structural dimensions: `GLOBAL/ALL`, `currency`, `payment_method`, `bank`, and `wallet` when non-null. Do NOT use `error_source` as a pre-terminal feature. Preserve separate dimension-specific features.
 
 ---
 
@@ -316,8 +299,9 @@ RCA information is **predictive evidence, not causal truth**. A candidate with `
 ### §8A — Eligible RCA evaluation selection
 
 For a given `payment.authorized` event at time `T`:
-1. Identify whether persisted Stage 3 degradation signals provide eligible degradation evidence for the payment's relevant structural dimensions as-of `T`.
-2. If relevant eligible RCA exists for that degradation context, Stage 5 selects the most recent RCA evaluation satisfying:
+1. Use the `episode_state_history` ledger to determine if `is_in_active_degradation` is True (as defined in §7).
+2. If True, extract the `episode_id` directly from the `ACTIVE` assertion.
+3. If relevant eligible RCA exists for that `episode_id`, Stage 5 selects the most recent RCA evaluation satisfying:
    ```sql
    SELECT * FROM rca_evaluations
    WHERE episode_id = ?
@@ -325,7 +309,7 @@ For a given `payment.authorized` event at time `T`:
    ORDER BY evaluation_version DESC
    LIMIT 1
    ```
-3. If no evaluation exists, all RCA features are null.
+4. If no evaluation exists, all RCA features are null.
 
 ### §8B — RCA feature representation
 
@@ -658,7 +642,8 @@ All historical feature queries must be bounded. Stage 5 must not load the full `
 | `payment_events` | `(bank, ingested_at, event_type)` | Historical bank failure rate |
 | `payment_events` | `(wallet, ingested_at, event_type)` | Historical wallet failure rate |
 | `payment_events` | `(currency, ingested_at, event_type)` | Historical currency failure rate |
-| `degradation_signals` | `(segment_dimension, segment_value, evaluation_timestamp)` | Stage 3 as-of query |
+| `episode_state_history` | `(segment_dimension, segment_value, evaluation_timestamp)` | Stage 3 as-of query boundary |
+| `episode_state_history` | `(reconciliation_run_id)` | Stage 3 run grouping |
 | `rca_evaluations` | `(episode_id, generated_at, evaluation_version)` | RCA as-of query |
 | `failure_predictions` (new table) | `(payment_attempt_id, prediction_version)` | Idempotency and versioning |
 
@@ -800,8 +785,8 @@ Stage 5 must add tests/fixtures covering:
 For historical prediction time T:
   +--> Stage 1: payment_events WHERE ingested_at < T
   |     -> immutable behavioral features
-  +--> Stage 3: degradation_signals WHERE evaluation_timestamp < T
-  |     -> as-of degradation state (latest version per window)
+  +--> Stage 3: episode_state_history WHERE evaluation_timestamp < T
+  |     -> immutable historical assertion of episode state (by reconciliation_run_id)
   +--> Stage 4: rca_evaluations WHERE generated_at < T
   |     -> as-of RCA state (latest version per episode)
   +-> feature_vector_at_T -> model -> failure_probability_at_T
@@ -814,7 +799,7 @@ Stage 2 `payment_health_snapshots` and Stage 3 `degradation_episodes` are exclud
 ```
 For current eligible payment attempt (payment.authorized) at T = now:
   +--> Stage 1: payment_events WHERE ingested_at < T (most recent available data)
-  +--> Stage 3: degradation_signals WHERE evaluation_timestamp < T
+  +--> Stage 3: episode_state_history WHERE evaluation_timestamp < T
   +--> Stage 4: rca_evaluations WHERE generated_at < T
   +-> feature_vector -> calibrated model -> failure_probability -> persist prediction
 ```
@@ -845,7 +830,9 @@ Explicitly marked as **FROZEN ARCHITECTURAL RULES**:
 - Stage 1 immutable payment events are the primary historical source.
 - Stage 2 mutable snapshots must NOT be used as historical training truth.
 - Stage 3 mutable `degradation_episodes` must NOT be used as historical training truth.
-- Stage 3 append-only `degradation_signals` may be used only when `evaluation_timestamp < T`.
+- Stage 3 context MUST be derived from the append-only `episode_state_history` ledger.
+- Stage 5 MUST NOT replicate the Stage 3 state machine or read `degradation_signals` for context.
+- Historical Stage 3 context query MUST exactly follow the 2-step `reconciliation_run_id` + `evaluation_timestamp < T` algorithm.
 - Stage 4 append-only RCA may be used only when `generated_at < T`.
 - Stage 3 features preserve separate structural dimensions.
 - Stage 4 uses only the rank-1 RCA candidate for the initial payment-segment match feature.

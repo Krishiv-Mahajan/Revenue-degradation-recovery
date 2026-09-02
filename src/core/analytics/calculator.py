@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Dict
+from typing import List, Optional, Dict
 from uuid import uuid4
 import statistics
 

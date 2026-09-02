@@ -5,7 +5,7 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 
-from src.infrastructure.models import DegradationSignalModel, DegradationEpisodeModel
+from src.infrastructure.models import DegradationSignalModel, DegradationEpisodeModel, EpisodeStateHistoryModel
 from src.core.domain.degradation_models import DegradationSignal, DegradationEpisode, SignalType, EpisodeStatus, Severity
 
 class DegradationRepository:
@@ -54,7 +54,7 @@ class DegradationRepository:
         self.session.add(model)
         await self.session.flush()
 
-    async def upsert_episode(self, episode: DegradationEpisode) -> None:
+    async def upsert_episode(self, episode: DegradationEpisode, reconciliation_run_id: uuid.UUID, evaluation_timestamp: datetime) -> None:
         stmt = insert(DegradationEpisodeModel).values(
             episode_id=episode.episode_id,
             segment_dimension=episode.segment_dimension,
@@ -76,6 +76,19 @@ class DegradationRepository:
             }
         )
         await self.session.execute(stmt)
+        
+        history_model = EpisodeStateHistoryModel(
+            reconciliation_run_id=reconciliation_run_id,
+            episode_id=episode.episode_id,
+            segment_dimension=episode.segment_dimension,
+            segment_value=episode.segment_value,
+            status=episode.status.value,
+            severity=episode.severity.value,
+            effective_start_window=episode.started_at_window,
+            evaluation_timestamp=evaluation_timestamp
+        )
+        self.session.add(history_model)
+        await self.session.flush()
         
     async def get_episodes_for_segment(self, segment_dimension: str, segment_value: str) -> List[DegradationEpisode]:
         stmt = select(DegradationEpisodeModel).where(
