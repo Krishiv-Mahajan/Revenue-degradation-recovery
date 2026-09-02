@@ -220,3 +220,59 @@ class CandidateCauseModel(Base):
 
     # 1-based rank within this evaluation (1 = highest contribution)
     rank = Column(Integer, nullable=False)
+
+# ---------------------------------------------------------------------------
+# Stage 5 — Failure Prediction (append-only table)
+# ---------------------------------------------------------------------------
+
+class FailurePredictionModel(Base):
+    """
+    Immutable, versioned failure prediction for a payment attempt.
+    
+    APPEND-ONLY: This table must NEVER be mutated via UPDATE or DELETE.
+    """
+    __tablename__ = "failure_predictions"
+
+    prediction_id = Column(UUID(as_uuid=True), primary_key=True)
+    
+    # The payment_id being predicted on
+    payment_attempt_id = Column(String(255), nullable=False)
+    
+    # Monotonically increasing version per payment_attempt_id
+    prediction_version = Column(Integer, nullable=False)
+    
+    # Prediction timestamp T (ingested_at of the triggering event)
+    predicted_at = Column(DateTime(timezone=True), nullable=False)
+    
+    # E.g. "30m"
+    prediction_horizon = Column(String(50), nullable=False)
+    
+    # Calibrated probability in [0,1]. Null if status != PREDICTED.
+    failure_probability = Column(Float, nullable=True)
+    
+    # LOW / ELEVATED / HIGH. Null if status != PREDICTED.
+    risk_band = Column(String(20), nullable=True)
+    
+    # PREDICTED / INSUFFICIENT_DATA / NOT_ELIGIBLE
+    prediction_status = Column(String(20), nullable=False)
+    
+    model_name = Column(String(100), nullable=False)
+    model_version = Column(String(50), nullable=False)
+    feature_schema_version = Column(String(50), nullable=False)
+    
+    # Full serialized feature vector
+    feature_snapshot = Column(JSON, nullable=False)
+    
+    # SHA-256 fingerprint of deterministic input state
+    input_fingerprint = Column(String(71), nullable=False)
+    
+    # Wall-clock UTC insertion time
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "payment_attempt_id",
+            "prediction_version",
+            name="uq_failure_prediction_version",
+        ),
+    )

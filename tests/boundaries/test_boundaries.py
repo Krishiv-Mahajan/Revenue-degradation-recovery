@@ -119,3 +119,41 @@ def test_stage4_no_stage5_implementation():
             assert word not in content, (
                 f"Found Stage 5 leakage '{word}' in Stage 4 file: {fname}"
             )
+
+# ---------------------------------------------------------------------------
+# Stage 5 boundary assertions
+# ---------------------------------------------------------------------------
+
+_STAGE5_FILES = [
+    "src/core/domain/failure_prediction_models.py",
+    "src/infrastructure/failure_prediction_repository.py",
+    "src/core/services/failure_prediction_service.py",
+]
+
+def test_stage5_no_llm_api_calls():
+    """Static assertion: Stage 5 source contains no LLM API calls."""
+    forbidden = ["openai", "langchain", "anthropic", "llama", "transformers",
+                 "chatgpt", "gpt-4", "claude", "mistral"]
+    for fname in _STAGE5_FILES:
+        content = _read_stage4_src(fname).lower()
+        for word in forbidden:
+            assert word not in content, (
+                f"Found forbidden LLM call '{word}' in Stage 5 file: {fname}"
+            )
+
+def test_stage5_no_stage6_implementation():
+    """Stage 5 source must not implement Stage 6 intervention logic."""
+    forbidden_stage6 = [
+        "revenue_at_risk",
+        "expected_saved_gmv",
+        "intervention",
+        "protected_gmv",
+        "counterfactual",
+        "recommended_action",
+    ]
+    for fname in _STAGE5_FILES:
+        content = _read_stage4_src(fname).lower()
+        for word in forbidden_stage6:
+            assert word not in content, (
+                f"Found Stage 6 leakage '{word}' in Stage 5 file: {fname}"
+            )
