@@ -9,7 +9,7 @@ from src.core.services.failure_prediction_service import FailurePredictionServic
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
-from src.core.ml.model import DeterministicBaselineModel
+from src.core.ml.model import get_production_model
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
@@ -51,7 +51,7 @@ async def test_temporal_eligibility_late_event(db_session: AsyncSession):
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = DeterministicBaselineModel()
+    model = get_production_model()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_temporal_1"
     
@@ -90,7 +90,7 @@ async def test_temporal_label_lookup_excludes_future_horizon(db_session: AsyncSe
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = DeterministicBaselineModel()
+    model = get_production_model()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_temporal_2"
     

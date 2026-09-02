@@ -17,37 +17,9 @@ from sqlalchemy import text
 from src.infrastructure.models import PaymentEventModel
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
-from src.core.ml.model import FailurePredictionModel
+from src.core.ml.model import FailurePredictionModel, SyntheticLogisticRegressionModel
 
 logger = logging.getLogger(__name__)
-
-class SyntheticLogisticRegressionModel(FailurePredictionModel):
-    def __init__(self, model, feature_names, encoders):
-        self.model = model
-        self.feature_names = feature_names
-        self.encoders = encoders
-        self.model_name = "SyntheticLogisticRegressionModel"
-        self.model_version = "synthetic-development-v1"
-        self._feature_schema_version = "v1.0.0-synthetic"
-
-    def predict(self, feature_vector: dict) -> float:
-        row = []
-        for feature in self.feature_names:
-            val = feature_vector.get(feature)
-            # Categorical encoding fallback
-            if feature in self.encoders:
-                encoded = self.encoders[feature].get(val, 0)
-                row.append(encoded)
-            else:
-                row.append(float(val) if val is not None else 0.0)
-                
-        X = np.array([row])
-        # Logistic Regression predict_proba returns [prob_0, prob_1]
-        prob = self.model.predict_proba(X)[0][1]
-        return float(prob)
-
-    def get_feature_schema_version(self) -> str:
-        return self._feature_schema_version
 
 
 class Stage5PipelineValidator:

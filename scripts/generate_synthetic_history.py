@@ -15,7 +15,7 @@ DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def generate_dataset(engine_url=DATABASE_URL, num_days=21, events_per_day=500):
+async def generate_dataset(engine_url=DATABASE_URL, num_days=21, events_per_day=300):
     """
     Generates a deterministic synthetic dataset for pipeline validation.
     DO NOT USE FOR EMPIRICAL TRAINING.
@@ -24,6 +24,10 @@ async def generate_dataset(engine_url=DATABASE_URL, num_days=21, events_per_day=
     random.seed(42) # Deterministic seeded generation
 
     engine = create_async_engine(engine_url, echo=False)
+    
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        
     Session = async_sessionmaker(bind=engine, expire_on_commit=False)
     
     # Establish time bounds - fix the end date so it is deterministic across tests

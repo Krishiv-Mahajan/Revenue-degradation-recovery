@@ -9,7 +9,7 @@ from src.core.services.failure_prediction_service import FailurePredictionServic
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
-from src.core.ml.model import DeterministicBaselineModel
+from src.core.ml.model import get_production_model
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
@@ -48,7 +48,7 @@ async def test_lifecycle_authorized_to_failed(db_session: AsyncSession):
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = DeterministicBaselineModel()
+    model = get_production_model()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_A"
     
@@ -78,7 +78,7 @@ async def test_lifecycle_authorized_to_captured(db_session: AsyncSession):
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = DeterministicBaselineModel()
+    model = get_production_model()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_B"
     
@@ -99,7 +99,7 @@ async def test_future_terminal_information_leak(db_session: AsyncSession):
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = DeterministicBaselineModel()
+    model = get_production_model()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_E"
     
@@ -122,7 +122,7 @@ async def test_ineligible_prior_terminal_event(db_session: AsyncSession):
     repo = FeatureReconstructionRepository(db_session)
     feat_svc = FeatureReconstructionService(repo)
     pred_repo = FailurePredictionRepository(db_session)
-    model = DeterministicBaselineModel()
+    model = get_production_model()
     svc = FailurePredictionService(db_session, feat_svc, pred_repo, model)
     payment_id = "pay_F"
     
