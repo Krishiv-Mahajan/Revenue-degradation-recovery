@@ -16,6 +16,7 @@ asyncpg = "*"
 python-dotenv = "^1.0.0"
 psycopg2-binary = "^2.9.9"
 greenlet = "*"
+scikit-learn = "*"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.3"
