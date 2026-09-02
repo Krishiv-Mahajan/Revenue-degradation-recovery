@@ -31,9 +31,10 @@ The repository development is strictly versioned by Git checkpoints.
 - **Stage 3 (`ed8ea3f`)**: Degradation detection.
 - **Stage 4 (`c9f1e2d`)**: Root cause analysis (RCA).
 - **Stage 5 (`d91953e`)**: Failure prediction.
-- **Stage 6**: Intervention decisioning.
+- **Stage 6 (`f5965c3`)**: Intervention decisioning.
+- **Stage 7**: Intervention execution + outcome observation.
 
-The current repository should be treated as **Stage 6 complete and frozen** unless explicitly instructed otherwise.
+The current repository should be treated as **Stage 7 complete and frozen** unless explicitly instructed otherwise.
 
 ## Architecture & Implementation History
 
@@ -118,10 +119,38 @@ Stage 6 consumes outputs from Stages 3, 4, and 5 and deterministically decides a
 - **Prohibitions:**
   Zero intervention execution, zero external payment provider API calls, zero outcome observation, zero `protected_gmv` calculation, zero counterfactual attribution, zero LLMs, and zero dynamic route discovery.
 
+### Stage 7 — Intervention Execution + Outcome Observation (Frozen)
+
+Stage 7 operationalizes Stage 6 `ACT` decisions without compromising safety, idempotency, or temporal boundaries:
+
+**Important Invariants & Decisions:**
+- **Decoupled Lifecycle Phases:**
+  - **Phase 7A: Execution Engine**: `InterventionExecutionService` validates `ACT` verdict, creates deterministic `InterventionCommand` (UUID5 derived from `decision_id`), evaluates pre-execution information barriers, atomically claims the command (`PENDING → EXECUTING`), dispatches via `InterventionExecutor` protocol, and records append-only `ExecutionAttempt` records.
+  - **Phase 7B: Outcome Observation**: `PaymentOutcomeObservationService` independently queries Stage 1 canonical payment events strictly as-of an evaluation boundary `as_of_timestamp` to record append-only `PaymentOutcomeObservation` (`CAPTURED`, `FAILED`, `UNKNOWN_IN_FLIGHT`).
+- **Command Mutability & Record Semantics:**
+  - Command identity and payload are immutable; `command_status`, `status_reason`, and `updated_at` are authoritative mutable lifecycle fields.
+  - `intervention_execution_attempts` and `payment_outcome_observations` tables are append-only.
+- **Execution Result ≠ Payment Outcome:**
+  - Execution success means ONLY that the intervention mechanism executed without error (e.g. gateway switch request acknowledged). It does NOT mean the payment was captured.
+  - Payment outcome is factually observed from Stage 1 canonical events, never inferred from execution status.
+- **Strict State Machine Semantics:**
+  - `PENDING → NOT_NEEDED`: Allowed ONLY when a terminal payment event (`payment.captured` or `payment.failed`) is ingested before claim/dispatch/executor invocation.
+  - **No `EXECUTING → NOT_NEEDED`**: Once execution starts, the attempt is factual. If a payment becomes terminal in flight, the attempt status is preserved (`SUCCEEDED` or `FAILED`), and payment outcome is separately observed.
+  - **Timeout vs. Expiry**: `EXPIRED` means the command never started execution before its deadline (`now >= expires_at`). In-flight executor timeouts transition the command to `FAILED` with `status_reason="EXECUTOR_TIMEOUT"` and attempt status `TIMEOUT`. Never converted to `EXPIRED`.
+- **Temporal Correctness & Information Barriers:**
+  - Correctness is governed by information barriers (`ingested_at <= as_of_timestamp`), not by an unconditional universal timeline theorem.
+  - Replay and reconciliation can declare older `as_of_timestamp` boundaries.
+- **Stage 1 Canonical Semantics & Conflict Handling:**
+  - Derives primary terminal reference event using canonical ingestion order (`ingested_at.asc()`, consistent with Stage 5).
+  - Preserves all conflicting source facts in `observation_audit_payload` with `conflict_detected = True`.
+- **Prohibitions:**
+  - Zero live external provider calls in core domain (all adapters conform to `InterventionExecutor`).
+  - Zero LLMs.
+  - Zero Stage 8 counterfactual attribution, uplift estimation, or `protected_gmv` calculation.
+
 ## Strict Stage Boundary
 
 The following are **NOT IMPLEMENTED YET** and must not be added unless the appropriate stage has been explicitly designed and approved:
-- Stage 7 intervention execution + outcome observation
 - Stage 8 counterfactual attribution / recovered & protected GMV measurement
 - LLM-based reasoning or generative models
 
@@ -129,15 +158,15 @@ Do not "helpfully" implement future stages early.
 
 ## Current State
 
-The repository is currently **Stage 6 complete and frozen**.
+The repository is currently **Stage 7 complete and frozen**.
 
 - **Branch:** `main`
-- **Test Count:** 157 tests passing cleanly.
+- **Test Count:** 187 tests passing cleanly.
 - **Working Tree:** Clean.
 
 ## Next Planned Step
 
-The next task is **Stage 7 — Intervention Execution + Outcome Observation design/review.**
+The next task is **Stage 8 — Counterfactual Attribution + Protected GMV design/review.**
 
 ## AI Operating Rules
 

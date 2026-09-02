@@ -362,3 +362,104 @@ class InterventionDecisionModel(Base):
         ),
     )
 
+
+# ---------------------------------------------------------------------------
+# Stage 7 — Intervention Execution & Outcome Observation
+# ---------------------------------------------------------------------------
+
+class InterventionCommandModel(Base):
+    """
+    Authoritative lifecycle model for an intervention command.
+    Identity and payload are immutable; command_status, status_reason,
+    and updated_at are the authoritative mutable lifecycle fields.
+    """
+    __tablename__ = "intervention_commands"
+
+    command_id = Column(UUID(as_uuid=True), primary_key=True)
+    decision_id = Column(UUID(as_uuid=True), nullable=False, unique=True)
+    payment_attempt_id = Column(String(255), nullable=False)
+    decision_version = Column(Integer, nullable=False)
+    route_key = Column(String(50), nullable=False)
+    policy_id = Column(String(50), nullable=False)
+    policy_version = Column(String(50), nullable=False)
+    command_status = Column(String(20), nullable=False)  # PENDING, EXECUTING, SUCCEEDED, FAILED, EXPIRED, NOT_NEEDED
+    status_reason = Column(String(255), nullable=True)
+    idempotency_key = Column(String(100), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "payment_attempt_id",
+            "decision_version",
+            name="uq_cmd_attempt_version",
+        ),
+    )
+
+
+class InterventionExecutionAttemptModel(Base):
+    """
+    Append-only factual record of an intervention dispatch attempt.
+    """
+    __tablename__ = "intervention_execution_attempts"
+
+    attempt_id = Column(UUID(as_uuid=True), primary_key=True)
+    command_id = Column(UUID(as_uuid=True), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+    duration_ms = Column(Integer, nullable=False)
+    execution_status = Column(String(20), nullable=False)  # SUCCESS, FAILURE, TIMEOUT
+    executor_name = Column(String(100), nullable=False)
+    is_simulation = Column(Boolean, nullable=False)
+    provider_action_type = Column(String(50), nullable=False)
+    provider_response_code = Column(String(50), nullable=True)
+    provider_response_payload = Column(JSON, nullable=False)
+    error_message = Column(String(1024), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "command_id",
+            "attempt_number",
+            name="uq_exec_attempt_number",
+        ),
+    )
+
+
+class PaymentOutcomeObservationModel(Base):
+    """
+    Append-only factual observation of the payment attempt's canonical lifecycle outcome.
+    Never inferred from execution success.
+    """
+    __tablename__ = "payment_outcome_observations"
+
+    observation_id = Column(UUID(as_uuid=True), primary_key=True)
+    command_id = Column(UUID(as_uuid=True), nullable=False)
+    payment_attempt_id = Column(String(255), nullable=False)
+    observation_version = Column(Integer, nullable=False)
+    observed_at = Column(DateTime(timezone=True), nullable=False)
+    as_of_timestamp = Column(DateTime(timezone=True), nullable=False)
+    payment_outcome = Column(String(30), nullable=False)  # CAPTURED, FAILED, UNKNOWN_IN_FLIGHT
+    terminal_event_id = Column(UUID(as_uuid=True), nullable=True)
+    terminal_event_type = Column(String(100), nullable=True)
+    terminal_event_timestamp = Column(DateTime(timezone=True), nullable=True)
+    time_to_outcome_ms = Column(Integer, nullable=True)
+    observation_audit_payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "command_id",
+            "observation_version",
+            name="uq_outcome_observation_version",
+        ),
+        UniqueConstraint(
+            "command_id",
+            "as_of_timestamp",
+            name="uq_outcome_observation_temporal",
+        ),
+    )
+
+
