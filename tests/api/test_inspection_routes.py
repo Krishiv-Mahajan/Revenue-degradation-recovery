@@ -1,3 +1,5 @@
+import uuid
+from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
@@ -5,7 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from src.main import app
 from src.api.dependencies import get_db_session
 
-from src.infrastructure.models import Base
+from src.infrastructure.models import Base, PaymentEventModel
 
 DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
@@ -422,5 +424,249 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client):
     assert d2["intervention_context"]["monitor_decisions"] == 1
     assert d2["intervention_context"]["primary_selected_route"] is None
     assert d2["intervention_context"]["window_protected_gmv_minor_units"] == 25000
+
+@pytest.mark.asyncio
+async def test_recovery_workspace_endpoint(client):
+    """
+    Verifies that GET /api/v1/recovery returns summary statistics and
+    dense recovery ledger records with valid structure.
+    """
+    response = await client.get("/api/v1/recovery?limit=10")
+    assert response.status_code == 200
+    data = response.json()
+    assert "summary" in data
+    assert "ledger" in data
+    assert "total_count" in data
+    summary = data["summary"]
+    assert "interventions_dispatched" in summary
+    assert "act_count" in summary
+    assert "monitor_count" in summary
+    assert "successful_captures" in summary
+    assert "failed_outcomes" in summary
+    assert "total_protected_gmv_minor_units" in summary
+    assert "attribution_count" in summary
+    assert "avg_attribution_confidence" in summary
+
+    # Test decision_type filter
+    act_resp = await client.get("/api/v1/recovery?decision_type=ACT&limit=5")
+    assert act_resp.status_code == 200
+    act_data = act_resp.json()
+    for row in act_data["ledger"]:
+        assert row["decision_type"] == "ACT"
+
+@pytest.mark.asyncio
+async def test_payments_list_endpoint(client):
+    """
+    Verifies that GET /api/v1/payments returns searchable/filterable payments list.
+    """
+    response = await client.get("/api/v1/payments?limit=10")
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert "total_count" in data
+    assert isinstance(data["items"], list)
+
+    # Test filtering by filter_type
+    intervened_resp = await client.get("/api/v1/payments?filter_type=INTERVENED&limit=5")
+    assert intervened_resp.status_code == 200
+    for item in intervened_resp.json()["items"]:
+        assert item["is_intervened"] is True
+
+@pytest.mark.asyncio
+async def test_attributions_enriched_endpoint(client):
+    """
+    Verifies that GET /api/v1/attributions includes decision_id,
+    counterfactual_outcome, and confidence_components.
+    """
+    response = await client.get("/api/v1/attributions?limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    if data:
+        attr = data[0]
+        assert "decision_id" in attr
+        assert "counterfactual_outcome" in attr
+        assert "confidence_components" in attr
+        assert "attribution_confidence" in attr
+
+
+@pytest.mark.asyncio
+async def test_payment_id_roundtrip_between_payments_and_timeline(client):
+    """
+    Regression test:
+    1. Create/seed a valid payment.
+    2. Fetch it through GET /api/v1/payments.
+    3. Extract the exact returned payment_id.
+    4. Call GET /api/v1/timeline/{returned_payment_id}.
+    5. Assert HTTP 200.
+    6. Assert the returned timeline belongs to that exact payment.
+    7. Assert the payment_id in the timeline matches the payments endpoint identifier.
+    """
+    test_pid = f"pay_roundtrip_{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+
+    engine = create_async_engine(DATABASE_URL, echo=False)
+    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with Session() as session:
+        auth_evt = PaymentEventModel(
+            event_id=uuid.uuid4(),
+            source_system="test",
+            source_event_id=f"evt_auth_{uuid.uuid4().hex[:8]}",
+            payment_id=test_pid,
+            timestamp=now,
+            event_type="payment.authorized",
+            currency="INR",
+            amount_minor_units=45000,
+            payment_status="authorized",
+            payment_method="UPI",
+            bank="HDFC",
+            ingested_at=now,
+        )
+        term_evt = PaymentEventModel(
+            event_id=uuid.uuid4(),
+            source_system="test",
+            source_event_id=f"evt_term_{uuid.uuid4().hex[:8]}",
+            payment_id=test_pid,
+            timestamp=now,
+            event_type="payment.captured",
+            currency="INR",
+            amount_minor_units=45000,
+            payment_status="captured",
+            payment_method="UPI",
+            bank="HDFC",
+            ingested_at=now,
+        )
+        session.add_all([auth_evt, term_evt])
+        await session.commit()
+    await engine.dispose()
+
+    # 2. Fetch it through GET /api/v1/payments
+    payments_resp = await client.get(f"/api/v1/payments?search={test_pid}")
+    assert payments_resp.status_code == 200
+    payments_data = payments_resp.json()
+    assert payments_data["total_count"] >= 1
+    matched = [item for item in payments_data["items"] if item["payment_id"] == test_pid]
+    assert len(matched) == 1
+
+    # 3. Extract the exact returned payment_id
+    returned_payment_id = matched[0]["payment_id"]
+    assert returned_payment_id == test_pid
+
+    # 4. Call GET /api/v1/timeline/{returned_payment_id}
+    timeline_resp = await client.get(f"/api/v1/timeline/{returned_payment_id}")
+
+    # 5. Assert HTTP 200
+    assert timeline_resp.status_code == 200
+    timeline_data = timeline_resp.json()
+
+    # 6. Assert the returned timeline belongs to that exact payment
+    assert len(timeline_data["events"]) == 2
+    assert timeline_data["payment_info"]["amount_minor_units"] == 45000
+    assert timeline_data["payment_info"]["payment_method"] == "UPI"
+    assert timeline_data["payment_info"]["terminal_status"] == "captured"
+
+    # 7. Assert the payment_id in the timeline matches the payments endpoint identifier
+    assert timeline_data["payment_id"] == returned_payment_id
+    assert timeline_data["payment_id"] == test_pid
+
+
+@pytest.mark.asyncio
+async def test_nonexistent_payment_returns_404(client):
+    """
+    Verifies that an actually nonexistent payment returns HTTP 404 with standard detail.
+    """
+    non_existent_pid = "pay_definitely_nonexistent_999999"
+    resp = await client.get(f"/api/v1/timeline/{non_existent_pid}")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Payment {non_existent_pid} not found"
+
+
+@pytest.mark.asyncio
+async def test_captured_outcome_without_stage8_attribution_is_not_attributed(client):
+    """
+    Audit 3 Regression test:
+    Proves that a successful CAPTURED outcome does NOT automatically imply attribution.
+    A payment is ATTRIBUTED only when the canonical Stage 8 attribution record exists
+    and has attribution_status == 'ATTRIBUTED'.
+    """
+    test_pid = f"pay_natural_capture_{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+
+    engine = create_async_engine(DATABASE_URL, echo=False)
+    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with Session() as session:
+        auth_evt = PaymentEventModel(
+            event_id=uuid.uuid4(),
+            source_system="test",
+            source_event_id=f"evt_auth_{uuid.uuid4().hex[:8]}",
+            payment_id=test_pid,
+            timestamp=now,
+            event_type="payment.authorized",
+            currency="INR",
+            amount_minor_units=60000,
+            payment_status="authorized",
+            payment_method="UPI",
+            bank="HDFC",
+            ingested_at=now,
+        )
+        cap_evt = PaymentEventModel(
+            event_id=uuid.uuid4(),
+            source_system="test",
+            source_event_id=f"evt_cap_{uuid.uuid4().hex[:8]}",
+            payment_id=test_pid,
+            timestamp=now,
+            event_type="payment.captured",
+            currency="INR",
+            amount_minor_units=60000,
+            payment_status="captured",
+            payment_method="UPI",
+            bank="HDFC",
+            ingested_at=now,
+        )
+        session.add_all([auth_evt, cap_evt])
+        await session.commit()
+    await engine.dispose()
+
+    # Query Payments list
+    payments_resp = await client.get(f"/api/v1/payments?search={test_pid}")
+    assert payments_resp.status_code == 200
+    p_data = payments_resp.json()
+    item = next(it for it in p_data["items"] if it["payment_id"] == test_pid)
+
+    assert item["payment_status"] == "captured"
+    assert item["is_intervened"] is False
+    assert item["is_attributed"] is False
+    assert item["attributed_protected_gmv_minor_units"] == 0
+    assert item["attribution_confidence"] is None
+
+    # Query Timeline
+    timeline_resp = await client.get(f"/api/v1/timeline/{test_pid}")
+    assert timeline_resp.status_code == 200
+    t_data = timeline_resp.json()
+    assert t_data["payment_info"]["terminal_status"] == "captured"
+    assert t_data["decision"] is None
+    assert t_data["command"] is None
+    assert t_data["execution"] is None
+    assert t_data["attribution"] is None
+
+
+@pytest.mark.asyncio
+async def test_stage8_counterfactual_semantics_equivalence(client):
+    """
+    Audit 2 Regression test:
+    Proves that counterfactual_outcome exposes the canonical Stage 8 attribution result
+    directly without independent threshold re-evaluation in the API layer.
+    """
+    attr_resp = await client.get("/api/v1/attributions?limit=10")
+    assert attr_resp.status_code == 200
+    attrs = attr_resp.json()
+    for a in attrs:
+        if a["status"] == "ATTRIBUTED":
+            assert a["counterfactual_outcome"] == "WOULD_HAVE_FAILED"
+            assert a["attributed_protected_gmv_minor_units"] > 0
+            assert a["attribution_confidence"] > 0
+        else:
+            assert a["counterfactual_outcome"] == a["status"]
+
 
 

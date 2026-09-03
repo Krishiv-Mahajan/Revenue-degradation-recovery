@@ -79,6 +79,57 @@ export async function getRCA(episodeId) {
 }
 
 /**
+ * Queries recovery operations telemetry and dense ledger from /api/v1/recovery.
+ * @param {string|null} decisionType - Filter by ACT, MONITOR, or null for all
+ * @param {number} limit
+ * @param {number} offset
+ */
+export async function getRecovery(decisionType = null, limit = 50, offset = 0) {
+  let url = `/api/v1/recovery?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`;
+  if (decisionType) {
+    url += `&decision_type=${encodeURIComponent(decisionType)}`;
+  }
+  return await fetchJSON(url);
+}
+
+/**
+ * Queries recent Stage 8 counterfactual attributions from /api/v1/attributions.
+ * @param {number} limit
+ */
+export async function getAttributions(limit = 50) {
+  const boundedLimit = Math.max(1, Math.min(200, limit));
+  return await fetchJSON(`/api/v1/attributions?limit=${boundedLimit}`);
+}
+
+/**
+ * Queries payments list for the Payment Audit Inspector from /api/v1/payments.
+ * @param {Object} options - { search, filterType, status, limit, offset }
+ */
+export async function getPayments(options = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) params.set('limit', options.limit);
+  if (options.offset) params.set('offset', options.offset);
+  if (options.search) params.set('search', options.search.trim());
+  if (options.filterType) params.set('filter_type', options.filterType);
+  if (options.status) params.set('status', options.status);
+  
+  const queryStr = params.toString();
+  return await fetchJSON(`/api/v1/payments${queryStr ? '?' + queryStr : ''}`);
+}
+
+/**
+ * Queries the end-to-end payment audit timeline from /api/v1/timeline/{payment_id}.
+ * @param {string} paymentId
+ */
+export async function getPaymentTimeline(paymentId) {
+  if (!paymentId) {
+    throw new Error('Payment ID is required');
+  }
+  const cleanId = String(paymentId).trim();
+  return await fetchJSON(`/api/v1/timeline/${encodeURIComponent(cleanId)}`);
+}
+
+/**
  * Formats integer minor units to INR currency string.
  * Example: 1041823 -> "₹10,418.23"
  * @param {number|null|undefined} minorUnits 

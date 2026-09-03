@@ -42,11 +42,9 @@
       </button>
       <button class="nav-tab" data-view="recovery" type="button">
         Recovery
-        <span class="tab-badge">Phase 7C</span>
       </button>
       <button class="nav-tab" data-view="payments" type="button">
         Payments
-        <span class="tab-badge">Phase 7C</span>
       </button>
     </nav>
 
@@ -455,25 +453,346 @@
       </div>
     </main>
 
-    <!-- Placeholder View: Recovery (Phase 7C) -->
+    <!-- View: Recovery (Phase 7C) -->
     <div id="view-recovery" class="view-container">
-      <div class="placeholder-view">
-        <div class="placeholder-icon" aria-hidden="true">⚡</div>
-        <h2 class="placeholder-title">Intervention &amp; Recovery Ledger</h2>
-        <p class="placeholder-text">
-          Live feed of automated recovery commands, route selections, observed post-treatment outcomes, and counterfactual protected GMV records will be implemented in Phase 7C.
-        </p>
+      <div class="recovery-workspace">
+        
+        <!-- Recovery Workspace Header -->
+        <header class="workspace-header">
+          <div>
+            <h2 class="workspace-title">Recovery Operations &amp; Revenue Protection</h2>
+            <p class="workspace-subtitle">
+              Automated intervention dispatch, observed transaction outcomes, and Stage 8 counterfactual attribution ledger.
+            </p>
+          </div>
+          <div class="header-actions">
+            <button id="refresh-recovery-btn" class="btn-refresh" type="button" title="Refresh Recovery Data">
+              <span class="refresh-icon" aria-hidden="true">↻</span>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </header>
+
+        <!-- Recovery KPI Cards (8 items) -->
+        <div class="recovery-kpi-grid">
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">Dispatched Interventions</span>
+            <div id="rec-stat-dispatched" class="kpi-value">—</div>
+            <span class="kpi-sub">Stage 7 executed commands</span>
+          </div>
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">ACT Decisions</span>
+            <div id="rec-stat-act" class="kpi-value accent-act">—</div>
+            <span class="kpi-sub">High failure risk (P &ge; 0.70)</span>
+          </div>
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">MONITOR Decisions</span>
+            <div id="rec-stat-monitor" class="kpi-value">—</div>
+            <span class="kpi-sub">Standard / low-risk routing</span>
+          </div>
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">Rescued Captures</span>
+            <div id="rec-stat-captures" class="kpi-value accent-success">—</div>
+            <span class="kpi-sub">Post-intervention captures</span>
+          </div>
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">Terminal Failures</span>
+            <div id="rec-stat-failed" class="kpi-value accent-fail">—</div>
+            <span class="kpi-sub">Unrecovered attempts</span>
+          </div>
+          <div class="recovery-kpi-card highlighted">
+            <span class="kpi-label">Protected GMV</span>
+            <div id="rec-stat-gmv" class="kpi-value accent-gmv">—</div>
+            <span class="kpi-sub">Attributed revenue</span>
+          </div>
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">Attributed Rescues</span>
+            <div id="rec-stat-attributions" class="kpi-value">—</div>
+            <span class="kpi-sub">Stage 8 verified rescues</span>
+          </div>
+          <div class="recovery-kpi-card">
+            <span class="kpi-label">Attribution Confidence</span>
+            <div id="rec-stat-confidence" class="kpi-value">—</div>
+            <span class="kpi-sub">Mean attribution confidence</span>
+          </div>
+        </div>
+
+        <!-- Section 1: Recovery Operations Ledger -->
+        <section class="recovery-section" aria-label="Recovery Operations Ledger">
+          <div class="section-header-bar">
+            <div>
+              <h3 class="section-heading">Operational Recovery Ledger</h3>
+              <p class="section-subheading">
+                Granular ledger mapping intervention decisions, route executions, and verified post-treatment outcomes.
+              </p>
+            </div>
+            <div class="filter-btn-group" role="group" aria-label="Filter ledger by verdict">
+              <button id="filter-rec-all" class="filter-btn active" data-filter="" type="button">All Decisions</button>
+              <button id="filter-rec-act" class="filter-btn" data-filter="ACT" type="button">ACT Only</button>
+              <button id="filter-rec-monitor" class="filter-btn" data-filter="MONITOR" type="button">MONITOR Only</button>
+            </div>
+          </div>
+
+          <!-- Loading & Error States -->
+          <div id="rec-ledger-loading" class="panel-loading" style="display: none;">
+            <div class="spinner" aria-hidden="true"></div>
+            <span>Loading recovery ledger...</span>
+          </div>
+          <div id="rec-ledger-error" class="panel-error-banner" style="display: none;">
+            <span id="rec-ledger-error-msg"></span>
+          </div>
+
+          <div class="table-responsive">
+            <table id="recovery-ledger-table" class="data-table dense-table">
+              <thead>
+                <tr>
+                  <th>Decision / Time</th>
+                  <th>Payment ID</th>
+                  <th>Episode ID</th>
+                  <th>Route</th>
+                  <th>Verdict</th>
+                  <th>Execution</th>
+                  <th>Outcome</th>
+                  <th class="text-right">Protected GMV</th>
+                  <th>Attribution</th>
+                  <th class="text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody id="recovery-ledger-body">
+                <tr>
+                  <td colspan="10" class="empty-cell">Loading recovery ledger...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-footer-bar">
+            <span id="recovery-ledger-count" class="table-count-label">—</span>
+          </div>
+        </section>
+
+        <!-- Section 2: Counterfactual Attribution Ledger (Financial Proof Surface) -->
+        <section class="recovery-section attribution-proof-section" aria-label="Counterfactual Attribution Ledger">
+          <div class="section-header-bar">
+            <div>
+              <h3 class="section-heading">Counterfactual Attribution Ledger (Financial Proof Surface)</h3>
+              <p class="section-subheading">
+                Stage 8 causal attribution records proving protected GMV. Model: Observed: CAPTURED vs Counterfactual: WOULD_HAVE_FAILED.
+              </p>
+            </div>
+          </div>
+
+          <!-- Loading & Error States -->
+          <div id="rec-attr-loading" class="panel-loading" style="display: none;">
+            <div class="spinner" aria-hidden="true"></div>
+            <span>Loading counterfactual attributions...</span>
+          </div>
+          <div id="rec-attr-error" class="panel-error-banner" style="display: none;">
+            <span id="rec-attr-error-msg"></span>
+          </div>
+
+          <div class="table-responsive">
+            <table id="attribution-ledger-table" class="data-table dense-table">
+              <thead>
+                <tr>
+                  <th>Attribution ID</th>
+                  <th>Payment ID</th>
+                  <th>Decision ID</th>
+                  <th>Observed Outcome</th>
+                  <th>Counterfactual</th>
+                  <th class="text-right">Protected GMV</th>
+                  <th>Confidence</th>
+                  <th>C_pred</th>
+                  <th>C_diag</th>
+                  <th>C_time</th>
+                  <th>Attributed At</th>
+                </tr>
+              </thead>
+              <tbody id="attribution-ledger-body">
+                <tr>
+                  <td colspan="11" class="empty-cell">Loading attribution ledger...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
       </div>
     </div>
 
-    <!-- Placeholder View: Payments (Phase 7C) -->
+    <!-- View: Payments (Phase 7C) -->
     <div id="view-payments" class="view-container">
-      <div class="placeholder-view">
-        <div class="placeholder-icon" aria-hidden="true">📜</div>
-        <h2 class="placeholder-title">Payment Audit Inspector</h2>
-        <p class="placeholder-text">
-          End-to-end chronological lifecycle tracing from Stage 1 ingestion through Stage 8 counterfactual attribution for individual payments will be implemented in Phase 7C.
-        </p>
+      <div class="payments-workspace">
+
+        <!-- Payments Workspace Header -->
+        <header class="workspace-header">
+          <div>
+            <h2 class="workspace-title">Payment Lifecycle Audit Inspector</h2>
+            <p class="workspace-subtitle">
+              End-to-end payment auditability tracing transactions from Stage 1 authorization through Stage 8 revenue attribution.
+            </p>
+          </div>
+          <div class="header-actions">
+            <button id="refresh-payments-btn" class="btn-refresh" type="button" title="Refresh Payments Data">
+              <span class="refresh-icon" aria-hidden="true">↻</span>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </header>
+
+        <!-- Search and Filter Bar -->
+        <div class="payments-filter-bar">
+          <div class="search-box">
+            <span class="search-icon" aria-hidden="true">🔍</span>
+            <input id="payment-search-input" type="search" placeholder="Search by payment ID (e.g. pay_demo_...)" autocomplete="off">
+          </div>
+          <div class="filter-controls">
+            <label class="filter-label" for="payment-filter-select">Lifecycle:</label>
+            <select id="payment-filter-select" class="filter-select">
+              <option value="">All Payments</option>
+              <option value="INTERVENED">Intervened Only (ACT/MONITOR)</option>
+              <option value="ATTRIBUTED">Attributed Protected GMV</option>
+            </select>
+
+            <label class="filter-label" for="payment-status-select">Status:</label>
+            <select id="payment-status-select" class="filter-select">
+              <option value="">All Statuses</option>
+              <option value="captured">Captured</option>
+              <option value="failed">Failed</option>
+              <option value="authorized">Authorized</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Payments Split Layout: Table + Audit Drawer -->
+        <div class="payments-split-layout">
+          
+          <!-- Payments List Panel -->
+          <div class="payments-list-panel">
+            <div id="payments-loading" class="panel-loading" style="display: none;">
+              <div class="spinner" aria-hidden="true"></div>
+              <span>Loading payments...</span>
+            </div>
+            <div id="payments-error" class="panel-error-banner" style="display: none;">
+              <span id="payments-error-msg"></span>
+            </div>
+
+            <div class="table-responsive">
+              <table id="payments-table" class="data-table">
+                <thead>
+                  <tr>
+                    <th>Payment ID</th>
+                    <th>Ingested At</th>
+                    <th class="text-right">Amount</th>
+                    <th>Method / Bank</th>
+                    <th>Status</th>
+                    <th>Decision</th>
+                    <th class="text-right">Protected GMV</th>
+                    <th>Attribution</th>
+                    <th class="text-center">Audit</th>
+                  </tr>
+                </thead>
+                <tbody id="payments-table-body">
+                  <tr>
+                    <td colspan="9" class="empty-cell">Loading payments...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-footer-bar">
+              <span id="payments-pagination-info" class="table-count-label">—</span>
+            </div>
+          </div>
+
+          <!-- Payment Audit Inspector Drawer/Panel -->
+          <aside id="payment-audit-drawer" class="payment-audit-drawer" style="display: none;">
+            <div class="drawer-header">
+              <div class="drawer-header-left">
+                <span class="drawer-badge">AUDIT TRACE</span>
+                <h3 id="audit-payment-id" class="drawer-payment-title">—</h3>
+              </div>
+              <button id="close-audit-drawer-btn" class="btn-close-drawer" type="button" aria-label="Close Drawer">&times;</button>
+            </div>
+
+            <!-- Drawer Body -->
+            <div class="drawer-content">
+              
+              <div id="audit-drawer-loading" class="panel-loading" style="display: none;">
+                <div class="spinner" aria-hidden="true"></div>
+                <span>Loading timeline trace...</span>
+              </div>
+              <div id="audit-drawer-error" class="panel-error-banner" style="display: none;">
+                <span id="audit-drawer-error-msg"></span>
+              </div>
+
+              <div id="audit-drawer-details">
+                <!-- Section A: Payment Facts -->
+                <div class="drawer-section">
+                  <span class="drawer-section-title">Core Payment Facts</span>
+                  <div class="drawer-facts-grid">
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Gross Amount</span>
+                      <span id="audit-fact-amount" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Method &amp; Bank</span>
+                      <span id="audit-fact-method" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Terminal Outcome</span>
+                      <span id="audit-fact-status" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Ingested Time</span>
+                      <span id="audit-fact-time" class="drawer-fact-val">—</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Section B: Recovery Telemetry Association -->
+                <div class="drawer-section">
+                  <span class="drawer-section-title">Recovery Association &amp; Governance</span>
+                  <div class="drawer-facts-grid">
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Degradation Episode</span>
+                      <span id="audit-rec-episode" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Failure Probability</span>
+                      <span id="audit-rec-prob" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Decision Verdict</span>
+                      <span id="audit-rec-decision" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Recovery Route</span>
+                      <span id="audit-rec-route" class="drawer-fact-val">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Protected GMV</span>
+                      <span id="audit-rec-gmv" class="drawer-fact-val accent-gmv">—</span>
+                    </div>
+                    <div class="drawer-fact-item">
+                      <span class="drawer-fact-label">Attribution Confidence</span>
+                      <span id="audit-rec-confidence" class="drawer-fact-val">—</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Section C: Chronological Lifecycle Trace Stepper -->
+                <div class="drawer-section">
+                  <span class="drawer-section-title">Chronological Lifecycle Stepper (Stages 1–8)</span>
+                  <div id="audit-timeline-stepper" class="audit-stepper">
+                    <!-- Dynamic timeline steps will be injected here -->
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </aside>
+
+        </div>
+
       </div>
     </div>
 
