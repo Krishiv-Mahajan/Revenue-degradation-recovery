@@ -181,6 +181,7 @@ def test_route_eligibility_filtering():
         rca_evidence_strength="STRONG",
         rca_candidate_dimension="PAYMENT_METHOD",
         rca_candidate_value="upi",
+        rca_candidate_matches_payment_segment=True,
         payment_method="upi",
         bank="HDFC",
         is_on_cooldown=False,
@@ -194,6 +195,7 @@ def test_route_eligibility_filtering():
         rca_evidence_strength="STRONG",
         rca_candidate_dimension="PAYMENT_METHOD",
         rca_candidate_value="upi",
+        rca_candidate_matches_payment_segment=True,
         payment_method="upi",
         bank="HDFC",
         is_on_cooldown=True,
@@ -207,6 +209,7 @@ def test_route_eligibility_filtering():
         rca_evidence_strength=None,
         rca_candidate_dimension=None,
         rca_candidate_value=None,
+        rca_candidate_matches_payment_segment=None,
         payment_method="upi",
         bank="HDFC",
         is_on_cooldown=False,
@@ -220,8 +223,108 @@ def test_route_eligibility_filtering():
         rca_evidence_strength="WEAK",
         rca_candidate_dimension="PAYMENT_METHOD",
         rca_candidate_value="upi",
+        rca_candidate_matches_payment_segment=True,
         payment_method="upi",
         bank="HDFC",
         is_on_cooldown=False,
     )
     assert weak is False
+
+
+def test_route_eligibility_strict_segment_matching():
+    # Route that targets BANK and requires diagnosis
+    route_bank = RoutePolicyDefinition(
+        route_key=InterventionRouteKey.DEGRADATION_CIRCUIT_BYPASS,
+        target_dimensions=("BANK",),
+        policy_recovery_rate=Decimal("0.75"),
+        policy_cost_minor_units=500,
+        cooldown_seconds=900,
+        requires_diagnosis=True,
+        requires_strong_rca=True,
+        enabled=True,
+    )
+
+    # 6. BANK diagnosis + matching BANK payment + BANK route -> eligible
+    ok, _ = evaluate_route_eligibility(
+        route=route_bank, rca_classification="SEGMENT_SPECIFIC", rca_evidence_strength="STRONG",
+        rca_candidate_dimension="BANK", rca_candidate_value="HDFC", rca_candidate_matches_payment_segment=True,
+        payment_method="upi", bank="HDFC", is_on_cooldown=False
+    )
+    assert ok is True
+
+    # 7. BANK diagnosis + different BANK payment + BANK route -> ineligible
+    bad_val, _ = evaluate_route_eligibility(
+        route=route_bank, rca_classification="SEGMENT_SPECIFIC", rca_evidence_strength="STRONG",
+        rca_candidate_dimension="BANK", rca_candidate_value="HDFC", rca_candidate_matches_payment_segment=False,
+        payment_method="upi", bank="SBI", is_on_cooldown=False
+    )
+    assert bad_val is False
+
+    # 8. PAYMENT_METHOD diagnosis + BANK route -> ineligible (even if payment has a bank)
+    bad_dim, _ = evaluate_route_eligibility(
+        route=route_bank, rca_classification="SEGMENT_SPECIFIC", rca_evidence_strength="STRONG",
+        rca_candidate_dimension="PAYMENT_METHOD", rca_candidate_value="upi", rca_candidate_matches_payment_segment=True,
+        payment_method="upi", bank="HDFC", is_on_cooldown=False
+    )
+    assert bad_dim is False
+
+    # 11. Transaction attributes alone cannot satisfy diagnosis-dependent route eligibility
+    attr_only, _ = evaluate_route_eligibility(
+        route=route_bank, rca_classification="SEGMENT_SPECIFIC", rca_evidence_strength="STRONG",
+        rca_candidate_dimension="WALLET", rca_candidate_value="Paytm", rca_candidate_matches_payment_segment=True,
+        payment_method="upi", bank="HDFC", is_on_cooldown=False
+    )
+    assert attr_only is False
+
+    # Route that targets CURRENCY
+    route_curr = RoutePolicyDefinition(
+        route_key=InterventionRouteKey.DYNAMIC_RETRY_BACKOFF,
+        target_dimensions=("CURRENCY",),
+        policy_recovery_rate=Decimal("0.5"), policy_cost_minor_units=100, cooldown_seconds=100,
+        requires_diagnosis=True, requires_strong_rca=True, enabled=True,
+    )
+    # 9. CURRENCY diagnosis + CURRENCY route -> eligible when payment matches
+    ok_curr, _ = evaluate_route_eligibility(
+        route=route_curr, rca_classification="SEGMENT_SPECIFIC", rca_evidence_strength="STRONG",
+        rca_candidate_dimension="CURRENCY", rca_candidate_value="INR", rca_candidate_matches_payment_segment=True,
+        payment_method=None, bank=None, is_on_cooldown=False
+    )
+    assert ok_curr is True
+
+    # 10. WALLET diagnosis + WALLET route -> eligible when payment matches
+    route_wallet = RoutePolicyDefinition(
+        route_key=InterventionRouteKey.DYNAMIC_RETRY_BACKOFF, target_dimensions=("WALLET",),
+        policy_recovery_rate=Decimal("0.5"), policy_cost_minor_units=100, cooldown_seconds=100,
+        requires_diagnosis=True, requires_strong_rca=True, enabled=True,
+    )
+    ok_wallet, _ = evaluate_route_eligibility(
+        route=route_wallet, rca_classification="SEGMENT_SPECIFIC", rca_evidence_strength="STRONG",
+        rca_candidate_dimension="WALLET", rca_candidate_value="Paytm", rca_candidate_matches_payment_segment=True,
+        payment_method=None, bank=None, is_on_cooldown=False
+    )
+    assert ok_wallet is True
+
+    # 12. SYSTEMIC behavior follows existing route definitions
+    sys_route_global = RoutePolicyDefinition(
+        route_key=InterventionRouteKey.FALLBACK_PAYMENT_LINK, target_dimensions=("GLOBAL",),
+        policy_recovery_rate=Decimal("0.5"), policy_cost_minor_units=100, cooldown_seconds=100,
+        requires_diagnosis=True, requires_strong_rca=False, enabled=True,
+    )
+    sys_ok, _ = evaluate_route_eligibility(
+        route=sys_route_global, rca_classification="SYSTEMIC", rca_evidence_strength=None,
+        rca_candidate_dimension=None, rca_candidate_value=None, rca_candidate_matches_payment_segment=False,
+        payment_method=None, bank=None, is_on_cooldown=False
+    )
+    assert sys_ok is True
+
+    sys_route_bank = RoutePolicyDefinition(
+        route_key=InterventionRouteKey.DEGRADATION_CIRCUIT_BYPASS, target_dimensions=("BANK",),
+        policy_recovery_rate=Decimal("0.5"), policy_cost_minor_units=100, cooldown_seconds=100,
+        requires_diagnosis=True, requires_strong_rca=False, enabled=True,
+    )
+    sys_bad, _ = evaluate_route_eligibility(
+        route=sys_route_bank, rca_classification="SYSTEMIC", rca_evidence_strength=None,
+        rca_candidate_dimension=None, rca_candidate_value=None, rca_candidate_matches_payment_segment=False,
+        payment_method=None, bank="HDFC", is_on_cooldown=False
+    )
+    assert sys_bad is False

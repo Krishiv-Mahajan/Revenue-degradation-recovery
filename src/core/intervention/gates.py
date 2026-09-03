@@ -119,6 +119,7 @@ def evaluate_route_eligibility(
     rca_evidence_strength: Optional[str],
     rca_candidate_dimension: Optional[str],
     rca_candidate_value: Optional[str],
+    rca_candidate_matches_payment_segment: Optional[bool],
     payment_method: Optional[str],
     bank: Optional[str],
     is_on_cooldown: bool,
@@ -142,12 +143,25 @@ def evaluate_route_eligibility(
 
     # Route structural applicability
     is_applicable = False
-    if "GLOBAL" in route.target_dimensions:
-        is_applicable = True
-    elif "BANK" in route.target_dimensions and bank:
-        is_applicable = True
-    elif "PAYMENT_METHOD" in route.target_dimensions and payment_method:
-        is_applicable = True
+    
+    if route.requires_diagnosis:
+        if rca_classification == "SEGMENT_SPECIFIC":
+            if not rca_candidate_matches_payment_segment:
+                return False, "Transaction does not match diagnosed segment"
+            if rca_candidate_dimension and rca_candidate_dimension not in route.target_dimensions:
+                return False, f"Diagnosed dimension {rca_candidate_dimension} not supported by route {route.target_dimensions}"
+            is_applicable = True
+        elif rca_classification == "SYSTEMIC":
+            if "GLOBAL" not in route.target_dimensions:
+                return False, f"SYSTEMIC episode requires a GLOBAL route, but route targets {route.target_dimensions}"
+            is_applicable = True
+    else:
+        if "GLOBAL" in route.target_dimensions:
+            is_applicable = True
+        elif "BANK" in route.target_dimensions and bank:
+            is_applicable = True
+        elif "PAYMENT_METHOD" in route.target_dimensions and payment_method:
+            is_applicable = True
 
     if not is_applicable:
         return False, f"Transaction attributes do not match route target dimensions {route.target_dimensions}"

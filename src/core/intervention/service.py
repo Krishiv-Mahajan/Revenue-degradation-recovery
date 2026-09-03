@@ -99,14 +99,13 @@ class InterventionDecisionService:
         rca_candidate_val = None
         rca_evidence_strength = None
         rca_audit_payload = None
+        rca_candidate_matches_payment_segment = None
+        
+        if stage5_pred and stage5_pred.feature_snapshot:
+            rca_candidate_matches_payment_segment = stage5_pred.feature_snapshot.get("rca_candidate_matches_payment_segment")
 
         if auth_event:
-            # Check for active degradation episode affecting payment
-            active_episode = await self.feature_repo.get_active_episode_context("GLOBAL", "ALL", t_decide)
-            if not active_episode and bank:
-                active_episode = await self.feature_repo.get_active_episode_context("BANK", bank, t_decide)
-            if not active_episode and payment_method:
-                active_episode = await self.feature_repo.get_active_episode_context("PAYMENT_METHOD", payment_method, t_decide)
+            active_episode = await self.feature_repo.get_most_severe_active_episode(auth_event, t_decide)
 
             if active_episode:
                 episode_id = active_episode.episode_id
@@ -226,6 +225,7 @@ class InterventionDecisionService:
                 rca_evidence_strength=rca_evidence_strength,
                 rca_candidate_dimension=rca_candidate_dim,
                 rca_candidate_value=rca_candidate_val,
+                rca_candidate_matches_payment_segment=rca_candidate_matches_payment_segment,
                 payment_method=payment_method,
                 bank=bank,
                 is_on_cooldown=is_on_cooldown,

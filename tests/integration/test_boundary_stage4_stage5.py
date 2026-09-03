@@ -91,7 +91,7 @@ def make_rca(episode_id, gen_time, cand_dim, cand_val, strength, version=1):
     return rca, cand
 
 @pytest.mark.asyncio
-async def test_boundary_active_episode_resolution(session: AsyncSession, service: FeatureReconstructionService):
+async def test_boundary_active_episode_resolution(session: AsyncSession, repo: FeatureReconstructionRepository, service: FeatureReconstructionService):
     t_eval = T0 - timedelta(minutes=1)
     
     # Insert multiple active episodes
@@ -106,27 +106,27 @@ async def test_boundary_active_episode_resolution(session: AsyncSession, service
     
     # 1. BANK-only active degradation is discovered
     event1 = make_event("p1", bank="HDFC")
-    res1 = await service._get_most_severe_active_episode(event1, T0)
+    res1 = await repo.get_most_severe_active_episode(event1, T0)
     assert res1.episode_id == ep_bank.episode_id
     
     # 2. WALLET-only active degradation is discovered
     event2 = make_event("p2", wallet="PAYTM")
-    res2 = await service._get_most_severe_active_episode(event2, T0)
+    res2 = await repo.get_most_severe_active_episode(event2, T0)
     assert res2.episode_id == ep_wallet.episode_id
     
     # 3. CURRENCY-only
     event3 = make_event("p3", currency="INR")
-    res3 = await service._get_most_severe_active_episode(event3, T0)
+    res3 = await repo.get_most_severe_active_episode(event3, T0)
     assert res3.episode_id == ep_curr.episode_id
     
     # 4. Overlapping: GLOBAL + BANK + WALLET. CRITICAL Bank should win over HIGH wallet and MODERATE global
     event4 = make_event("p4", bank="HDFC", wallet="PAYTM")
-    res4 = await service._get_most_severe_active_episode(event4, T0)
+    res4 = await repo.get_most_severe_active_episode(event4, T0)
     assert res4.episode_id == ep_bank.episode_id
     
     # 5. Equal-severity tie-breaker: CURRENCY (older, CRITICAL) vs BANK (newer, CRITICAL)
     event5 = make_event("p5", currency="INR", bank="HDFC")
-    res5 = await service._get_most_severe_active_episode(event5, T0)
+    res5 = await repo.get_most_severe_active_episode(event5, T0)
     assert res5.episode_id == ep_curr.episode_id
     
 @pytest.mark.asyncio

@@ -154,3 +154,56 @@ class FeatureReconstructionRepository:
         candidate = candidate_result.scalar_one_or_none()
         
         return rca_eval, candidate
+
+    async def get_most_severe_active_episode(
+        self, auth_event: PaymentEventModel, t: datetime
+    ) -> Optional[EpisodeStateHistoryModel]:
+        """
+        Deterministically resolves the most severe active episode applicable to the payment.
+        Prioritizes by canonical severity, then older start window, then UUID.
+        """
+        candidates = []
+        
+        ep_global = await self.get_active_episode_context("GLOBAL", "ALL", t)
+        if ep_global:
+            candidates.append(ep_global)
+            
+        if auth_event.currency:
+            ep_curr = await self.get_active_episode_context("CURRENCY", auth_event.currency, t)
+            if ep_curr:
+                candidates.append(ep_curr)
+            
+        if auth_event.payment_method:
+            ep_pm = await self.get_active_episode_context("PAYMENT_METHOD", auth_event.payment_method, t)
+            if ep_pm:
+                candidates.append(ep_pm)
+            
+        if auth_event.bank:
+            ep_bank = await self.get_active_episode_context("BANK", auth_event.bank, t)
+            if ep_bank:
+                candidates.append(ep_bank)
+            
+        if auth_event.wallet:
+            ep_wallet = await self.get_active_episode_context("WALLET", auth_event.wallet, t)
+            if ep_wallet:
+                candidates.append(ep_wallet)
+            
+        if not candidates:
+            return None
+            
+        # Tie-breaker ordering:
+        # 1. Canonical severity (CRITICAL > HIGH > MODERATE)
+        # 2. Older effective_start_window wins equal-severity ties (chronological precedence)
+        # 3. episode_id string (deterministic fallback chosen for this function)
+        severity_rank = {"CRITICAL": 3, "HIGH": 2, "MODERATE": 1}
+        
+        candidates.sort(
+            key=lambda x: (
+                severity_rank.get(x.severity, 0),
+                -x.effective_start_window.timestamp(),
+                str(x.episode_id)
+            ), 
+            reverse=True
+        )
+        return candidates[0]
+
