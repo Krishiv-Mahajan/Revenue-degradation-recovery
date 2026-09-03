@@ -51,11 +51,11 @@ class DeterministicBaselineModel(FailurePredictionModel):
         # Strongly adjust if in active degradation
         if feature_vector.get("is_in_active_degradation") is True:
             severity = feature_vector.get("degradation_severity")
-            if severity == "HIGH":
-                prob += 0.3
-            elif severity == "MEDIUM":
+            if severity == "CRITICAL":
+                prob += 0.30
+            elif severity == "HIGH":
                 prob += 0.15
-            elif severity == "LOW":
+            elif severity == "MODERATE":
                 prob += 0.05
                 
         # Adjust if RCA explicitly implicates this segment
