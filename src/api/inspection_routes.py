@@ -2,7 +2,8 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
-from datetime import datetime
+from datetime import datetime, timedelta
+import uuid
 
 from src.api.dependencies import get_db_session
 from src.infrastructure.models import (
@@ -102,11 +103,23 @@ async def get_episodes(
 async def get_rca_evaluation(episode_id: str, session: AsyncSession = Depends(get_db_session)) -> Dict[str, Any]:
     """
     Returns the latest RCA evaluation and candidate causes for an episode.
+    Enriched with episode metadata and downstream prediction/intervention telemetry.
     Read-only inspection endpoint.
     """
+    try:
+        ep_uuid = uuid.UUID(episode_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RCA evaluation not found")
+
+    # 1. Fetch Episode
+    ep_stmt = select(DegradationEpisodeModel).where(DegradationEpisodeModel.episode_id == ep_uuid)
+    ep_res = await session.execute(ep_stmt)
+    episode = ep_res.scalar_one_or_none()
+
+    # 2. Fetch Latest RCA Evaluation
     eval_stmt = (
         select(RCAEvaluationModel)
-        .where(RCAEvaluationModel.episode_id == episode_id)
+        .where(RCAEvaluationModel.episode_id == ep_uuid)
         .order_by(desc(RCAEvaluationModel.evaluation_version))
         .limit(1)
     )
@@ -123,12 +136,85 @@ async def get_rca_evaluation(episode_id: str, session: AsyncSession = Depends(ge
     )
     causes_res = await session.execute(causes_stmt)
     causes = causes_res.scalars().all()
+
+    # 3. Downstream Telemetry strictly scoped to the evaluated episode
+    ep_str = str(ep_uuid)
+
+    dec_stmt = (
+        select(
+            InterventionDecisionModel.decision_type,
+            func.count(InterventionDecisionModel.decision_id)
+        )
+        .where(
+            InterventionDecisionModel.evaluation_audit_payload["upstream_context"]["episode_id"].as_string() == ep_str
+        )
+        .group_by(InterventionDecisionModel.decision_type)
+    )
+    dec_res = await session.execute(dec_stmt)
+    dec_counts = dict(dec_res.all())
+
+    pred_stmt = (
+        select(
+            func.count(FailurePredictionModel.prediction_id),
+            func.max(FailurePredictionModel.failure_probability)
+        )
+        .select_from(FailurePredictionModel)
+        .join(
+            InterventionDecisionModel,
+            FailurePredictionModel.prediction_id == InterventionDecisionModel.stage5_prediction_id
+        )
+        .where(
+            InterventionDecisionModel.evaluation_audit_payload["upstream_context"]["episode_id"].as_string() == ep_str
+        )
+    )
+    pred_res = await session.execute(pred_stmt)
+    pred_row = pred_res.fetchone()
+    pred_count = pred_row[0] if pred_row else 0
+    peak_prob = pred_row[1] if pred_row else 0.0
+
+    route_stmt = (
+        select(InterventionDecisionModel.selected_route_id)
+        .where(
+            InterventionDecisionModel.evaluation_audit_payload["upstream_context"]["episode_id"].as_string() == ep_str,
+            InterventionDecisionModel.selected_route_id.isnot(None)
+        )
+        .group_by(InterventionDecisionModel.selected_route_id)
+        .order_by(desc(func.count(InterventionDecisionModel.decision_id)))
+        .limit(1)
+    )
+    route_res = await session.execute(route_stmt)
+    primary_route = route_res.scalar_one_or_none()
+
+    attr_stmt = (
+        select(func.sum(CounterfactualAttributionModel.attributed_protected_gmv_minor_units))
+        .select_from(CounterfactualAttributionModel)
+        .join(
+            InterventionDecisionModel,
+            CounterfactualAttributionModel.decision_id == InterventionDecisionModel.decision_id,
+        )
+        .where(
+            InterventionDecisionModel.evaluation_audit_payload["upstream_context"]["episode_id"].as_string() == ep_str
+        )
+    )
+    attr_res = await session.execute(attr_stmt)
+    window_protected_gmv = attr_res.scalar_one_or_none() or 0
     
     return {
         "evaluation_id": str(evaluation.evaluation_id),
         "classification": evaluation.classification,
         "analysis_window_start": evaluation.analysis_window_start.isoformat(),
         "analysis_window_end": evaluation.analysis_window_end.isoformat(),
+        "episode": {
+            "episode_id": str(episode.episode_id),
+            "segment_dimension": episode.segment_dimension,
+            "segment_value": episode.segment_value,
+            "severity": episode.severity,
+            "status": episode.status,
+            "started_at_window": episode.started_at_window.isoformat(),
+            "ended_at_window": episode.ended_at_window.isoformat() if episode.ended_at_window else None,
+            "peak_absolute_drop": episode.peak_absolute_drop,
+            "affected_window_count": episode.affected_window_count
+        } if episode else None,
         "candidates": [
             {
                 "candidate_id": str(c.candidate_id),
@@ -139,7 +225,21 @@ async def get_rca_evaluation(episode_id: str, session: AsyncSession = Depends(ge
                 "rank": c.rank
             }
             for c in causes
-        ]
+        ],
+        "prediction_context": {
+            "window_predictions_evaluated": pred_count or 0,
+            "peak_failure_probability": peak_prob or 0.0,
+            "severity_bonus_tier": episode.severity if episode else None,
+            "top_rca_evidence_strength": causes[0].evidence_strength if causes else None,
+            "prediction_status": "PREDICTED" if pred_count else "NO_PREDICTIONS"
+        },
+        "intervention_context": {
+            "act_decisions": dec_counts.get("ACT", 0),
+            "monitor_decisions": dec_counts.get("MONITOR", 0),
+            "primary_selected_route": primary_route,
+            "decision_threshold": 0.70,
+            "window_protected_gmv_minor_units": window_protected_gmv
+        }
     }
 
 @router.get("/attributions")

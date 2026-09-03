@@ -39,7 +39,6 @@
       </button>
       <button class="nav-tab" data-view="incidents" type="button">
         Incidents
-        <span class="tab-badge">Phase 7B</span>
       </button>
       <button class="nav-tab" data-view="recovery" type="button">
         Recovery
@@ -197,16 +196,264 @@
       </div>
     </main>
 
-    <!-- Placeholder View: Incidents (Phase 7B) -->
-    <div id="view-incidents" class="view-container">
-      <div class="placeholder-view">
-        <div class="placeholder-icon" aria-hidden="true">🔍</div>
-        <h2 class="placeholder-title">Root Cause &amp; Incident Investigation</h2>
-        <p class="placeholder-text">
-          Detailed dimensional failure decomposition, RCA candidate evidence ranking, and segment contribution analytics will be implemented in Phase 7B.
-        </p>
+    <!-- View: Incidents & RCA Drill-Down (Phase 7B) -->
+    <main id="view-incidents" class="view-container">
+      <div class="incidents-workspace">
+
+        <!-- Workspace Header -->
+        <div class="workspace-header-row">
+          <div>
+            <h2 class="section-title">Incident &amp; Root Cause Investigation</h2>
+            <span class="section-hint">Deterministic dimensional failure diagnosis, evidence strengths, and downstream recovery telemetry</span>
+          </div>
+          <div class="workspace-actions">
+            <span id="incidents-count-badge" class="meta-count-badge">0 Incidents</span>
+          </div>
+        </div>
+
+        <!-- Master-Detail Split Layout -->
+        <div class="incidents-master-detail-grid">
+
+          <!-- Left: Master Incident Feed Panel -->
+          <aside class="incidents-master-panel" aria-label="Incident feed">
+            <div class="panel-header">
+              <span class="panel-title">Degradation Feed</span>
+              <span class="panel-subtitle">Select to inspect</span>
+            </div>
+
+            <!-- Error Banner -->
+            <div id="master-episodes-error" class="alert-error-banner" style="display: none;" role="alert">
+              <div class="error-content">
+                <span class="error-title">Feed Error</span>
+                <span id="master-episodes-error-msg" class="error-desc"></span>
+              </div>
+            </div>
+
+            <!-- Scrollable Incident List -->
+            <div id="master-episodes-list" class="master-episodes-list"></div>
+
+            <!-- Empty State -->
+            <div id="master-episodes-empty" class="empty-state-box" style="display: none;">
+              <div class="empty-state-title">No Episodes Available</div>
+              <p class="empty-state-desc">No degradation episodes recorded yet.</p>
+            </div>
+          </aside>
+
+          <!-- Right: Detailed Investigation Workspace -->
+          <section class="incidents-detail-panel" aria-label="Investigation workspace">
+
+            <!-- No Selection State -->
+            <div id="rca-no-selection" class="detail-placeholder-box">
+              <div class="detail-placeholder-icon" aria-hidden="true">👈</div>
+              <h3 class="detail-placeholder-title">Select an Incident to Investigate</h3>
+              <p class="detail-placeholder-desc">
+                Choose a degradation episode from the feed to view dimensional root cause analysis, ranked candidate evidence, and downstream failure risk.
+              </p>
+            </div>
+
+            <!-- Loading State -->
+            <div id="rca-loading-state" class="detail-loading-box" style="display: none;">
+              <div class="skeleton" style="width: 80%; height: 30px; margin-bottom: 1rem;"></div>
+              <div class="skeleton" style="width: 100%; height: 80px; margin-bottom: 1rem;"></div>
+              <div class="skeleton" style="width: 100%; height: 120px;"></div>
+            </div>
+
+            <!-- Error Banner -->
+            <div id="rca-error-banner" class="alert-error-banner" style="display: none;" role="alert">
+              <div class="error-content">
+                <span class="error-title">Investigation Telemetry Error</span>
+                <span id="rca-error-msg" class="error-desc"></span>
+              </div>
+            </div>
+
+            <!-- Main Investigation Content Container -->
+            <div id="rca-detail-content" class="investigation-content" style="display: none;">
+
+              <!-- A. Incident Overview Header -->
+              <div class="investigation-header-card">
+                <div class="investigation-header-top">
+                  <div class="investigation-title-group">
+                    <span id="det-severity-pill" class="severity-pill critical">CRITICAL</span>
+                    <span id="det-status-pill" class="status-pill">RECOVERED</span>
+                    <h3 id="det-segment-title" class="investigation-segment-title">GLOBAL : ALL</h3>
+                  </div>
+                  <div class="episode-id-tag">
+                    <span class="episode-id-label">EPISODE ID</span>
+                    <span id="det-episode-id" class="episode-id-value">—</span>
+                  </div>
+                </div>
+
+                <div class="investigation-timeline-row">
+                  <div class="timeline-point">
+                    <span class="timeline-point-label">Incident Started</span>
+                    <span id="det-started-time" class="timeline-point-val">—</span>
+                  </div>
+                  <span class="timeline-connector" aria-hidden="true">⟶</span>
+                  <div class="timeline-point">
+                    <span class="timeline-point-label">Incident Resolved</span>
+                    <span id="det-ended-time" class="timeline-point-val">—</span>
+                  </div>
+                  <div class="timeline-duration-box">
+                    <span class="timeline-point-label">Peak Drop</span>
+                    <span id="det-peak-drop" class="peak-drop-val">—</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- B. Incident Impact Telemetry (4 metric cards) -->
+              <div class="impact-metrics-grid">
+                <div class="impact-metric-card">
+                  <span class="impact-metric-label">Peak Rate Drop</span>
+                  <div id="det-impact-drop" class="impact-metric-val drop">—</div>
+                  <span class="impact-metric-sub">Sustained success rate drop</span>
+                </div>
+                <div class="impact-metric-card">
+                  <span class="impact-metric-label">Affected Windows</span>
+                  <div id="det-impact-windows" class="impact-metric-val">—</div>
+                  <span class="impact-metric-sub">5-minute tumbling windows</span>
+                </div>
+                <div class="impact-metric-card">
+                  <span class="impact-metric-label">Predictions Evaluated</span>
+                  <div id="det-impact-predictions" class="impact-metric-val">—</div>
+                  <span class="impact-metric-sub">Point-in-time transactions</span>
+                </div>
+                <div class="impact-metric-card">
+                  <span class="impact-metric-label">Window Protected Revenue</span>
+                  <div id="det-impact-protected" class="impact-metric-val emerald">—</div>
+                  <span class="impact-metric-sub">Attributed in incident window</span>
+                </div>
+              </div>
+
+              <!-- C & D. Root Cause Analysis & Candidate Ranking -->
+              <div class="rca-diagnostic-card">
+                <div class="rca-card-header">
+                  <div>
+                    <h4 class="rca-card-title">Root Cause Analysis (RCA) Candidates</h4>
+                    <p class="rca-card-subtitle">
+                      Dimensional failure decomposition ranked by excess failure contribution under audited criteria
+                    </p>
+                  </div>
+                  <div class="rca-classification-group">
+                    <span class="classification-label">Diagnosis:</span>
+                    <span id="det-rca-classification" class="classification-pill">SEGMENT_SPECIFIC</span>
+                  </div>
+                </div>
+
+                <!-- Ranked Candidates Visualization List -->
+                <div id="det-rca-candidates-list" class="rca-candidates-list"></div>
+              </div>
+
+              <!-- E & F. Downstream Prediction & Intervention Context -->
+              <div class="downstream-context-grid">
+
+                <!-- Stage 5: Prediction Context -->
+                <div class="context-card">
+                  <div class="context-card-header">
+                    <span class="context-stage-tag">Stage 5 Context</span>
+                    <h4 class="context-title">Failure Risk Assessment</h4>
+                  </div>
+                  <div class="context-body">
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Peak Failure Probability P(fail)</span>
+                      <span id="det-pred-peak-prob" class="context-metric-value alert">—</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">ACT Intervention Gate Threshold</span>
+                      <span class="context-metric-value">0.7000 (70.0%)</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Active Episode Severity Bonus</span>
+                      <span id="det-pred-severity-bonus" class="context-metric-value">—</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Top RCA Diagnostic Evidence Bonus</span>
+                      <span id="det-pred-rca-bonus" class="context-metric-value">—</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Evaluation Telemetry Status</span>
+                      <span id="det-pred-status" class="status-pill">PREDICTED</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Stage 6: Intervention Decision Context -->
+                <div class="context-card">
+                  <div class="context-card-header">
+                    <span class="context-stage-tag">Stage 6 Context</span>
+                    <h4 class="context-title">Intervention Policy Decisions</h4>
+                  </div>
+                  <div class="context-body">
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Intervention Verdicts Dispatched</span>
+                      <span id="det-inter-verdicts" class="context-metric-value emerald">—</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Selected Recovery Route</span>
+                      <span id="det-inter-route" class="context-metric-value highlight">—</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Circuit / Safety Gate Verdict</span>
+                      <span class="context-metric-value status-pill">PASSED</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Policy Utility Formulation</span>
+                      <span class="context-metric-value">U = R·P(fail)·(1-c) - C_cost</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Rate Limiting &amp; Invariance</span>
+                      <span class="context-metric-value status-pill">ACTIVE ENFORCEMENT</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              <!-- G. Operational Causal Chain Stepper -->
+              <div class="causal-chain-card">
+                <div class="causal-chain-title">End-to-End Operational Causal Sequence</div>
+                <div class="causal-stepper">
+                  <div class="causal-step">
+                    <span class="causal-step-num">1</span>
+                    <div class="causal-step-content">
+                      <span class="causal-step-label">Degradation Detected</span>
+                      <span id="causal-step-1-val" class="causal-step-desc">Rate drop across segment</span>
+                    </div>
+                  </div>
+                  <span class="causal-arrow" aria-hidden="true">→</span>
+                  <div class="causal-step">
+                    <span class="causal-step-num">2</span>
+                    <div class="causal-step-content">
+                      <span class="causal-step-label">Root Cause Diagnosed</span>
+                      <span id="causal-step-2-val" class="causal-step-desc">Excess failure ranked</span>
+                    </div>
+                  </div>
+                  <span class="causal-arrow" aria-hidden="true">→</span>
+                  <div class="causal-step">
+                    <span class="causal-step-num">3</span>
+                    <div class="causal-step-content">
+                      <span class="causal-step-label">Failure Risk Elevated</span>
+                      <span id="causal-step-3-val" class="causal-step-desc">P(fail) crossing threshold</span>
+                    </div>
+                  </div>
+                  <span class="causal-arrow" aria-hidden="true">→</span>
+                  <div class="causal-step">
+                    <span class="causal-step-num">4</span>
+                    <div class="causal-step-content">
+                      <span class="causal-step-label">Intervention Dispatched</span>
+                      <span id="causal-step-4-val" class="causal-step-desc">Permitted route executed</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+          </section>
+
+        </div>
+
       </div>
-    </div>
+    </main>
 
     <!-- Placeholder View: Recovery (Phase 7C) -->
     <div id="view-recovery" class="view-container">

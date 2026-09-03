@@ -68,6 +68,17 @@ export async function getEpisodes(limit = 10) {
 }
 
 /**
+ * Queries root cause analysis and candidate causes for an episode from /api/v1/rca/{episode_id}.
+ * @param {string} episodeId
+ */
+export async function getRCA(episodeId) {
+  if (!episodeId) {
+    throw new Error('Episode ID is required');
+  }
+  return await fetchJSON(`/api/v1/rca/${encodeURIComponent(episodeId)}`);
+}
+
+/**
  * Formats integer minor units to INR currency string.
  * Example: 1041823 -> "₹10,418.23"
  * @param {number|null|undefined} minorUnits 
