@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Payment Recovery Engine — Operational Dashboard</title>
+  <meta name="description" content="Automated revenue protection, real-time payment degradation detection, root cause analysis, and counterfactual recovery attribution." />
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- Top Header Bar -->
+    <header class="header-bar">
+      <div class="brand-section">
+        <div class="brand-badge" aria-hidden="true">🛡️</div>
+        <div>
+          <h1 class="brand-title">Payment Recovery Engine</h1>
+          <p class="brand-subtitle">Automated Revenue Protection &amp; Loss Prevention</p>
+        </div>
+      </div>
+
+      <div class="header-controls">
+        <div id="db-health-badge" class="status-badge connected">
+          <span class="status-indicator-dot" aria-hidden="true"></span>
+          <span id="db-health-text">Checking DB...</span>
+        </div>
+        <span id="last-updated-time" class="last-updated-text">Initial load...</span>
+        <button id="btn-refresh" class="refresh-button" type="button" aria-label="Refresh dashboard data">
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <!-- Navigation Tab Strip -->
+    <nav class="nav-tab-strip" aria-label="Dashboard views">
+      <button class="nav-tab active" data-view="overview" type="button">
+        Overview
+      </button>
+      <button class="nav-tab" data-view="incidents" type="button">
+        Incidents
+        <span class="tab-badge">Phase 7B</span>
+      </button>
+      <button class="nav-tab" data-view="recovery" type="button">
+        Recovery
+        <span class="tab-badge">Phase 7C</span>
+      </button>
+      <button class="nav-tab" data-view="payments" type="button">
+        Payments
+        <span class="tab-badge">Phase 7C</span>
+      </button>
+    </nav>
+
+    <!-- Workflow Architecture Narrative Strip -->
+    <section class="workflow-strip" aria-label="Revenue protection workflow">
+      <div class="workflow-header">
+        <span class="workflow-title">Product Narrative &amp; Causal Recovery Lifecycle</span>
+      </div>
+      <div class="workflow-nodes">
+        <div class="workflow-node">
+          <span class="node-step-number">01</span>
+          <span class="node-label">Payment Health Analytics</span>
+        </div>
+        <span class="workflow-arrow" aria-hidden="true">→</span>
+        <div class="workflow-node">
+          <span class="node-step-number">02</span>
+          <span class="node-label">Degradation Detected</span>
+        </div>
+        <span class="workflow-arrow" aria-hidden="true">→</span>
+        <div class="workflow-node">
+          <span class="node-step-number">03</span>
+          <span class="node-label">Root Cause Identified</span>
+        </div>
+        <span class="workflow-arrow" aria-hidden="true">→</span>
+        <div class="workflow-node">
+          <span class="node-step-number">04</span>
+          <span class="node-label">Intervention Executed</span>
+        </div>
+        <span class="workflow-arrow" aria-hidden="true">→</span>
+        <div class="workflow-node">
+          <span class="node-step-number">05</span>
+          <span class="node-label">Protected Revenue Attributed</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main View: Executive Overview -->
+    <main id="view-overview" class="view-container active">
+      <div class="overview-section">
+
+        <!-- Section Title -->
+        <div class="section-title-row">
+          <h2 class="section-title">Executive Overview</h2>
+          <span class="section-hint">Real-time financial protection and health telemetry</span>
+        </div>
+
+        <!-- Summary Error Alert Banner (Hidden by default) -->
+        <div id="summary-error-banner" class="alert-error-banner" style="display: none;" role="alert">
+          <div class="error-content">
+            <span class="error-title">Metrics Telemetry Warning</span>
+            <span id="summary-error-message" class="error-desc"></span>
+          </div>
+        </div>
+
+        <!-- Primary KPI Cards Grid -->
+        <div class="kpi-grid">
+
+          <!-- Card 1: Protected Revenue -->
+          <div class="kpi-card highlight">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Protected Revenue</span>
+              <span class="kpi-tag protected">Attributed</span>
+            </div>
+            <div id="kpi-protected-revenue" class="kpi-value protected-value">—</div>
+            <div class="kpi-subtext">Causal financial value protected via Stage 8 attribution</div>
+          </div>
+
+          <!-- Card 2: Processed Volume -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Processed Volume</span>
+              <span class="kpi-tag neutral">Gross Auth</span>
+            </div>
+            <div id="kpi-processed-volume" class="kpi-value">—</div>
+            <div class="kpi-subtext">Total authorized payment volume evaluated</div>
+          </div>
+
+          <!-- Card 3: Success Rate -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Authorization Success Rate</span>
+              <span class="kpi-tag neutral">Overall</span>
+            </div>
+            <div id="kpi-success-rate" class="kpi-value">—</div>
+            <div class="kpi-subtext">Ratio of completed captures to total authorizations</div>
+          </div>
+
+          <!-- Card 4: Active Incidents -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Active Degradation Incidents</span>
+              <span class="kpi-tag alert">Live Status</span>
+            </div>
+            <div id="kpi-active-incidents" class="kpi-value">—</div>
+            <div class="kpi-subtext">Current episodes crossing critical/high thresholds</div>
+          </div>
+
+          <!-- Card 5: Interventions Dispatched -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Interventions Dispatched</span>
+              <span class="kpi-tag neutral">Commands</span>
+            </div>
+            <div id="kpi-interventions" class="kpi-value">—</div>
+            <div class="kpi-subtext">Automated recovery actions executed through policy gates</div>
+          </div>
+
+          <!-- Card 6: Auth / Capture Counts -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Auth / Capture Volume</span>
+              <span class="kpi-tag neutral">Count</span>
+            </div>
+            <div id="kpi-auth-capture-volume" class="kpi-value">—</div>
+            <div class="kpi-subtext">Authorized attempts vs successfully settled transactions</div>
+          </div>
+
+        </div>
+
+        <!-- Degradation Incident Monitor Section -->
+        <section class="incidents-container" aria-label="Degradation incidents">
+          <div class="section-title-row">
+            <h3 class="section-title">Degradation Incident Monitor</h3>
+            <span class="section-hint">Recent and active segment degradations detected by state machine</span>
+          </div>
+
+          <!-- Incidents Error Banner (Hidden by default) -->
+          <div id="incidents-error-banner" class="alert-error-banner" style="display: none;" role="alert">
+            <div class="error-content">
+              <span class="error-title">Incident Telemetry Error</span>
+              <span id="incidents-error-message" class="error-desc"></span>
+            </div>
+          </div>
+
+          <!-- Incidents Dynamic List Container -->
+          <div id="incidents-list-container" class="incidents-list"></div>
+
+          <!-- Clean Zero-State Box (Hidden when episodes exist) -->
+          <div id="incidents-empty-state" class="empty-state-box" style="display: none;">
+            <div class="empty-state-title">No Degradation Incidents Detected</div>
+            <p class="empty-state-desc">
+              All payment segments are operating within baseline health tolerances. No active or recent degradation episodes recorded.
+            </p>
+          </div>
+        </section>
+
+      </div>
+    </main>
+
+    <!-- Placeholder View: Incidents (Phase 7B) -->
+    <div id="view-incidents" class="view-container">
+      <div class="placeholder-view">
+        <div class="placeholder-icon" aria-hidden="true">🔍</div>
+        <h2 class="placeholder-title">Root Cause &amp; Incident Investigation</h2>
+        <p class="placeholder-text">
+          Detailed dimensional failure decomposition, RCA candidate evidence ranking, and segment contribution analytics will be implemented in Phase 7B.
+        </p>
+      </div>
+    </div>
+
+    <!-- Placeholder View: Recovery (Phase 7C) -->
+    <div id="view-recovery" class="view-container">
+      <div class="placeholder-view">
+        <div class="placeholder-icon" aria-hidden="true">⚡</div>
+        <h2 class="placeholder-title">Intervention &amp; Recovery Ledger</h2>
+        <p class="placeholder-text">
+          Live feed of automated recovery commands, route selections, observed post-treatment outcomes, and counterfactual protected GMV records will be implemented in Phase 7C.
+        </p>
+      </div>
+    </div>
+
+    <!-- Placeholder View: Payments (Phase 7C) -->
+    <div id="view-payments" class="view-container">
+      <div class="placeholder-view">
+        <div class="placeholder-icon" aria-hidden="true">📜</div>
+        <h2 class="placeholder-title">Payment Audit Inspector</h2>
+        <p class="placeholder-text">
+          End-to-end chronological lifecycle tracing from Stage 1 ingestion through Stage 8 counterfactual attribution for individual payments will be implemented in Phase 7C.
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Centralized Application Controller Entrypoint -->
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

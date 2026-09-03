@@ -33,6 +33,12 @@ async def test_health_check_endpoint(client):
     assert response.json() == {"status": "ok"}
 
 @pytest.mark.asyncio
+async def test_dashboard_root_endpoint(client):
+    response = await client.get("/")
+    assert response.status_code == 200
+    assert "Payment Recovery Engine" in response.text
+
+@pytest.mark.asyncio
 async def test_health_check_db_failure():
     async def failing_get_db_session():
         class FailingSession:
