@@ -163,13 +163,15 @@ def compute_candidate_metrics(
 # ---------------------------------------------------------------------------
 
 def compute_episode_total_excess_failures(
-    excess_values: List[float],
+    episode_actual_failures: int,
+    episode_expected_failures: float,
 ) -> float:
     """
-    episode_total_excess_failures = SUM(max(excess, 0) for all candidates).
-    Only positive excess values contribute.
+    episode_total_excess_failures = max(0, episode_actual_failures - episode_expected_failures)
+    
+    Returns the net excess failures at the episode level.
     """
-    return sum(v for v in excess_values if v > 0)
+    return max(0.0, episode_actual_failures - episode_expected_failures)
 
 
 # ---------------------------------------------------------------------------

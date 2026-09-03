@@ -221,13 +221,33 @@ class RCAService:
         if last and last.input_fingerprint == fingerprint:
             return  # Identical input state — no new evaluation needed
 
+        # --- Episode-level expected failures (canonical denominator) ---
+        # Fetch exhaustive GLOBAL snapshots across the historical windows
+        global_snapshots = await self._get_hist_snapshot_for_dim(
+            all_hist_starts, "GLOBAL", "GLOBAL"
+        )
+        
+        valid_global_failures = []
+        valid_global_transactions = []
+        valid_global_windows = 0
+        for snap in global_snapshots:
+            if not snap.insufficient_volume and snap.transaction_count >= MIN_BASELINE_VOLUME:
+                valid_global_failures.append(snap.failed_transaction_count)
+                valid_global_transactions.append(snap.transaction_count)
+                valid_global_windows += 1
+                
+        ep_baseline_rate = None
+        if valid_global_windows >= MIN_VALID_HISTORICAL_WINDOWS:
+            ep_baseline_rate = compute_volume_weighted_failure_rate(
+                valid_global_failures, valid_global_transactions
+            )
+            
+        ep_expected_failures = (
+            episode_transactions * ep_baseline_rate if ep_baseline_rate is not None else 0.0
+        )
+
         # --- Compute episode_total_excess_failures ---
-        excess_values = [
-            r["excess_segment_failures"]
-            for r in structural_results
-            if r.get("baseline_sufficient", False)
-        ]
-        episode_total_excess = compute_episode_total_excess_failures(excess_values)
+        episode_total_excess = max(0.0, episode_actual_failures - ep_expected_failures)
 
         # --- Guard: episode_total_excess <= 0 → UNKNOWN ---
         if episode_total_excess <= 0:
@@ -319,26 +339,6 @@ class RCAService:
 
         # --- Historical comparison windows for audit payload ---
         hist_window_audit = _build_hist_window_audit(all_hist_starts, structural_results)
-
-        # --- Episode-level baseline rate (for audit totals) ---
-        ep_hist_failures = sum(
-            r.get("historical_segment_failures_total", 0)
-            for r in structural_results
-            if r.get("dimension") == "PAYMENT_METHOD"
-        )
-        ep_hist_transactions = sum(
-            r.get("historical_segment_transactions_total", 0)
-            for r in structural_results
-            if r.get("dimension") == "PAYMENT_METHOD"
-        )
-        ep_baseline_rate = (
-            ep_hist_failures / ep_hist_transactions
-            if ep_hist_transactions > 0
-            else None
-        )
-        ep_expected_failures = (
-            episode_transactions * ep_baseline_rate if ep_baseline_rate is not None else 0.0
-        )
 
         # --- Build audit payload ---
         audit_payload = build_audit_payload(

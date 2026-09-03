@@ -228,18 +228,19 @@ class TestCandidateMetrics:
 
 
 class TestEpisodeTotalExcess:
-    def test_only_positive_values_summed(self):
-        """Negative excess values do not contribute to episode_total_excess_failures."""
-        excess_values = [10.0, -5.0, 20.5, 0.0, -1.2]
-        total = compute_episode_total_excess_failures(excess_values)
-        assert abs(total - (10.0 + 20.5)) < 1e-9
+    def test_actual_greater_than_expected(self):
+        """Total excess is actual - expected."""
+        total = compute_episode_total_excess_failures(100, 20.0)
+        assert abs(total - 80.0) < 1e-9
 
-    def test_all_negative_returns_zero(self):
-        total = compute_episode_total_excess_failures([-5.0, -3.0])
+    def test_actual_less_than_expected_returns_zero(self):
+        """Negative excess values do not contribute to episode_total_excess_failures."""
+        total = compute_episode_total_excess_failures(10, 20.0)
         assert total == 0.0
 
     def test_empty_list_returns_zero(self):
-        total = compute_episode_total_excess_failures([])
+        # N/A for new signature, but let's test zero failures
+        total = compute_episode_total_excess_failures(0, 0.0)
         assert total == 0.0
 
     def test_guard_division_by_zero_prevented(self):
@@ -592,61 +593,114 @@ class TestFullEvaluationMathScenarios:
         hdfc_actual = 80
         hdfc_hist_rate = 0.05
         hdfc_expected, hdfc_excess = compute_candidate_metrics(hdfc_txn, hdfc_actual, hdfc_hist_rate)
-        # expected = 200 × 0.05 = 10.0, excess = 70.0
+        # expected = 10.0, excess = 70.0
 
-        # SBI: 200 transactions, 12 failures (6% rate), historical 5% rate
-        sbi_txn = 200
-        sbi_actual = 12
-        sbi_hist_rate = 0.05
-        sbi_expected, sbi_excess = compute_candidate_metrics(sbi_txn, sbi_actual, sbi_hist_rate)
-        # expected = 10.0, excess = 2.0
-
-        episode_total_excess = compute_episode_total_excess_failures([hdfc_excess, sbi_excess])
+        # episode totals (simulate SBI taking up the rest with 12 failures / 2 expected)
+        episode_actual_failures = 92
+        episode_expected_failures = 20.0
+        
+        episode_total_excess = compute_episode_total_excess_failures(
+            episode_actual_failures, episode_expected_failures
+        )
         assert abs(episode_total_excess - 72.0) < 1e-9
 
         hdfc_contribution = compute_excess_failure_contribution(hdfc_excess, episode_total_excess)
-        sbi_contribution = compute_excess_failure_contribution(sbi_excess, episode_total_excess)
-
         assert hdfc_contribution is not None
-        assert abs(hdfc_contribution - (70.0 / 72.0)) < 1e-6  # ~0.972
+        assert abs(hdfc_contribution - (70.0 / 72.0)) < 1e-6
 
-        # HDFC should qualify (> 0.30 threshold), SBI also qualifies
         assert hdfc_actual >= MIN_FAILURES_FOR_RCA_EVALUATION
         assert hdfc_contribution >= MIN_CONTRIBUTION_THRESHOLD
-
-        # Evidence strength
         strength = assign_evidence_strength(hdfc_contribution, hdfc_actual)
-        assert strength == EvidenceStrength.STRONG  # contribution ~0.97 >= 0.70, failures >= 30
+        assert strength == EvidenceStrength.STRONG
+
+    def test_overlapping_dimensions_both_strong(self):
+        """
+        Scenario A: Overlapping dimensions.
+        100 identical excess failures all belonging to HDFC + UPI + INR.
+        Expected:
+        - episode excess = 100
+        - HDFC contribution = 1.0 (STRONG)
+        - UPI contribution = 1.0 (STRONG)
+        - INR contribution = 1.0 (STRONG)
+        """
+        # HDFC
+        hdfc_expected, hdfc_excess = compute_candidate_metrics(1000, 100, 0.0)
+        # UPI
+        upi_expected, upi_excess = compute_candidate_metrics(1000, 100, 0.0)
+        # INR
+        inr_expected, inr_excess = compute_candidate_metrics(1000, 100, 0.0)
+        
+        episode_actual_failures = 100
+        episode_expected_failures = 0.0
+        episode_total_excess = compute_episode_total_excess_failures(
+            episode_actual_failures, episode_expected_failures
+        )
+        assert episode_total_excess == 100.0
+        
+        hdfc_contrib = compute_excess_failure_contribution(hdfc_excess, episode_total_excess)
+        upi_contrib = compute_excess_failure_contribution(upi_excess, episode_total_excess)
+        inr_contrib = compute_excess_failure_contribution(inr_excess, episode_total_excess)
+        
+        assert hdfc_contrib == 1.0
+        assert upi_contrib == 1.0
+        assert inr_contrib == 1.0
+        
+        assert assign_evidence_strength(hdfc_contrib, 100) == EvidenceStrength.STRONG
+        assert assign_evidence_strength(upi_contrib, 100) == EvidenceStrength.STRONG
+        assert assign_evidence_strength(inr_contrib, 100) == EvidenceStrength.STRONG
+
+    def test_mutually_exclusive_segments(self):
+        """
+        Scenario B: Mutually exclusive/distinct segments.
+        HDFC excess = 60, SBI excess = 40.
+        Expected:
+        - episode excess = 100
+        - HDFC contribution = 0.60
+        - SBI contribution = 0.40
+        """
+        hdfc_expected, hdfc_excess = compute_candidate_metrics(600, 60, 0.0)
+        sbi_expected, sbi_excess = compute_candidate_metrics(400, 40, 0.0)
+        
+        episode_actual_failures = 100
+        episode_expected_failures = 0.0
+        episode_total_excess = compute_episode_total_excess_failures(
+            episode_actual_failures, episode_expected_failures
+        )
+        assert episode_total_excess == 100.0
+        
+        hdfc_contrib = compute_excess_failure_contribution(hdfc_excess, episode_total_excess)
+        sbi_contrib = compute_excess_failure_contribution(sbi_excess, episode_total_excess)
+        
+        assert abs(hdfc_contrib - 0.60) < 1e-9
+        assert abs(sbi_contrib - 0.40) < 1e-9
 
     def test_no_candidate_systemic(self):
         """
         Scenario: All banks have proportionally elevated failures.
         No candidate meets contribution threshold → SYSTEMIC.
         """
-        # Each bank contributes ~33% of excess — below 30% threshold? No, 33% > 30%
-        # Let's make 4 equal banks, each contributing 25%
         results = []
         for _ in range(4):
             exp, exc = compute_candidate_metrics(250, 30, 0.08)  # expected=20, excess=10
             results.append(exc)
-
-        total = compute_episode_total_excess_failures(results)
+            
+        episode_actual_failures = 120
+        episode_expected_failures = 80.0
+        total = compute_episode_total_excess_failures(
+            episode_actual_failures, episode_expected_failures
+        )
         assert abs(total - 40.0) < 1e-9
 
         for exc in results:
             contribution = compute_excess_failure_contribution(exc, total)
             assert abs(contribution - 0.25) < 1e-9
-            # 0.25 < MIN_CONTRIBUTION_THRESHOLD (0.30) → none qualifies
             assert contribution < MIN_CONTRIBUTION_THRESHOLD
-
-        # → No qualified candidates → SYSTEMIC
 
     def test_episode_total_excess_zero_gives_unknown(self):
         """If all segments perform at or better than baseline, episode_total_excess <= 0."""
-        excess_values = [-5.0, -3.0, 0.0]
-        total = compute_episode_total_excess_failures(excess_values)
-        assert total <= 0
-        # Guard: contribution must return None
+        # expected > actual
+        total = compute_episode_total_excess_failures(50, 60.0)
+        assert total == 0.0
         result = compute_excess_failure_contribution(10.0, total)
         assert result is None
 
