@@ -437,6 +437,12 @@ async def get_payments_list(
         .subquery()
     )
 
+    canonical_events_stmt = (
+        select(PaymentEventModel.event_id)
+        .distinct(PaymentEventModel.payment_id)
+        .order_by(PaymentEventModel.payment_id, PaymentEventModel.timestamp.asc())
+    )
+
     base_query = (
         select(
             PaymentEventModel.payment_id,
@@ -459,7 +465,7 @@ async def get_payments_list(
         .outerjoin(terminal_subq, terminal_subq.c.payment_id == PaymentEventModel.payment_id)
         .outerjoin(InterventionDecisionModel, InterventionDecisionModel.payment_attempt_id == PaymentEventModel.payment_id)
         .outerjoin(CounterfactualAttributionModel, CounterfactualAttributionModel.payment_attempt_id == PaymentEventModel.payment_id)
-        .where(PaymentEventModel.event_type == "payment.authorized")
+        .where(PaymentEventModel.event_id.in_(canonical_events_stmt))
     )
 
     count_query = (
@@ -468,7 +474,7 @@ async def get_payments_list(
         .outerjoin(terminal_subq, terminal_subq.c.payment_id == PaymentEventModel.payment_id)
         .outerjoin(InterventionDecisionModel, InterventionDecisionModel.payment_attempt_id == PaymentEventModel.payment_id)
         .outerjoin(CounterfactualAttributionModel, CounterfactualAttributionModel.payment_attempt_id == PaymentEventModel.payment_id)
-        .where(PaymentEventModel.event_type == "payment.authorized")
+        .where(PaymentEventModel.event_id.in_(canonical_events_stmt))
     )
 
     if search:

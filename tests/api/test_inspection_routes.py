@@ -670,3 +670,103 @@ async def test_stage8_counterfactual_semantics_equivalence(client):
 
 
 
+
+@pytest.mark.asyncio
+async def test_payments_list_canonical_events(client):
+    """
+    Test that the payments list correctly handles various lifecycles without duplicates
+    and correctly joins recovery information without fabricating it.
+    """
+    import uuid
+    from datetime import datetime, timezone, timedelta
+    from src.infrastructure.models import PaymentEventModel, InterventionDecisionModel
+    
+    now = datetime.now(timezone.utc)
+    
+    # Setup test payments
+    pid_success = f"pay_succ_{uuid.uuid4().hex[:8]}"
+    pid_auth_fail = f"pay_afail_{uuid.uuid4().hex[:8]}"
+    pid_fail_only = f"pay_fonly_{uuid.uuid4().hex[:8]}"
+    
+    engine = create_async_engine(DATABASE_URL, echo=False)
+    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with Session() as session:
+        # Case 1: payment.authorized -> payment.captured with recovery info
+        session.add_all([
+            PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                payment_id=pid_success, timestamp=now - timedelta(minutes=5), event_type="payment.authorized",
+                currency="INR", amount_minor_units=1000, payment_status="authorized",
+                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=5)
+            ),
+            PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                payment_id=pid_success, timestamp=now - timedelta(minutes=4), event_type="payment.captured",
+                currency="INR", amount_minor_units=1000, payment_status="captured",
+                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=4)
+            )
+        ])
+        
+        # Add decision for success payment
+        dec_id = uuid.uuid4()
+        session.add(InterventionDecisionModel(
+            decision_id=dec_id, payment_attempt_id=pid_success, decision_version=1,
+            decided_at=now - timedelta(minutes=4, seconds=30), decision_type="ACT",
+            selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=uuid.uuid4(),
+            diagnosis_confidence="HIGH", decision_confidence=0.9,
+            gate_verdict="PASSED", policy_id="P1", policy_version="1.0",
+            input_fingerprint="sha256:0", evaluation_audit_payload={}, created_at=now
+        ))
+        
+        # Case 2: payment.authorized -> payment.failed
+        session.add_all([
+            PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                payment_id=pid_auth_fail, timestamp=now - timedelta(minutes=3), event_type="payment.authorized",
+                currency="INR", amount_minor_units=2000, payment_status="authorized",
+                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=3)
+            ),
+            PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                payment_id=pid_auth_fail, timestamp=now - timedelta(minutes=2), event_type="payment.failed",
+                currency="INR", amount_minor_units=2000, payment_status="failed",
+                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=2)
+            )
+        ])
+        
+        # Case 3: payment.failed alone
+        session.add(
+            PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                payment_id=pid_fail_only, timestamp=now - timedelta(minutes=1), event_type="payment.failed",
+                currency="INR", amount_minor_units=3000, payment_status="failed",
+                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=1)
+            )
+        )
+        
+        await session.commit()
+    await engine.dispose()
+    
+    # Verification
+    # Case 1
+    resp_success = await client.get(f"/api/v1/payments?search={pid_success}")
+    items = resp_success.json()["items"]
+    assert len(items) == 1, "payment.authorized -> captured should return exactly 1 payment"
+    assert items[0]["payment_status"] == "captured"
+    assert items[0]["is_intervened"] is True
+    
+    # Case 2
+    resp_afail = await client.get(f"/api/v1/payments?search={pid_auth_fail}")
+    items = resp_afail.json()["items"]
+    assert len(items) == 1, "payment.authorized -> failed should return exactly 1 payment"
+    assert items[0]["payment_status"] == "failed"
+    assert items[0]["is_intervened"] is False
+    
+    # Case 3
+    resp_fonly = await client.get(f"/api/v1/payments?search={pid_fail_only}")
+    items = resp_fonly.json()["items"]
+    assert len(items) == 1, "payment.failed alone should return exactly 1 payment"
+    assert items[0]["payment_status"] == "failed"
+    assert items[0]["is_intervened"] is False
+    assert items[0]["is_attributed"] is False
+    assert items[0]["amount_minor_units"] == 3000
