@@ -32,22 +32,32 @@ class DeterministicBaselineModel(FailurePredictionModel):
     
     def __init__(self):
         self.model_name = "DeterministicBaselineModel"
-        self.model_version = "untrained-heuristic-v1"
+        self.model_version = "untrained-heuristic-v2"
         self._feature_schema_version = "v1.0.0"
 
     def predict(self, feature_vector: Dict[str, Any]) -> float:
         """
         Deterministically produces a synthetic failure probability based on features.
         Output is bounded strictly to [0.0, 1.0].
+
+        Behavioral rate selection (Policy B fallback — untrained-heuristic-v2):
+          1. Prefer global_30m_failure_rate when available (non-null).
+          2. Fall back to global_24h_failure_rate when 30m is null (same 0.5 coefficient).
+          3. Skip behavioral adjustment when both are null.
         """
         # Base failure risk assumption
         prob = 0.05
-        
-        # Adjust based on historical global failure rate if available
-        if feature_vector.get("global_30m_failure_rate") is not None:
-            # Shift towards the recent historical global rate
-            prob = 0.5 * prob + 0.5 * feature_vector["global_30m_failure_rate"]
-            
+
+        # Adjust based on historical global failure rate.
+        # Prefer 30m window; fall back to 24h window when 30m volume is insufficient.
+        # Both windows use the same 0.5 blending coefficient.
+        rate = feature_vector.get("global_30m_failure_rate")
+        if rate is None:
+            rate = feature_vector.get("global_24h_failure_rate")
+        if rate is not None:
+            # Shift towards the best available recent historical global rate
+            prob = 0.5 * prob + 0.5 * rate
+
         # Strongly adjust if in active degradation
         if feature_vector.get("is_in_active_degradation") is True:
             severity = feature_vector.get("degradation_severity")
@@ -57,7 +67,7 @@ class DeterministicBaselineModel(FailurePredictionModel):
                 prob += 0.15
             elif severity == "MODERATE":
                 prob += 0.05
-                
+
         # Adjust if RCA explicitly implicates this segment
         if feature_vector.get("rca_candidate_matches_payment_segment") is True:
             evidence = feature_vector.get("rca_evidence_strength")
@@ -65,7 +75,7 @@ class DeterministicBaselineModel(FailurePredictionModel):
                 prob += 0.2
             elif evidence == "MODERATE":
                 prob += 0.1
-                
+
         # Enforce bounds
         return max(0.0, min(1.0, prob))
 

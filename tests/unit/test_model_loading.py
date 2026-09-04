@@ -37,7 +37,7 @@ def test_get_development_model_deterministic():
     model = get_development_model(mode="deterministic")
     assert isinstance(model, DeterministicBaselineModel)
     assert model.model_name == "DeterministicBaselineModel"
-    assert model.model_version == "untrained-heuristic-v1"
+    assert model.model_version == "untrained-heuristic-v2"
 
 
 def test_get_development_model_invalid_mode():
