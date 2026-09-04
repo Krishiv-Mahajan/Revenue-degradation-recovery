@@ -67,6 +67,37 @@ Launch the application server:
 uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+### 5. Razorpay Webhook Ingress (Buildathon Live Demo)
+To connect Razorpay Sandbox webhooks to the local application:
+
+1. Configure your webhook secret in your environment:
+   ```bash
+   export RAZORPAY_WEBHOOK_SECRET=<your_razorpay_test_webhook_secret>
+   ```
+2. Start the FastAPI server:
+   ```bash
+   uvicorn src.main:app --host 0.0.0.0 --port 8000
+   ```
+3. Expose the server using an external local tunnel (e.g., ngrok or cloudflared):
+   ```bash
+   ngrok http 8000
+   ```
+4. In your Razorpay Dashboard (Settings → Webhooks), register the webhook endpoint:
+   ```
+   https://<public-tunnel-domain>/ingest/razorpay
+   ```
+   Set Secret to match `RAZORPAY_WEBHOOK_SECRET` and enable event subscriptions (`payment.authorized`, `payment.captured`, `payment.failed`).
+5. Generate current-time recovery context (Buildathon Test Mode):
+   ```bash
+   python scripts/generate_live_context.py --pm card --curr INR --seed 42
+   ```
+   Wait for output confirming:
+   - `ACTIVE` degradation episode with `CRITICAL` severity
+   - RCA candidate `PAYMENT_METHOD = card` with `STRONG` evidence
+   - Preceding 30-minute terminal volume $\ge 50$
+6. Perform a real Razorpay TEST payment via Card checkout (within the active tumbling window).
+7. Open `http://localhost:8000` to inspect the real payment progressing from Stage 1 through Stage 8 on the operator dashboard.
+
 ---
 
 ## Read-Only Inspection API

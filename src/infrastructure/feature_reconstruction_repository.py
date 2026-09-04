@@ -80,7 +80,7 @@ class FeatureReconstructionRepository:
     async def get_active_episode_context(self, segment_dimension: str, segment_value: str, t: datetime) -> Optional[EpisodeStateHistoryModel]:
         """
         Implements the strict 2-step Stage 3 historical reconstruction algorithm.
-        1. Find latest reconciliation_run_id < T
+        1. Find latest reconciliation_run_id <= T
         2. Find ACTIVE episode within that run
         """
         # Step 1
@@ -88,9 +88,9 @@ class FeatureReconstructionRepository:
             select(EpisodeStateHistoryModel.reconciliation_run_id)
             .where(
                 and_(
-                    EpisodeStateHistoryModel.segment_dimension == segment_dimension,
+                    func.upper(EpisodeStateHistoryModel.segment_dimension) == segment_dimension.upper(),
                     EpisodeStateHistoryModel.segment_value == segment_value,
-                    EpisodeStateHistoryModel.evaluation_timestamp < t
+                    EpisodeStateHistoryModel.evaluation_timestamp <= t
                 )
             )
             .order_by(EpisodeStateHistoryModel.evaluation_timestamp.desc())
@@ -109,6 +109,8 @@ class FeatureReconstructionRepository:
             .where(
                 and_(
                     EpisodeStateHistoryModel.reconciliation_run_id == run_id,
+                    func.upper(EpisodeStateHistoryModel.segment_dimension) == segment_dimension.upper(),
+                    EpisodeStateHistoryModel.segment_value == segment_value,
                     EpisodeStateHistoryModel.status == 'ACTIVE'
                 )
             )

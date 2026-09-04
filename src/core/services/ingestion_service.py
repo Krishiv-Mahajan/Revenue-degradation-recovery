@@ -29,6 +29,7 @@ class IngestionService:
     def __init__(self, repository: IngestionRepository, razorpay_webhook_secret: str):
         self.repository = repository
         self.razorpay_webhook_secret = razorpay_webhook_secret
+        self.last_event_is_duplicate: bool = False
 
     async def ingest_razorpay_webhook(
         self,
@@ -67,12 +68,16 @@ class IngestionService:
                 # Note: We should ideally return the existing PaymentEvent, but returning a newly normalized
                 # instance based on the original payload represents the same canonical fact.
                 # Since we don't have get_payment_event in repo yet, we can normalize it again for the response.
+                self.last_event_is_duplicate = True
                 return normalize_razorpay_event(parsed_event, source_event_id)
             else:
                 # Conflict
+                self.last_event_is_duplicate = False
                 raise DuplicateEventConflictError(
                     f"Event {source_event_id} from razorpay already exists with a different payload."
                 )
+
+        self.last_event_is_duplicate = False
 
         # 5. Normalize
         payment_event = normalize_razorpay_event(parsed_event, source_event_id)

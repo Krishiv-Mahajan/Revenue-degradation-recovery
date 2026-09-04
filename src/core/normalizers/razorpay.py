@@ -36,9 +36,10 @@ def normalize_razorpay_event(
     """
     payment_entity = event.payload.payment.entity
 
-    # Timestamp semantics: Razorpay sends epoch seconds. We convert to UTC datetime.
+    # Timestamp semantics: Razorpay sends epoch seconds in the webhook envelope event.created_at.
+    # We convert to UTC datetime to preserve event-sourcing semantics for lifecycle events.
     try:
-        timestamp_utc = datetime.fromtimestamp(payment_entity.created_at, tz=timezone.utc)
+        timestamp_utc = datetime.fromtimestamp(event.created_at, tz=timezone.utc)
     except (ValueError, TypeError, OSError) as e:
         raise NormalizationError(f"Invalid timestamp in Razorpay payload: {str(e)}")
 

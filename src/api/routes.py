@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Request, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Request, Header, HTTPException, status, BackgroundTasks
 from fastapi.responses import JSONResponse
 import logging
 
 from src.api.dependencies import get_ingestion_service
 from src.core.services.ingestion_service import IngestionService
+from src.core.services.live_pipeline import run_live_pipeline
 from src.core.domain.exceptions import (
     InvalidWebhookSignatureError,
     MalformedInputError,
@@ -20,6 +21,7 @@ router = APIRouter()
 @router.post("/ingest/razorpay")
 async def ingest_razorpay(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_razorpay_signature: str = Header(None),
     x_razorpay_event_id: str = Header(None),
     ingestion_service: IngestionService = Depends(get_ingestion_service)
@@ -43,6 +45,11 @@ async def ingest_razorpay(
             signature_header=x_razorpay_signature,
             source_event_id=x_razorpay_event_id
         )
+
+        # Trigger the live recovery pipeline only for newly accepted (non-duplicate) events
+        if not getattr(ingestion_service, "last_event_is_duplicate", False):
+            background_tasks.add_task(run_live_pipeline, payment_event)
+
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={"status": "success", "event_id": str(payment_event.event_id)}
