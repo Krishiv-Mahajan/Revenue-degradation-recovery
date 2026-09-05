@@ -769,7 +769,9 @@ function renderIncidentDetail(rca) {
     elements.causalStep2Val.textContent = `${candidates[0].dimension}:${candidates[0].value} (${candidates[0].evidence_strength})`;
   }
   if (elements.causalStep3Val) {
-    elements.causalStep3Val.textContent = `Peak P(fail) ${((pred.peak_failure_probability || 0) * 100).toFixed(1)}%`;
+    elements.causalStep3Val.textContent = pred.peak_failure_probability != null
+      ? `Peak P(fail) ${((pred.peak_failure_probability) * 100).toFixed(1)}%`
+      : 'Peak P(fail) N/A';
   }
   if (elements.causalStep4Val) {
     const actNum = inter.act_decisions || 0;
@@ -1187,7 +1189,15 @@ function renderPaymentAudit(timeline) {
   }
 
   if (elements.auditRecProb) {
-    elements.auditRecProb.textContent = pred ? formatPercentage(pred.failure_probability, 1) : 'Not Evaluated';
+    if (!pred) {
+      elements.auditRecProb.textContent = 'Not Evaluated';
+    } else if (pred.failure_probability != null) {
+      elements.auditRecProb.textContent = formatPercentage(pred.failure_probability, 1);
+    } else if (pred.status === 'INSUFFICIENT_DATA') {
+      elements.auditRecProb.textContent = 'Insufficient Data';
+    } else {
+      elements.auditRecProb.textContent = 'N/A';
+    }
   }
   if (elements.auditRecDecision) {
     elements.auditRecDecision.textContent = dec ? `${dec.type} (${dec.gate_verdict || 'PASSED'})` : 'No Decision';
@@ -1227,17 +1237,18 @@ function renderPaymentAudit(timeline) {
 
   // Stage 5: Prediction
   if (pred) {
+    const isInsufficient = pred.status === 'INSUFFICIENT_DATA';
     steps.push({
       num: 5,
       name: 'Stage 5: Failure Prediction',
-      status: 'completed',
+      status: isInsufficient ? 'skipped' : 'completed',
       badge: pred.status,
-      badgeClass: 'badge-succeeded',
+      badgeClass: isInsufficient ? 'badge-not-dispatched' : 'badge-succeeded',
       time: pred.predicted_at,
       details: [
         `Prediction ID: ${pred.prediction_id ? pred.prediction_id.slice(0, 8) : '—'}`,
         `Failure Probability: ${formatPercentage(pred.failure_probability, 1)}`,
-        `Risk Band: ${pred.risk_band}`,
+        `Risk Band: ${pred.risk_band || 'N/A'}`,
       ]
     });
   } else {

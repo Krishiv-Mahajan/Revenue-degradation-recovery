@@ -150,12 +150,14 @@ export function formatINR(minorUnits) {
 /**
  * Formats a decimal ratio to a percentage string.
  * Example: 0.688 -> "68.8%", 0.6 -> "60.0%"
+ * Returns "N/A" for null, undefined, or NaN to avoid misrepresenting absent data as 0%.
  * @param {number|null|undefined} ratio 
  * @param {number} decimals 
+ * @param {string} fallback
  */
-export function formatPercentage(ratio, decimals = 1) {
+export function formatPercentage(ratio, decimals = 1, fallback = 'N/A') {
   if (ratio === null || ratio === undefined || isNaN(ratio)) {
-    return '0.0%';
+    return fallback;
   }
   const pct = Number(ratio) * 100;
   return `${pct.toFixed(decimals)}%`;
