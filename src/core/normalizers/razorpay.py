@@ -1,29 +1,10 @@
-import json
-import hashlib
 from datetime import datetime, timezone
 import uuid
-from typing import Dict, Any
 
 from src.core.domain.models import PaymentEvent
 from src.core.domain.exceptions import NormalizationError
+from src.core.normalizers.hashing import generate_deterministic_hash  # noqa: F401 (re-exported for existing callers)
 from src.core.parsers.razorpay import RazorpayWebhookEvent
-
-
-def generate_deterministic_hash(payload_data: Dict[str, Any]) -> str:
-    """
-    Creates a deterministic SHA-256 hash of a JSON payload dictionary.
-    Keys are sorted, and spacing is removed to ensure equivalent JSON
-    representations produce the same hash.
-    """
-    try:
-        canonical_json = json.dumps(
-            payload_data,
-            sort_keys=True,
-            separators=(',', ':')
-        )
-        return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
-    except TypeError as e:
-        raise NormalizationError(f"Failed to canonicalize payload for hashing: {str(e)}")
 
 
 def normalize_razorpay_event(

@@ -259,6 +259,15 @@ async def test_non_standard_json_constants_are_rejected_before_any_request(raw_b
     assert recorder.requests == []
 
 
+async def test_deeply_nested_body_is_rejected_before_any_request():
+    depth = 50_000
+    recorder = Recorder(_status("SUCCESS"))
+    client = _client(recorder)
+    with pytest.raises(MalformedInputError, match="not valid JSON"):
+        await client.verify_webhook_signature(HEADERS, b"[" * depth + b"]" * depth)
+    assert recorder.requests == []
+
+
 async def test_constant_names_inside_strings_are_preserved_verbatim():
     raw_body = b'{"id": "NaN", "note": "Infinity",  "amount": 1.10}'
     recorder = Recorder(_status("SUCCESS"))

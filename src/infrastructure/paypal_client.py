@@ -380,7 +380,7 @@ def _verification_request_body(transmission: Mapping[str, str], webhook_id: str,
         raise MalformedInputError("PayPal webhook body must be the raw request bytes")
     try:
         event = json.loads(bytes(raw_body).decode("utf-8"), parse_constant=_reject_json_constant)
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise MalformedInputError("PayPal webhook body is not valid JSON") from None
     if not isinstance(event, dict):
         raise MalformedInputError("PayPal webhook body must be a JSON object")

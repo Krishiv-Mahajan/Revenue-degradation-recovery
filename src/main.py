@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 load_dotenv()  # Load environment variables from .env file
@@ -9,11 +10,26 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
+from src.api import dependencies
 from src.api.routes import router as ingestion_router
 from src.api.inspection_routes import router as inspection_router
 from src.infrastructure.database import get_db_session
 
-app = FastAPI(title="Payment Recovery Engine API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # One PayPalClient per process so the OAuth token cache and connection pool are shared.
+    app.state.paypal_client = dependencies.create_paypal_client()
+    try:
+        yield
+    finally:
+        paypal_client = app.state.paypal_client
+        app.state.paypal_client = None
+        if paypal_client is not None:
+            await paypal_client.aclose()
+
+
+app = FastAPI(title="Payment Recovery Engine API", lifespan=lifespan)
 
 # Primary API routers
 app.include_router(ingestion_router)
