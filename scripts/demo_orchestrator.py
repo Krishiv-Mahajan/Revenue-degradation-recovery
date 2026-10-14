@@ -13,18 +13,33 @@ Exercises the full Stage 1–8 Revenue Protection & Recovery Engine against a lo
 
 Uses exclusively canonical services, models, and repositories.
 Preserves all frozen thresholds and policies.
+
+Database safety:
+- DATABASE_URL must be set (environment or .env). There is no hardcoded fallback.
+- The schema must already exist (`alembic upgrade head`); this script never creates or drops tables.
+- A normal run never resets data. `--reset` truncates application tables, and is only
+  permitted when the database name is in DEMO_RESET_ALLOWED_DATABASES and the server
+  confirms the connected database name.
 """
 import argparse
 import asyncio
 import logging
-import os
 import random
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from dotenv import load_dotenv
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from src.infrastructure.db_safety import (
+    UnsafeDatabaseError,
+    assert_connected_database,
+    build_truncate_statement,
+    require_env_database_url,
+    validate_demo_reset_database_url,
+)
 
 # Domain Models & Infrastructure
 from src.infrastructure.models import (
@@ -60,11 +75,6 @@ from src.core.rca.service import RCAService
 from src.core.services.failure_prediction_service import FailurePredictionService
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-)
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("demo_orchestrator")
 
@@ -76,17 +86,40 @@ async def verify_infrastructure(engine) -> None:
             await conn.execute(text("SELECT 1"))
         logger.info("Database connectivity check passed.")
     except Exception as e:
-        logger.error(f"Cannot connect to database at {DATABASE_URL}. Ensure PostgreSQL container is running: {e}")
+        redacted = engine.url.render_as_string(hide_password=True)
+        logger.error(f"Cannot connect to database at {redacted}. Ensure PostgreSQL container is running: {e}")
         sys.exit(1)
 
 
-async def clean_database(engine) -> None:
-    """Drops and recreates all database tables for a clean, reproducible demonstration."""
-    logger.info("Resetting database schema (dropping and recreating tables)...")
+async def verify_schema(engine) -> None:
+    """Requires the Alembic-managed schema to exist; never creates tables."""
+    async with engine.connect() as conn:
+        exists = (await conn.execute(text("SELECT to_regclass('public.payment_events')"))).scalar()
+    if exists is None:
+        logger.error("Database schema not found. Run `alembic upgrade head` before the demo.")
+        sys.exit(1)
+
+
+async def demo_data_present(engine) -> bool:
+    async with engine.connect() as conn:
+        count = (await conn.execute(
+            text("SELECT COUNT(*) FROM payment_events WHERE payment_id LIKE 'pay_demo_%'")
+        )).scalar()
+    return bool(count)
+
+
+async def reset_database(engine, database_url: str) -> None:
+    """
+    Truncates all application tables for a clean, reproducible demonstration.
+    The Alembic-managed schema and alembic_version are preserved.
+    """
+    expected = validate_demo_reset_database_url(database_url)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database schema reset complete.")
+        current = (await conn.execute(text("SELECT current_database()"))).scalar_one()
+        assert_connected_database(current, expected)
+        logger.info(f"Resetting demo database '{current}' (truncating application tables)...")
+        await conn.execute(text(build_truncate_statement(Base.metadata)))
+    logger.info("Database reset complete.")
 
 
 async def seed_stage1_events(session, start_time: datetime, end_time: datetime) -> int:
@@ -449,20 +482,48 @@ async def print_executive_summary(engine) -> None:
 
 async def main():
     parser = argparse.ArgumentParser(description="Payment Recovery Engine Demonstration Orchestrator")
-    parser.add_argument(
+    reset_group = parser.add_mutually_exclusive_group()
+    reset_group.add_argument(
+        "--reset",
+        action="store_true",
+        help="Truncate all application tables before seeding. Only allowed for allowlisted demo databases.",
+    )
+    reset_group.add_argument(
         "--no-reset",
         action="store_true",
-        help="Skip database drop/recreation (retains existing database state).",
+        help="Deprecated no-op: runs never reset unless --reset is given.",
     )
     args = parser.parse_args()
 
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    await verify_infrastructure(engine)
+    load_dotenv()
+    try:
+        database_url = require_env_database_url()
+        if args.reset:
+            validate_demo_reset_database_url(database_url)
+    except UnsafeDatabaseError as e:
+        logger.error(str(e))
+        sys.exit(2)
 
-    if not args.no_reset:
-        await clean_database(engine)
+    engine = create_async_engine(database_url, echo=False)
+    await verify_infrastructure(engine)
+    await verify_schema(engine)
+
+    if args.reset:
+        try:
+            await reset_database(engine, database_url)
+        except UnsafeDatabaseError as e:
+            logger.error(str(e))
+            await engine.dispose()
+            sys.exit(2)
     else:
-        logger.info("Skipping database reset (--no-reset specified).")
+        if await demo_data_present(engine):
+            logger.error(
+                "Demo data is already present in this database. "
+                "Re-run with --reset to clear it (allowlisted demo databases only)."
+            )
+            await engine.dispose()
+            sys.exit(1)
+        logger.info("No reset requested; seeding demo data into the existing database.")
 
     await run_pipeline(engine)
     await print_executive_summary(engine)

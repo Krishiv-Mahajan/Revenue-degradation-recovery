@@ -2,28 +2,12 @@ import pytest
 import pytest_asyncio
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from src.infrastructure.models import Base
 from src.infrastructure.repository import SQLIngestionRepository
 from src.core.domain.models import RawIngestionRecord, PaymentEvent
 from src.core.domain.exceptions import DuplicateEventConflictError
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_repository_save_and_get(db_session: AsyncSession):

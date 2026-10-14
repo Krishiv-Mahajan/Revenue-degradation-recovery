@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.domain.failure_prediction_models import FailurePrediction
 from src.core.intervention.service import InterventionDecisionService
@@ -15,23 +15,6 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, InterventionDecisionModel, PaymentEventModel
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 
 @pytest.mark.asyncio

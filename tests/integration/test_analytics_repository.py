@@ -2,7 +2,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 from src.infrastructure.models import Base
@@ -10,17 +10,6 @@ from src.infrastructure.analytics_repository import AnalyticsRepository
 from src.infrastructure.repository import SQLIngestionRepository
 from src.core.domain.models import PaymentEvent, RawIngestionRecord
 from src.core.domain.analytics_models import PaymentHealthSnapshot
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 @pytest.fixture
 async def session(db_engine):

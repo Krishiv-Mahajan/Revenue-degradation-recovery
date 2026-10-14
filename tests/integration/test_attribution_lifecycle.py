@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.attribution.attribution_service import CounterfactualAttributionService
 from src.core.domain.attribution_models import AttributionStatus, TreatmentStatus
@@ -31,23 +31,6 @@ from src.infrastructure.models import (
     FailurePredictionModel,
     PaymentEventModel,
 )
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 
 def add_payment_event(

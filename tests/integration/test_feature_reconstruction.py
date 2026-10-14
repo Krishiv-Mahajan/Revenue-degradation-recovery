@@ -2,7 +2,7 @@ import pytest
 import pytest_asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 
 from src.infrastructure.models import (
@@ -14,22 +14,6 @@ from src.infrastructure.models import (
 )
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_reconstruct_features_strict_temporal(db_session: AsyncSession):
@@ -114,6 +98,7 @@ async def test_reconstruct_features_strict_temporal(db_session: AsyncSession):
         generated_at=T - timedelta(minutes=9),
         evidence_audit_payload={}
     ))
+    await db_session.flush()
     db_session.add(CandidateCauseModel(
         candidate_id=uuid.uuid4(),
         evaluation_id=eval_id,

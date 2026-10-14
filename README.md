@@ -457,7 +457,17 @@ pytest tests/unit/ tests/boundaries/ -q
 ```
 *Executes 188 tests in < 2 seconds.*
 
-> **Database Safety Notice**: Integration tests (`tests/integration/` and `tests/api/`) connect to PostgreSQL on port 5433 and perform database writes. To avoid truncating or altering live demonstration data, run integration tests against a dedicated test database container rather than an active demonstration instance.
+> **Database Safety Notice**: Integration and API tests (`tests/integration/` and `tests/api/`) truncate tables between tests, so they only ever connect to `TEST_DATABASE_URL`. They never fall back to `DATABASE_URL`, and they are skipped when `TEST_DATABASE_URL` is unset. Before any destructive operation, the shared fixtures in `tests/conftest.py` refuse URLs whose database name does not end in `_test`, URLs on the dev port 5433, and any URL that matches `DATABASE_URL`. The test schema is built with `alembic upgrade head`. In every test, the application's default session factory (`AsyncSessionLocal`, bound to `DATABASE_URL`) is replaced by a guard that fails the test if used, so no code path can quietly fall back to the development database. Tests must use the shared fixtures, pass an explicit session, or mock the caller.
+
+### Running Database-Backed Tests
+Start the disposable test database. It stores data in tmpfs, uses host port 5434, and is never started by default:
+
+```bash
+docker compose --profile test up -d db_test
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5434/payment_recovery_test \
+  pytest tests/api tests/integration -q
+docker compose --profile test stop db_test
+```
 
 ---
 
@@ -486,7 +496,9 @@ cp .env.example .env
 Edit `.env` if necessary. Default configuration:
 ```env
 RAZORPAY_WEBHOOK_SECRET=test_webhook_secret
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery
 ```
+Scripts under `scripts/` read `DATABASE_URL` from the environment or `.env`. There is no hardcoded fallback.
 
 ### Step 3: Start PostgreSQL
 Launch the PostgreSQL 15 container (mapped to host port 5433):
@@ -509,7 +521,11 @@ Execute the demonstration orchestrator to seed baseline traffic, simulate a seve
 ```bash
 PYTHONPATH=. python scripts/demo_orchestrator.py
 ```
-*(To run against an existing database without resetting tables, append `--no-reset`)*.
+*A normal run never deletes data. It requires a migrated schema and refuses to run if demo data is already present. To start over, run it with `--reset`. This truncates all application tables but keeps the schema and the Alembic version. It is only allowed when the database name in `DATABASE_URL` is `payment_recovery` or `payment_recovery_demo`, and the server must confirm the connected database name before anything is truncated.*
+
+```bash
+PYTHONPATH=. python scripts/demo_orchestrator.py --reset
+```
 
 ### Step 6: Start the Application Server
 Launch FastAPI with Uvicorn:

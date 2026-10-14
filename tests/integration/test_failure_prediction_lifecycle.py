@@ -2,7 +2,7 @@ import uuid
 import pytest
 import pytest_asyncio
 from datetime import datetime, timezone, timedelta
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from src.infrastructure.models import Base, PaymentEventModel
 from src.core.services.failure_prediction_service import FailurePredictionService
@@ -10,22 +10,6 @@ from src.core.services.feature_reconstruction_service import FeatureReconstructi
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.core.ml.model import DeterministicBaselineModel
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 def create_payment_event(session: AsyncSession, payment_id: str, event_type: str, ingested_at: datetime):
     model = PaymentEventModel(

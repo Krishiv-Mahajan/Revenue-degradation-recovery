@@ -34,3 +34,6 @@ build-backend = "poetry.core.masonry.api"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: requires an isolated Postgres database via TEST_DATABASE_URL",
+]

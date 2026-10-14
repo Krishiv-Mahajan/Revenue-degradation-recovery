@@ -3,36 +3,18 @@ import pytest_asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.infrastructure.models import Base
 from src.core.ml.training import Stage5PipelineValidator
 from scripts.generate_synthetic_history import generate_dataset
 
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest_asyncio.fixture
-async def ml_db_session():
-    # Use a separate test DB schema/url for this heavy integration test
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-        
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
-
 @pytest.mark.asyncio
-async def test_synthetic_training_pipeline_end_to_end(ml_db_session: AsyncSession):
+async def test_synthetic_training_pipeline_end_to_end(test_database_url: str, db_session: AsyncSession):
     # 1. Generate small synthetic dataset directly into the test DB
-    await generate_dataset(engine_url=DATABASE_URL, num_days=3, events_per_day=50)
+    await generate_dataset(engine_url=test_database_url, num_days=3, events_per_day=50)
     
     # 2. Run the pipeline
-    validator = Stage5PipelineValidator(ml_db_session)
+    validator = Stage5PipelineValidator(db_session)
     
     # Extract dataset
     X_raw, y_raw, times = await validator.extract_dataset()

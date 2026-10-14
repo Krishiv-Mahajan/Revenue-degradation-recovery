@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.domain.execution_exceptions import InvalidDecisionForExecutionError
 from src.core.domain.execution_models import (
@@ -26,23 +26,6 @@ from src.core.execution.simulator import SimulatorInterventionExecutor, Simulato
 from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, PaymentEventModel
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 
 def add_payment_event(

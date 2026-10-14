@@ -2,7 +2,7 @@ import pytest
 import pytest_asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from sqlalchemy import select, func
 
 from src.infrastructure.models import Base, PaymentEventModel, FailurePredictionModel
@@ -12,22 +12,6 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.core.ml.model import DeterministicBaselineModel
 from src.core.domain.failure_prediction_models import PredictionStatus
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
-    async with Session() as session:
-        yield session
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):

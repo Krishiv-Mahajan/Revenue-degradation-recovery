@@ -3,20 +3,15 @@ from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.main import app
 from src.api.dependencies import get_db_session
 
-from src.infrastructure.models import Base, PaymentEventModel
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
+from src.infrastructure.models import PaymentEventModel
 
 @pytest_asyncio.fixture
-async def client():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+async def client(db_engine):
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
 
     async def override_get_db_session():
         async with Session() as session:
@@ -26,8 +21,6 @@ async def client():
     async with AsyncClient(app=app, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.pop(get_db_session, None)
-    await engine.dispose()
-
 @pytest.mark.asyncio
 async def test_health_check_endpoint(client):
     response = await client.get("/health")
@@ -112,7 +105,7 @@ async def test_rca_invalid_uuid(client):
     assert response.json()["detail"] == "RCA evaluation not found"
 
 @pytest.mark.asyncio
-async def test_rca_success_with_seed_data(client):
+async def test_rca_success_with_seed_data(client, db_engine):
     import uuid
     from datetime import datetime, timezone
     from src.infrastructure.models import DegradationEpisodeModel, RCAEvaluationModel, CandidateCauseModel
@@ -123,8 +116,7 @@ async def test_rca_success_with_seed_data(client):
     now = datetime.now(timezone.utc)
 
     # Insert episode and RCA evaluation via session
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         episode = DegradationEpisodeModel(
             episode_id=ep_id,
@@ -159,10 +151,10 @@ async def test_rca_success_with_seed_data(client):
             excess_segment_failures=8.0,
             rank=1,
         )
-        session.add_all([episode, evaluation, cause])
+        session.add_all([episode, evaluation])
+        await session.flush()
+        session.add(cause)
         await session.commit()
-    await engine.dispose()
-
     response = await client.get(f"/api/v1/rca/{ep_id}")
     assert response.status_code == 200
     data = response.json()
@@ -177,7 +169,7 @@ async def test_rca_success_with_seed_data(client):
     assert "intervention_context" in data
 
 @pytest.mark.asyncio
-async def test_rca_episode_scoping_no_cross_episode_leakage(client):
+async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
     """
     Regression test proving two distinct episodes cannot leak downstream
     telemetry (predictions, decisions, protected GMV) into each other.
@@ -190,6 +182,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client):
         CandidateCauseModel,
         FailurePredictionModel,
         InterventionDecisionModel,
+        InterventionCommandModel,
         CounterfactualAttributionModel,
     )
 
@@ -206,14 +199,15 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client):
     pred2_id = uuid.uuid4()
     dec2_id = uuid.uuid4()
     attr2_id = uuid.uuid4()
+    cmd1_id = uuid.uuid4()
+    cmd2_id = uuid.uuid4()
 
     pay1 = f"pay_attempt_{uuid.uuid4()}"
     pay2 = f"pay_attempt_{uuid.uuid4()}"
 
     now = datetime.now(timezone.utc)
 
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         # Episode 1
         ep1 = DegradationEpisodeModel(
@@ -283,9 +277,23 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client):
             evaluation_audit_payload={"upstream_context": {"episode_id": str(ep1_id)}},
             created_at=now,
         )
+        cmd1 = InterventionCommandModel(
+            command_id=cmd1_id,
+            decision_id=dec1_id,
+            payment_attempt_id=pay1,
+            decision_version=1,
+            route_key="FALLBACK_PAYMENT_LINK",
+            policy_id="test_policy",
+            policy_version="1.0",
+            command_status="SUCCEEDED",
+            idempotency_key=f"idem_{cmd1_id}",
+            created_at=now,
+            expires_at=now,
+            updated_at=now,
+        )
         attr1 = CounterfactualAttributionModel(
             attribution_id=attr1_id,
-            command_id=uuid.uuid4(),
+            command_id=cmd1_id,
             payment_attempt_id=pay1,
             decision_id=dec1_id,
             attribution_version=1,
@@ -375,9 +383,23 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client):
             evaluation_audit_payload={"upstream_context": {"episode_id": str(ep2_id)}},
             created_at=now,
         )
+        cmd2 = InterventionCommandModel(
+            command_id=cmd2_id,
+            decision_id=dec2_id,
+            payment_attempt_id=pay2,
+            decision_version=1,
+            route_key="FALLBACK_PAYMENT_LINK",
+            policy_id="test_policy",
+            policy_version="1.0",
+            command_status="SUCCEEDED",
+            idempotency_key=f"idem_{cmd2_id}",
+            created_at=now,
+            expires_at=now,
+            updated_at=now,
+        )
         attr2 = CounterfactualAttributionModel(
             attribution_id=attr2_id,
-            command_id=uuid.uuid4(),
+            command_id=cmd2_id,
             payment_attempt_id=pay2,
             decision_id=dec2_id,
             attribution_version=1,
@@ -399,10 +421,10 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client):
             created_at=now,
         )
 
-        session.add_all([ep1, eval1, cand1, pred1, dec1, attr1, ep2, eval2, cand2, pred2, dec2, attr2])
+        session.add_all([ep1, eval1, pred1, dec1, cmd1, ep2, eval2, pred2, dec2, cmd2])
+        await session.flush()
+        session.add_all([cand1, attr1, cand2, attr2])
         await session.commit()
-    await engine.dispose()
-
     # Query Episode 1
     resp1 = await client.get(f"/api/v1/rca/{ep1_id}")
     assert resp1.status_code == 200
@@ -491,7 +513,7 @@ async def test_attributions_enriched_endpoint(client):
 
 
 @pytest.mark.asyncio
-async def test_payment_id_roundtrip_between_payments_and_timeline(client):
+async def test_payment_id_roundtrip_between_payments_and_timeline(client, db_engine):
     """
     Regression test:
     1. Create/seed a valid payment.
@@ -505,8 +527,7 @@ async def test_payment_id_roundtrip_between_payments_and_timeline(client):
     test_pid = f"pay_roundtrip_{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc)
 
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         auth_evt = PaymentEventModel(
             event_id=uuid.uuid4(),
@@ -538,8 +559,6 @@ async def test_payment_id_roundtrip_between_payments_and_timeline(client):
         )
         session.add_all([auth_evt, term_evt])
         await session.commit()
-    await engine.dispose()
-
     # 2. Fetch it through GET /api/v1/payments
     payments_resp = await client.get(f"/api/v1/payments?search={test_pid}")
     assert payments_resp.status_code == 200
@@ -582,7 +601,7 @@ async def test_nonexistent_payment_returns_404(client):
 
 
 @pytest.mark.asyncio
-async def test_captured_outcome_without_stage8_attribution_is_not_attributed(client):
+async def test_captured_outcome_without_stage8_attribution_is_not_attributed(client, db_engine):
     """
     Audit 3 Regression test:
     Proves that a successful CAPTURED outcome does NOT automatically imply attribution.
@@ -592,8 +611,7 @@ async def test_captured_outcome_without_stage8_attribution_is_not_attributed(cli
     test_pid = f"pay_natural_capture_{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc)
 
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         auth_evt = PaymentEventModel(
             event_id=uuid.uuid4(),
@@ -625,8 +643,6 @@ async def test_captured_outcome_without_stage8_attribution_is_not_attributed(cli
         )
         session.add_all([auth_evt, cap_evt])
         await session.commit()
-    await engine.dispose()
-
     # Query Payments list
     payments_resp = await client.get(f"/api/v1/payments?search={test_pid}")
     assert payments_resp.status_code == 200
@@ -672,7 +688,7 @@ async def test_stage8_counterfactual_semantics_equivalence(client):
 
 
 @pytest.mark.asyncio
-async def test_payments_list_canonical_events(client):
+async def test_payments_list_canonical_events(client, db_engine):
     """
     Test that the payments list correctly handles various lifecycles without duplicates
     and correctly joins recovery information without fabricating it.
@@ -688,8 +704,7 @@ async def test_payments_list_canonical_events(client):
     pid_auth_fail = f"pay_afail_{uuid.uuid4().hex[:8]}"
     pid_fail_only = f"pay_fonly_{uuid.uuid4().hex[:8]}"
     
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    Session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         # Case 1: payment.authorized -> payment.captured with recovery info
         session.add_all([
@@ -745,8 +760,6 @@ async def test_payments_list_canonical_events(client):
         )
         
         await session.commit()
-    await engine.dispose()
-    
     # Verification
     # Case 1
     resp_success = await client.get(f"/api/v1/payments?search={pid_success}")

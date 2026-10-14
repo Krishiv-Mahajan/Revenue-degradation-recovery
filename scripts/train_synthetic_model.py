@@ -2,17 +2,16 @@ import asyncio
 import logging
 import joblib
 import os
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from src.core.ml.training import Stage5PipelineValidator
-from src.infrastructure.models import Base
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
+from src.infrastructure.db_safety import require_env_database_url
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def main():
-    engine = create_async_engine(DATABASE_URL, echo=False)
+    engine = create_async_engine(require_env_database_url(), echo=False)
     Session = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     async with Session() as session:
@@ -39,4 +38,5 @@ async def main():
     await engine.dispose()
 
 if __name__ == "__main__":
+    load_dotenv()
     asyncio.run(main())

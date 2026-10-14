@@ -1,7 +1,7 @@
 import pytest
 import uuid
 from datetime import datetime, timedelta, timezone
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 from src.infrastructure.models import (
@@ -12,17 +12,6 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.core.intervention.service import InterventionDecisionService
 from src.core.intervention.policy import get_default_policy
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 @pytest.fixture
 async def session(db_engine):
@@ -114,7 +103,9 @@ async def test_stage5_stage6_boundary_episode_resolution(session: AsyncSession, 
     rca_w, cand_w = make_rca(ep_wallet.episode_id, t_eval, "WALLET", "PAYTM", traffic_mix_shift=True)
     rca_g, _ = make_rca(ep_global.episode_id, t_eval, None, None, classification="SYSTEMIC")
     
-    session.add_all([ep_wallet, ep_global, rca_w, cand_w, rca_g])
+    session.add_all([ep_wallet, ep_global, rca_w, rca_g])
+    await session.flush()
+    session.add(cand_w)
     
     payment_id = "PAY_123"
     auth_event = make_event(payment_id, wallet="PAYTM", ingested_at=T0)
@@ -164,7 +155,9 @@ async def test_stage5_stage6_boundary_currency_episode(session: AsyncSession, fe
     rca_c, cand_c = make_rca(ep_currency.episode_id, t_eval, "CURRENCY", "USD")
     rca_b, cand_b = make_rca(ep_bank.episode_id, t_eval, "BANK", "CHASE")
     
-    session.add_all([ep_currency, ep_bank, rca_c, cand_c, rca_b, cand_b])
+    session.add_all([ep_currency, ep_bank, rca_c, rca_b])
+    await session.flush()
+    session.add_all([cand_c, cand_b])
     
     payment_id = "PAY_456"
     auth_event = make_event(payment_id, currency="USD", bank="CHASE", ingested_at=T0)

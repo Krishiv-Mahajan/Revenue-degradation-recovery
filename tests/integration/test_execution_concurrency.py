@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.domain.execution_models import CommandStatus
 from src.core.domain.intervention_models import (
@@ -24,19 +24,6 @@ from src.infrastructure.models import (
     InterventionExecutionAttemptModel,
     PaymentEventModel,
 )
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-
-@pytest_asyncio.fixture
-async def db_engine():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 
 @pytest.mark.asyncio

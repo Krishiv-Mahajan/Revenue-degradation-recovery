@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric
+from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -59,6 +59,12 @@ class PaymentEventModel(Base):
 
     __table_args__ = (
         UniqueConstraint('source_system', 'source_event_id', name='uq_payment_event_source_identity'),
+        Index('idx_payment_events_timestamp_event_type', 'timestamp', 'event_type'),
+        Index('ix_payment_events_eligibility', 'payment_id', 'ingested_at'),
+        Index('ix_payment_events_hist_pm', 'payment_method', 'ingested_at', 'event_type'),
+        Index('ix_payment_events_hist_bank', 'bank', 'ingested_at', 'event_type'),
+        Index('ix_payment_events_hist_wallet', 'wallet', 'ingested_at', 'event_type'),
+        Index('ix_payment_events_hist_curr', 'currency', 'ingested_at', 'event_type'),
     )
 
 class PaymentHealthSnapshotModel(Base):
@@ -113,6 +119,7 @@ class DegradationSignalModel(Base):
 
     __table_args__ = (
         UniqueConstraint('segment_dimension', 'segment_value', 'window_start', 'evaluation_version', name='uq_signal_evaluation_version'),
+        Index('ix_degradation_signals_stage3_as_of', 'segment_dimension', 'segment_value', 'evaluation_timestamp'),
     )
 
 class DegradationEpisodeModel(Base):
@@ -151,6 +158,11 @@ class EpisodeStateHistoryModel(Base):
     
     effective_start_window = Column(DateTime(timezone=True), nullable=False)
     evaluation_timestamp = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index('ix_episode_state_history_as_of', 'segment_dimension', 'segment_value', 'evaluation_timestamp'),
+        Index('ix_episode_state_history_run', 'reconciliation_run_id'),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +214,7 @@ class RCAEvaluationModel(Base):
             "evaluation_version",
             name="uq_rca_evaluation_version",
         ),
+        Index("ix_rca_evaluations_as_of", "episode_id", "generated_at", "evaluation_version"),
     )
 
 
@@ -219,7 +232,11 @@ class CandidateCauseModel(Base):
     candidate_id = Column(UUID(as_uuid=True), primary_key=True)
 
     # Immutable FK to the owning evaluation.
-    evaluation_id = Column(UUID(as_uuid=True), nullable=False)
+    evaluation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("rca_evaluations.evaluation_id", name="fk_candidate_cause_evaluation"),
+        nullable=False,
+    )
 
     # Structural dimension only (BANK, CURRENCY, PAYMENT_METHOD, WALLET).
     # Supporting dimensions (ERROR_CODE, etc.) do NOT produce CandidateCause rows.
@@ -360,6 +377,10 @@ class InterventionDecisionModel(Base):
             "decision_version",
             name="uq_intervention_decision_version",
         ),
+        Index("ix_intervention_decisions_attempt_lookup", "payment_attempt_id", "decision_version"),
+        Index("ix_intervention_decisions_fingerprint", "input_fingerprint"),
+        Index("ix_intervention_decisions_rate_limiting", "decision_type", "decided_at"),
+        Index("ix_intervention_decisions_route_cooldown", "payment_attempt_id", "selected_route_id", "decided_at"),
     )
 
 
@@ -376,7 +397,7 @@ class InterventionCommandModel(Base):
     __tablename__ = "intervention_commands"
 
     command_id = Column(UUID(as_uuid=True), primary_key=True)
-    decision_id = Column(UUID(as_uuid=True), nullable=False, unique=True)
+    decision_id = Column(UUID(as_uuid=True), nullable=False)
     payment_attempt_id = Column(String(255), nullable=False)
     decision_version = Column(Integer, nullable=False)
     route_key = Column(String(50), nullable=False)
@@ -384,17 +405,21 @@ class InterventionCommandModel(Base):
     policy_version = Column(String(50), nullable=False)
     command_status = Column(String(20), nullable=False)  # PENDING, EXECUTING, SUCCEEDED, FAILED, EXPIRED, NOT_NEEDED
     status_reason = Column(String(255), nullable=True)
-    idempotency_key = Column(String(100), nullable=False, unique=True)
+    idempotency_key = Column(String(100), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
+        UniqueConstraint("decision_id", name="uq_cmd_decision"),
+        UniqueConstraint("idempotency_key", name="uq_cmd_idempotency_key"),
         UniqueConstraint(
             "payment_attempt_id",
             "decision_version",
             name="uq_cmd_attempt_version",
         ),
+        Index("ix_cmd_status_expiry", "command_status", "expires_at"),
+        Index("ix_cmd_attempt_lookup", "payment_attempt_id", "created_at"),
     )
 
 
@@ -425,6 +450,7 @@ class InterventionExecutionAttemptModel(Base):
             "attempt_number",
             name="uq_exec_attempt_number",
         ),
+        Index("ix_exec_attempt_cmd", "command_id"),
     )
 
 
@@ -460,6 +486,7 @@ class PaymentOutcomeObservationModel(Base):
             "as_of_timestamp",
             name="uq_outcome_observation_temporal",
         ),
+        Index("ix_obs_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
     )
 
 
@@ -475,9 +502,17 @@ class CounterfactualAttributionModel(Base):
     __tablename__ = "counterfactual_attributions"
 
     attribution_id = Column(UUID(as_uuid=True), primary_key=True)
-    command_id = Column(UUID(as_uuid=True), nullable=False)
+    command_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("intervention_commands.command_id", name="fk_attribution_command"),
+        nullable=False,
+    )
     payment_attempt_id = Column(String(255), nullable=False)
-    decision_id = Column(UUID(as_uuid=True), nullable=False)
+    decision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("intervention_decisions.decision_id", name="fk_attribution_decision"),
+        nullable=False,
+    )
     attribution_version = Column(Integer, nullable=False)
     attributed_at = Column(DateTime(timezone=True), nullable=False)
     as_of_timestamp = Column(DateTime(timezone=True), nullable=False)
@@ -508,6 +543,8 @@ class CounterfactualAttributionModel(Base):
             "as_of_timestamp",
             name="uq_attribution_temporal",
         ),
+        Index("ix_attr_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
+        Index("ix_attr_status", "attribution_status", "attributed_at"),
     )
 
 

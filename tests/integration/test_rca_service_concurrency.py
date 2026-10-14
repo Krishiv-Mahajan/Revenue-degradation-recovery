@@ -3,24 +3,13 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 from src.infrastructure.models import Base
 from src.infrastructure.rca_repository import RCARepository
 from src.core.rca.service import RCAService
 from src.core.domain.degradation_models import DegradationEpisode, EpisodeStatus
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_concurrent_evaluate_episode_serializes_safely(db_engine, monkeypatch):

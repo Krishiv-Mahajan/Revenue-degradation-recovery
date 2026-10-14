@@ -10,18 +10,6 @@ from src.core.degradation.service import DegradationService
 from src.core.domain.analytics_models import PaymentHealthSnapshot
 from src.core.domain.degradation_models import EpisodeStatus
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 @pytest.fixture
 async def session(db_engine):

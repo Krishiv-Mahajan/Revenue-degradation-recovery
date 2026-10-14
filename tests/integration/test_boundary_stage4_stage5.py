@@ -1,22 +1,11 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 import uuid
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 from src.infrastructure.models import Base, PaymentEventModel, EpisodeStateHistoryModel, RCAEvaluationModel, CandidateCauseModel
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 @pytest.fixture
 async def session(db_engine):
@@ -145,7 +134,9 @@ async def test_boundary_rca_matching_and_temporal(session: AsyncSession, service
     # Valid RCA < T
     rca_valid, cand_valid = make_rca(ep.episode_id, T0 - timedelta(minutes=1), "CURRENCY", "INR", "STRONG", version=3)
     
-    session.add_all([rca_eq, cand_eq, rca_fut, cand_fut, rca_valid, cand_valid])
+    session.add_all([rca_eq, rca_fut, rca_valid])
+    await session.flush()
+    session.add_all([cand_eq, cand_fut, cand_valid])
     await session.commit()
     
     # Reconstruct features for payment at T0 with currency INR

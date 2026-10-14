@@ -4,30 +4,31 @@ import random
 import logging
 import os
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-from src.infrastructure.models import Base, RawIngestionRecordModel, PaymentEventModel
+from src.infrastructure.db_safety import require_env_database_url
+from src.infrastructure.models import RawIngestionRecordModel, PaymentEventModel
 from src.core.normalizers.razorpay import generate_deterministic_hash
-
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def generate_dataset(engine_url=DATABASE_URL, num_days=21, events_per_day=300):
+async def generate_dataset(engine_url: Optional[str] = None, num_days=21, events_per_day=300):
     """
     Generates a deterministic synthetic dataset for pipeline validation.
     DO NOT USE FOR EMPIRICAL TRAINING.
+
+    Requires an Alembic-migrated schema (`alembic upgrade head`). When engine_url is
+    omitted, DATABASE_URL from the environment is used.
     """
     logger.info("SYNTHETIC / DEVELOPMENT - Starting generation of synthetic payment lifecycles")
     random.seed(42) # Deterministic seeded generation
 
-    engine = create_async_engine(engine_url, echo=False)
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        
+    engine = create_async_engine(engine_url or require_env_database_url(), echo=False)
+
     Session = async_sessionmaker(bind=engine, expire_on_commit=False)
     
     # Establish time bounds - fix the end date so it is deterministic across tests
@@ -132,4 +133,5 @@ async def generate_dataset(engine_url=DATABASE_URL, num_days=21, events_per_day=
     logger.info("SYNTHETIC / DEVELOPMENT - Finished generation.")
 
 if __name__ == "__main__":
+    load_dotenv()
     asyncio.run(generate_dataset())

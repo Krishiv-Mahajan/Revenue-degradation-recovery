@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple
 # Ensure repository root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from dotenv import load_dotenv
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -44,6 +45,7 @@ from src.core.domain.degradation_models import DegradationEpisode, EpisodeStatus
 from src.core.normalizers.razorpay import generate_deterministic_hash
 from src.core.rca.service import RCAService
 from src.infrastructure.analytics_repository import AnalyticsRepository
+from src.infrastructure.db_safety import require_env_database_url
 from src.infrastructure.degradation_repository import DegradationRepository
 from src.infrastructure.models import (
     CandidateCauseModel,
@@ -54,11 +56,6 @@ from src.infrastructure.models import (
     RCAEvaluationModel,
 )
 from src.infrastructure.rca_repository import RCARepository
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery",
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("generate_live_context")
@@ -513,7 +510,7 @@ async def check_lookback_terminal_volume(session: AsyncSession, now: datetime) -
 
 
 async def main_async(pm: str, curr: str, seed: int) -> int:
-    engine = create_async_engine(DATABASE_URL, echo=False)
+    engine = create_async_engine(require_env_database_url(), echo=False)
     Session = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     now = datetime.now(timezone.utc)
@@ -604,6 +601,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Deterministic random seed (default: 42)")
 
     args = parser.parse_args()
+    load_dotenv()
 
     try:
         ret = asyncio.run(main_async(args.pm, args.curr, args.seed))
