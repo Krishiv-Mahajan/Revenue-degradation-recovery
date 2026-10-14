@@ -20,6 +20,7 @@ from src.core.normalizers import paypal as paypal_normalizer
 from src.core.rca.service import RCAService
 from src.core.services.failure_prediction_service import FailurePredictionService
 from src.infrastructure.analytics_repository import AnalyticsRepository
+from src.infrastructure.attribution_repository import AttributionRepository
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.models import PaymentEventModel
 
@@ -83,6 +84,10 @@ async def _prediction_terminal_label(session):
     await _prediction_service(session).lookup_terminal_label("pay_1", T, observation_window_minutes=30)
 
 
+async def _attribution_payment_amount(session):
+    await AttributionRepository(session).get_canonical_payment_amount("pay_1", T)
+
+
 async def _training_authorized_events(session):
     await Stage5PipelineValidator(session).get_authorized_events()
 
@@ -132,6 +137,10 @@ CASES = {
     "prediction.lookup_terminal_label": (
         _prediction_terminal_label, "src.core.services.failure_prediction_service", 1,
         ["payment_events.payment_id = ", "payment_events.ingested_at >= ", "payment_events.ingested_at <= "],
+    ),
+    "attribution.get_canonical_payment_amount": (
+        _attribution_payment_amount, "src.infrastructure.attribution_repository", 1,
+        ["payment_events.payment_id = ", "payment_events.event_type = ", "payment_events.ingested_at <= "],
     ),
     "training.get_authorized_events": (
         _training_authorized_events, "src.core.ml.training", 1,

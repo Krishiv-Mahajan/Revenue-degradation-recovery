@@ -68,8 +68,9 @@ class CounterfactualAttributionService:
         if decision.stage5_prediction_id:
             prediction = await self.repo.get_prediction(decision.stage5_prediction_id)
 
+        # Same authorization Stage 6 sized the decision from, never read beyond as_of.
         payment_amount = await self.repo.get_canonical_payment_amount(
-            command.payment_attempt_id, as_of
+            command.payment_attempt_id, min(decision.decided_at, as_of)
         )
         if payment_amount is None:
             payment_amount = 0

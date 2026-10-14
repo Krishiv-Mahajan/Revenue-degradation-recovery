@@ -15,6 +15,7 @@ from src.core.domain.attribution_models import (
     CounterfactualAttribution,
     TreatmentStatus,
 )
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     CounterfactualAttributionModel,
     FailurePredictionModel,
@@ -197,13 +198,19 @@ class AttributionRepository:
     ) -> Optional[int]:
         """
         Fetch canonical payment amount in minor units from Stage 1 payment_events table <= as_of_timestamp.
+        The amount is taken from the latest payment.authorized event at or before the cutoff,
+        matching how Stage 6 sizes interventions, so refund, capture and order amounts can
+        never be attributed.
         """
         stmt = (
             select(PaymentEventModel.amount_minor_units)
             .where(
                 PaymentEventModel.payment_id == payment_attempt_id,
+                PaymentEventModel.event_type == "payment.authorized",
                 PaymentEventModel.ingested_at <= as_of_timestamp,
+                PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
             )
+            .order_by(PaymentEventModel.ingested_at.desc())
             .limit(1)
         )
         res = await self.session.execute(stmt)
