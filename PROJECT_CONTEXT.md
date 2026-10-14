@@ -251,6 +251,35 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - A refund is not a failed payment or a recovered payment.
   - Downstream pipeline activation for PayPal events is a separate, later milestone.
 
+### P1a — PayPal Lifecycle Semantics Contract (2026-10-14, complete)
+
+- **Commit:** `6918168ce0e4e2895e3d7d2bb5767d9ffe612e88` — `feat: define PayPal lifecycle semantics`
+- **Files:** `src/core/domain/paypal_lifecycle.py` (new), `tests/unit/test_paypal_lifecycle.py` (new).
+- **Scope:** pure lifecycle classification and helper functions over canonical PayPal `PaymentEvent`s. No I/O, schema changes, migrations, provider-filter changes, Stage 2–8 behavior changes or pipeline activation. The module is not imported by any application code.
+- **Lifecycle semantics (keyed by canonical `event_type`):**
+  - `order.approved` — order consent (`ORDER_CONSENT`). A candidate amount for possible future pre-outcome sizing; not a capture and not a terminal outcome. Being a sizing candidate does not mean the order was captured, successful or recovered.
+  - `order.completed` — informational (`ORDER_INFORMATIONAL`); not proof of a capture and never counted as captured GMV.
+  - `payment.pending` — non-terminal capture state (`CAPTURE_PENDING`).
+  - `payment.captured` — successful capture (`CAPTURE_SUCCEEDED`, outcome `CAPTURED`); contributes to gross captured GMV.
+  - `payment.failed` — failed capture (`CAPTURE_FAILED`, outcome `FAILED`).
+  - `payment.refunded` — a separate post-settlement adjustment (`REFUND`). It does not turn the original capture into a failure, and it is not terminal, not a sizing input and not gross captured GMV.
+  - Unknown event types and non-PayPal events raise `PayPalLifecycleError` (fail closed).
+- **Outcomes:**
+  - Capture outcomes are per capture; captured GMV is gross (refunds are not netted out).
+  - The order-level outcome when a decline is followed by a successful capture remains **undecided**. No order-level outcome resolver exists; this must be resolved in a future lifecycle-aware pipeline milestone.
+- **Identity and correlation:**
+  - Existing canonical identifiers and persisted values are unchanged: `source_event_id` remains the webhook-deduplication identity; `payment_id` remains the order id for order events, the capture id for capture events and the refunded capture's id for refunds.
+  - `order_id` is the lifecycle correlation key only when the payload provides it. Events without an explicit `order_id` remain stored but are classified `NOT_CORRELATABLE`; relationships are never inferred from other identifiers.
+  - The refund's own resource id is kept only in the raw payload, so distinct refunds of one capture are distinguishable only by webhook event id.
+- **Tests:** lifecycle, PayPal parser, PayPal normalizer and provider-isolation tests: 234 passed offline, with `TEST_DATABASE_URL` unset and `DATABASE_URL` pointed at an unreachable localhost address:
+  `env -u TEST_DATABASE_URL DATABASE_URL="postgresql+asyncpg://nobody:nobody@127.0.0.1:1/unreachable_db" .venv/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_paypal_lifecycle.py tests/unit/test_paypal_parser.py tests/unit/test_paypal_normalizer.py tests/unit/test_provider_isolation.py`
+- **Not validated:** no real PostgreSQL or PayPal Sandbox validation was performed.
+- **Remaining work (not implemented):**
+  - **P1b:** decide whether to add an optional, nullable `provider_resource_id` column and migration (e.g. to store refund resource ids canonically).
+  - **P1c:** provider-isolation regression tests only, without changing frozen Stage 2–8 behavior. Stage 6–7 terminal-event queries (`intervention_repository.check_terminal_event_exists`, `execution_repository`) do not filter by source system; any change to their query behavior needs separate explicit approval.
+  - PayPal remains excluded from the existing downstream pipeline via `NON_RAZORPAY_PIPELINE_SOURCES`.
+  - Reporting issues (e.g. the inspection dashboard summary counts `payment.captured` across all providers) and full PayPal pipeline activation remain separate work.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**.
