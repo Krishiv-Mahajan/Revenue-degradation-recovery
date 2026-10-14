@@ -182,6 +182,29 @@ Stage 8 operationalizes the measurement of protected GMV using an auditable, ris
   - Zero LLMs, zero new external ML models, zero mutation of Stages 1–7 tables.
   - Stage 8 is the final terminal stage of the approved product flow.
 
+## Approved Post-Stage 8 Extensions
+
+Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with explicit approval. They are not part of the original Stage 1–8 implementations recorded above.
+
+### M2.1 — Stage 8 Attribution Amount Lookup (2026-10-14, complete)
+
+- **Commit:** `648400ec68561f40d751bc1c8931e6ed53ba5db8` — `fix: align attribution amount with intervention decision`
+- **Builds on:** provider-isolation commit `ef926aa7f9bd08c680a3de11dd53c59b7930ebf8`, which introduced the shared constant `NON_RAZORPAY_PIPELINE_SOURCES` in `src/core/domain/source_systems.py`.
+- **Problem:** `AttributionRepository.get_canonical_payment_amount` filtered only by `payment_id` and `ingested_at` and took `LIMIT 1` without ordering, so any lifecycle row (capture, refund, order) could supply the attributed payment amount.
+- **Approved change:** Stage 8 now uses the same authorization amount Stage 6 used to size the decision:
+  - Selects `payment.authorized` events only.
+  - Excludes PayPal via `source_system NOT IN NON_RAZORPAY_PIPELINE_SOURCES`.
+  - Selects the latest eligible authorization (`ORDER BY ingested_at DESC LIMIT 1`), matching Stage 6 `get_payment_event_by_id`.
+  - Lookup cutoff is `min(decision.decided_at, as_of)`: Stage 6's decision cutoff, never reading beyond the attribution `as_of` information barrier.
+  - A missing authorized amount still yields `payment_amount = 0` and zero protected GMV, as before.
+- **Unchanged:** schema, migrations, API responses, treatment/outcome/timing semantics, and the attribution calculator.
+- **Tests:** offline `tests/unit` + `tests/boundaries`: 731 passed, 4 pre-existing httpx deprecation warnings. Database-backed attribution integration tests were skipped (`TEST_DATABASE_URL` not set).
+- **Known limitations:**
+  - No secondary tie-breaker: authorizations with identical `ingested_at` may resolve to different rows in Stage 6 and Stage 8.
+  - Backdated inserts (rows written with an earlier explicit `ingested_at`, e.g. replay or backfill scripts) can change which authorization a historical lookup selects.
+  - Currency-safe reporting remains unfinished: attribution records and summary totals carry no currency, and the dashboard formats all amounts as INR.
+- **Next planned milestone:** M2.2 — currency-correct API and dashboard.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**.
