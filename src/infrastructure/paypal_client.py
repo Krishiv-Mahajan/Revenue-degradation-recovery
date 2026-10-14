@@ -1,24 +1,38 @@
 """
-PayPal REST API client: configuration and OAuth 2.0 client-credentials authentication.
+PayPal REST API client: configuration, OAuth 2.0 client-credentials authentication and
+webhook signature verification through PayPal's verify-webhook-signature API.
 
 Error messages carry only HTTP status information and PayPal's debug ID. Credentials,
-Authorization headers, access tokens and response bodies are never logged or included in
-exceptions.
+Authorization headers, access tokens, transmission signatures, webhook payloads and
+response bodies are never logged or included in exceptions.
 """
 import asyncio
+import json
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Mapping, Optional
+from typing import Callable, Dict, Mapping, Optional
 
 import httpx
 from pydantic import SecretStr
 
+from src.core.domain.exceptions import InvalidWebhookSignatureError, MalformedInputError
+
 SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
 LIVE_BASE_URL = "https://api-m.paypal.com"
 TOKEN_PATH = "/v1/oauth2/token"
+VERIFY_WEBHOOK_SIGNATURE_PATH = "/v1/notifications/verify-webhook-signature"
+
+# Lower-cased transmission header -> verify-webhook-signature request field.
+TRANSMISSION_HEADER_FIELDS = {
+    "paypal-auth-algo": "auth_algo",
+    "paypal-cert-url": "cert_url",
+    "paypal-transmission-id": "transmission_id",
+    "paypal-transmission-sig": "transmission_sig",
+    "paypal-transmission-time": "transmission_time",
+}
 
 TOKEN_REFRESH_MARGIN_SECONDS = 60
 MAX_TOKEN_LIFETIME_SECONDS = 86400
@@ -49,6 +63,14 @@ class PayPalAuthError(PayPalClientError):
 
 class PayPalUnavailableError(PayPalClientError):
     """PayPal could not be reached or returned an unusable response."""
+    pass
+
+
+class PayPalVerificationRequestRejectedError(PayPalClientError):
+    """
+    PayPal rejected a webhook verification request as invalid (HTTP 400): malformed
+    transmission data or a webhook_id that does not match the environment. Not an outage.
+    """
     pass
 
 
@@ -131,6 +153,12 @@ class PayPalConfig:
 class _CachedToken:
     value: str = field(repr=False)
     refresh_at: float
+
+
+@dataclass(frozen=True)
+class PayPalWebhookVerification:
+    """PayPal's answer for one webhook. verified is True only for verification_status SUCCESS."""
+    verified: bool
 
 
 class PayPalClient:
@@ -239,6 +267,126 @@ class PayPalClient:
 
         refresh_at = requested_at + max(expires_in - TOKEN_REFRESH_MARGIN_SECONDS, 0)
         return _CachedToken(value=access_token, refresh_at=refresh_at)
+
+    async def verify_webhook_signature(
+        self, headers: Mapping[str, str], raw_body: bytes
+    ) -> PayPalWebhookVerification:
+        """
+        Asks PayPal whether a received webhook is authentic.
+
+        raw_body must be the exact request body as received; it is embedded verbatim as
+        webhook_event because PayPal's signature covers the original bytes and
+        re-serialising the JSON can change them.
+
+        Returns verified=True only when PayPal answers SUCCESS and verified=False when it
+        answers FAILURE.
+        Raises PayPalConfigurationError if no webhook_id is configured.
+        Raises InvalidWebhookSignatureError if a transmission header is missing, empty or
+        conflicting, and MalformedInputError if raw_body is not a standard JSON object.
+        Raises PayPalAuthError if PayPal rejects the credentials or access token,
+        PayPalVerificationRequestRejectedError if PayPal rejects the verification request
+        with HTTP 400, and PayPalUnavailableError for transport failures, other non-200
+        responses and malformed or unexpected verification responses.
+        """
+        webhook_id = self._config.webhook_id
+        if not webhook_id:
+            raise PayPalConfigurationError("PayPal webhook_id is not configured; cannot verify webhooks")
+
+        transmission = _transmission_fields(headers)
+        content = _verification_request_body(transmission, webhook_id, raw_body)
+
+        access_token = await self.get_access_token()
+        try:
+            response = await self._http.post(
+                f"{self._config.base_url}{VERIFY_WEBHOOK_SIGNATURE_PATH}",
+                content=content,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=self._timeout,
+                follow_redirects=False,
+            )
+        except httpx.TimeoutException:
+            raise PayPalUnavailableError("PayPal webhook verification request timed out") from None
+        except httpx.HTTPError:
+            raise PayPalUnavailableError(
+                "PayPal webhook verification request failed before a response was received"
+            ) from None
+
+        status_info = _status_info(response)
+        if response.status_code == 401:
+            self._discard_token(access_token)
+        if response.status_code in (401, 403):
+            raise PayPalAuthError(f"PayPal rejected the webhook verification request credentials ({status_info})")
+        if response.status_code == 400:
+            raise PayPalVerificationRequestRejectedError(
+                f"PayPal rejected the webhook verification request as invalid ({status_info})"
+            )
+        if response.status_code != 200:
+            raise PayPalUnavailableError(f"PayPal webhook verification request failed ({status_info})")
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise PayPalUnavailableError(
+                f"PayPal webhook verification response is not valid JSON ({status_info})"
+            ) from None
+
+        status = body.get("verification_status") if isinstance(body, dict) else None
+        if status == "SUCCESS":
+            return PayPalWebhookVerification(verified=True)
+        if status == "FAILURE":
+            return PayPalWebhookVerification(verified=False)
+        if not isinstance(status, str):
+            raise PayPalUnavailableError(f"PayPal webhook verification response is malformed ({status_info})")
+        raise PayPalUnavailableError(
+            f"PayPal webhook verification response has an unexpected verification_status ({status_info})"
+        )
+
+    def _discard_token(self, access_token: str) -> None:
+        token = self._token
+        if token is not None and token.value == access_token:
+            self._token = None
+
+
+def _transmission_fields(headers: Mapping[str, str]) -> Dict[str, str]:
+    """Extracts PayPal transmission headers case-insensitively. Messages name headers, never values."""
+    fields: Dict[str, str] = {}
+    for name, value in headers.items():
+        if not isinstance(name, str):
+            continue
+        header = name.lower()
+        field_name = TRANSMISSION_HEADER_FIELDS.get(header)
+        if field_name is None or not isinstance(value, str) or not value.strip():
+            continue
+        if field_name in fields and fields[field_name] != value:
+            raise InvalidWebhookSignatureError(f"Conflicting PayPal transmission header: {header.upper()}")
+        fields[field_name] = value
+
+    missing = [header.upper() for header, name in TRANSMISSION_HEADER_FIELDS.items() if name not in fields]
+    if missing:
+        raise InvalidWebhookSignatureError(f"Missing PayPal transmission headers: {', '.join(missing)}")
+    return fields
+
+
+def _reject_json_constant(name: str) -> None:
+    raise ValueError("NaN and Infinity are not standard JSON")
+
+
+def _verification_request_body(transmission: Mapping[str, str], webhook_id: str, raw_body: bytes) -> bytes:
+    if not isinstance(raw_body, (bytes, bytearray)):
+        raise MalformedInputError("PayPal webhook body must be the raw request bytes")
+    try:
+        event = json.loads(bytes(raw_body).decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError):
+        raise MalformedInputError("PayPal webhook body is not valid JSON") from None
+    if not isinstance(event, dict):
+        raise MalformedInputError("PayPal webhook body must be a JSON object")
+
+    prefix = json.dumps({**transmission, "webhook_id": webhook_id}, separators=(",", ":"))[:-1]
+    return prefix.encode("utf-8") + b',"webhook_event":' + bytes(raw_body) + b"}"
 
 
 def _status_info(response: httpx.Response) -> str:
