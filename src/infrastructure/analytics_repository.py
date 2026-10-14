@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from src.core.domain.models import PaymentEvent
 from src.core.domain.analytics_models import PaymentHealthSnapshot
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import PaymentEventModel, PaymentHealthSnapshotModel
 
 class AnalyticsRepository:
@@ -16,7 +17,8 @@ class AnalyticsRepository:
     async def get_events_in_window(self, window_start: datetime, window_end: datetime) -> List[PaymentEvent]:
         stmt = select(PaymentEventModel).where(
             PaymentEventModel.timestamp >= window_start,
-            PaymentEventModel.timestamp < window_end
+            PaymentEventModel.timestamp < window_end,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()
@@ -48,7 +50,8 @@ class AnalyticsRepository:
 
     async def get_events_ingested_after(self, ingested_after: datetime) -> List[PaymentEvent]:
         stmt = select(PaymentEventModel).where(
-            PaymentEventModel.ingested_at > ingested_after
+            PaymentEventModel.ingested_at > ingested_after,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import text
 
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import PaymentEventModel
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
@@ -47,7 +48,8 @@ class Stage5PipelineValidator:
 
     async def get_authorized_events(self) -> List[PaymentEventModel]:
         stmt = select(PaymentEventModel).where(
-            PaymentEventModel.event_type == "payment.authorized"
+            PaymentEventModel.event_type == "payment.authorized",
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
         ).order_by(PaymentEventModel.ingested_at.asc())
         
         result = await self.session.execute(stmt)
@@ -62,7 +64,8 @@ class Stage5PipelineValidator:
             PaymentEventModel.payment_id == payment_id,
             PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
             PaymentEventModel.ingested_at > auth_ingested_at,
-            PaymentEventModel.ingested_at <= auth_ingested_at + timedelta(minutes=30)
+            PaymentEventModel.ingested_at <= auth_ingested_at + timedelta(minutes=30),
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
         ).order_by(PaymentEventModel.ingested_at.asc()).limit(1)
         
         result = await self.session.execute(stmt)

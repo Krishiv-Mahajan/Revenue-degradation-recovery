@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, and_, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     PaymentEventModel, 
     EpisodeStateHistoryModel, 
@@ -27,7 +28,8 @@ class FeatureReconstructionRepository:
                 and_(
                     PaymentEventModel.payment_id == payment_id,
                     PaymentEventModel.event_type == 'payment.authorized',
-                    PaymentEventModel.ingested_at <= t
+                    PaymentEventModel.ingested_at <= t,
+                    PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
                 )
             )
             .order_by(PaymentEventModel.ingested_at.desc())
@@ -65,7 +67,8 @@ class FeatureReconstructionRepository:
                     PaymentEventModel.ingested_at < t,
                     PaymentEventModel.timestamp >= window_start,
                     PaymentEventModel.timestamp < t,
-                    PaymentEventModel.event_type.in_(['payment.captured', 'payment.failed'])
+                    PaymentEventModel.event_type.in_(['payment.captured', 'payment.failed']),
+                    PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
                 )
             )
         )

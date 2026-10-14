@@ -34,6 +34,7 @@ from src.core.domain.rca_models import (
     make_evaluation_id,
 )
 from src.core.domain.degradation_models import DegradationEpisode, EpisodeStatus
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.core.rca.calculator import (
     assign_evidence_strength,
     build_audit_payload,
@@ -463,6 +464,7 @@ class RCAService:
             .where(
                 PaymentEventModel.timestamp >= window_start,
                 PaymentEventModel.timestamp < window_end,
+                PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
             )
         )
         result = await self.session.execute(stmt)
@@ -522,12 +524,14 @@ class RCAService:
             window_conditions,
             PaymentEventModel.event_type == "payment.failed",
             field_col == value,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
         )
         # All terminal transactions where field == value
         txn_stmt = select(func.count()).where(
             window_conditions,
             PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
             field_col == value,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
         )
         fail_result = await self.session.execute(fail_stmt)
         txn_result = await self.session.execute(txn_stmt)
@@ -722,11 +726,13 @@ class RCAService:
         total_fail_stmt = select(func.count()).where(
             window_conditions,
             PaymentEventModel.event_type == "payment.failed",
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
         )
         error_fail_stmt = select(func.count()).where(
             window_conditions,
             PaymentEventModel.event_type == "payment.failed",
             field_col == value,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
         )
 
         total_r = await self.session.execute(total_fail_stmt)

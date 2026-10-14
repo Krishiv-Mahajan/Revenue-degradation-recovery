@@ -7,9 +7,10 @@ Does NOT implement feature engineering, modeling, or Stage 6 logic.
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import PaymentEventModel
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.core.domain.failure_prediction_models import (
@@ -130,10 +131,15 @@ class FailurePredictionService:
                 WHERE payment_id = :payment_id
                   AND event_type IN ('payment.captured', 'payment.failed')
                   AND ingested_at < :T
+                  AND source_system NOT IN :excluded_sources
             )
-        """)
+        """).bindparams(bindparam("excluded_sources", expanding=True))
         
-        result = await self.session.execute(stmt, {"payment_id": payment_attempt_id, "T": T})
+        result = await self.session.execute(stmt, {
+            "payment_id": payment_attempt_id,
+            "T": T,
+            "excluded_sources": list(NON_RAZORPAY_PIPELINE_SOURCES),
+        })
         terminal_exists = result.scalar()
         
         # Eligible if no prior terminal event
@@ -154,7 +160,8 @@ class FailurePredictionService:
         query = select(PaymentEventModel).where(
             PaymentEventModel.payment_id == payment_attempt_id,
             PaymentEventModel.event_type.in_(['payment.captured', 'payment.failed']),
-            PaymentEventModel.ingested_at >= T
+            PaymentEventModel.ingested_at >= T,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
         )
         
         if observation_window_minutes is not None:
