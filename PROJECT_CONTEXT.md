@@ -205,6 +205,52 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - Currency-safe reporting remains unfinished: attribution records and summary totals carry no currency, and the dashboard formats all amounts as INR.
 - **Next planned milestone:** M2.2 — currency-correct API and dashboard.
 
+### P0 — Verified PayPal Webhook Ingestion (2026-10-14, complete)
+
+- **Commit:** `5143a64ae91d4aef2cf7abb6aabe30839037387b` — `feat: add verified PayPal webhook ingestion`
+- **Context:** first milestone of the approved PayPal-first direction. Builds on `18282a5dfc35eae7d7f2df7ddfb74fa05f03ffdd` (`feat: add PayPal OAuth client`), `66cedb5dbaf41b0a932b2d4d0c7f9c94c78f8167` (`feat: add PayPal webhook signature verification`) and provider isolation `ef926aa7f9bd08c680a3de11dd53c59b7930ebf8`, which keeps PayPal rows out of Stages 2–5 and the Stage 8 amount lookup.
+- **Scope:** intake and persistence only. PayPal events are stored as Stage 1 evidence and canonical events; no Stage 2–8 processing runs for them.
+- **Endpoint:** `POST /webhooks/paypal` (`ingest_paypal` in `src/api/routes.py`), served by `PayPalIngestionService` in `src/core/services/paypal_ingestion_service.py`.
+- **Request flow:**
+  1. The PayPal client dependency is resolved before the database session; if no client is configured the request fails closed with 503 and no session is opened.
+  2. The body is read with a 256 KiB limit (`MAX_PAYPAL_WEBHOOK_BODY_BYTES`): a larger declared `Content-Length` is rejected with 413, and streamed bodies are counted and rejected once they exceed the limit.
+  3. `PayPalClient.verify_webhook_signature` verifies the exact raw bytes with PayPal. Its only pre-verification step is a JSON syntax check needed to embed the body in the verification request; schema parsing, normalization and persistence happen only after `SUCCESS`.
+  4. `parse_paypal_event` → deterministic payload hash → duplicate check → `normalize_paypal_event` → `SQLIngestionRepository.save_ingestion` (raw record and canonical event in one transaction).
+- **Client lifecycle:** one application-owned `PayPalClient` per process, built from `PayPalConfig.from_env()` in the FastAPI lifespan (`src/main.py`), stored on `app.state.paypal_client` and closed on shutdown. Missing configuration leaves it `None`; there are no fallback credentials.
+- **Hashing:** `generate_deterministic_hash` moved verbatim to `src/core/normalizers/hashing.py` (SHA-256 over sorted-key, compact JSON of the parsed payload, so formatting-only differences hash equally). `src/core/normalizers/razorpay.py` re-exports it for existing callers.
+- **Deduplication:** identity is `(source_system, source_event_id)` = `("paypal", PayPal event id)`, enforced by the existing unique constraints.
+  - Same id, same hash: acknowledged as `duplicate` (200); nothing is written.
+  - Same id, different hash: 409; the stored evidence is never overwritten.
+  - Concurrent deliveries: if the pre-insert check passes for both, the loser's unique violation is rolled back inside `save_ingestion` before `DuplicateEventConflictError` is raised; the service then re-reads the stored raw record and returns `duplicate` (same hash) or 409 (different hash). If no raw record is found the conflict is re-raised.
+- **HTTP status mapping:**
+  - 200 `stored` / `duplicate` / `ignored` (verified but unsupported event type; acknowledged so PayPal stops retrying, not persisted).
+  - 400: malformed body (invalid JSON, NaN/Infinity, non-object, too deeply nested — `RecursionError` is mapped to `MalformedInputError`), invalid `Content-Length`, or PayPal rejecting the verification request (HTTP 400, often a `webhook_id` mismatch; logged as an error).
+  - 401: missing/conflicting transmission headers or verification `FAILURE`.
+  - 413: body over 256 KiB.
+  - 422: verified supported event that fails schema validation or normalization (not persisted; PayPal retries non-2xx responses for up to about 3 days).
+  - 409: conflicting duplicate.
+  - 503: missing configuration or `webhook_id`, credentials rejected, PayPal timeouts/outages/malformed responses.
+  - 500: persistence or unexpected errors.
+  - All response bodies are fixed generic strings; no credentials, tokens, signatures, payloads or exception text are returned.
+- **Logging:** the `PersistenceError` handler and the catch-all handler log a fixed message plus the exception class only, with no exception message and no traceback, because chained SQLAlchemy errors can include bound SQL parameters (the raw payload).
+- **No downstream processing:** the route never calls `run_live_pipeline` and schedules no background tasks.
+- **Unchanged:** the Razorpay route and ingestion service, `SQLIngestionRepository`, schema and migrations — apart from the hash extraction and re-export above.
+- **Tests:**
+  - New: `tests/unit/test_paypal_ingestion_service.py` and `tests/api/test_paypal_webhook_route.py`, plus one test in `tests/unit/test_paypal_webhook_verification.py`. All offline (`httpx.MockTransport` and in-memory or fake-session repositories).
+  - Regression tests: deeply nested JSON at the client, service and route boundaries (route returns 400 with no PayPal request, repository call or pipeline run); a `PersistenceError` sentinel and a real `SQLIngestionRepository` over a fake session whose commit raises a sentinel-bearing `IntegrityError` and whose rollback then fails — the sentinel must not appear in logs. Both were confirmed to fail against the pre-fix code.
+  - Results: PayPal client, verification, ingestion-service, parser, normalizer and route tests: 383 passed. `tests/unit` + `tests/boundaries`: 769 passed, 4 pre-existing httpx deprecation warnings. `tests/api`: 30 passed, 21 skipped (require a database). `git diff --check`: clean.
+- **Not validated / known limitations:**
+  - Real PostgreSQL integration was not tested, including the concurrent unique-violation → rollback → re-read path and asyncpg constraint-name matching.
+  - PayPal Sandbox verification was not tested.
+  - Raw request bytes are not archived, so stored events cannot be re-verified later; only the parsed JSON is kept.
+  - Whether 422 (days of PayPal retries) or acknowledge-and-quarantine is the right policy for verified but unprocessable events is undecided.
+  - M2.2 recorded above remains unimplemented.
+- **Next planned milestone:** P1 — PayPal lifecycle identity and event semantics (not implemented).
+  - Goal: correlate order approval, capture success, capture decline and refunds correctly using PayPal order identity, without treating these events as interchangeable payment outcomes.
+  - An approved order is not a completed capture.
+  - A refund is not a failed payment or a recovered payment.
+  - Downstream pipeline activation for PayPal events is a separate, later milestone.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**.
