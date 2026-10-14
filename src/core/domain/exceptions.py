@@ -13,6 +13,11 @@ class SchemaValidationError(IngestionError):
     pass
 
 
+class UnsupportedEventTypeError(SchemaValidationError):
+    """The event is well-formed but its event type is not handled by this integration."""
+    pass
+
+
 class UnsupportedSourceError(IngestionError):
     """The source is not supported."""
     pass
