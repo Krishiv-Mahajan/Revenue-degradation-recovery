@@ -280,6 +280,39 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - PayPal remains excluded from the existing downstream pipeline via `NON_RAZORPAY_PIPELINE_SOURCES`.
   - Reporting issues (e.g. the inspection dashboard summary counts `payment.captured` across all providers) and full PayPal pipeline activation remain separate work.
 
+### P1c — PayPal Cross-Provider Isolation Regression Tests (2026-10-15, complete)
+
+- **Commit:** `9ba75f7b6c1b00a3aea6b7cfad79dcf02aed0c5a` — `test: cover PayPal cross-provider isolation risks`
+- **File:** `tests/unit/test_paypal_cross_provider_isolation.py` (new).
+- **Scope:** regression and characterization tests only. No production code, schema, migration, provider-filter, pipeline or dashboard implementation changes, and no PayPal pipeline activation.
+- **Method:** each repository/service query runs against a mocked session; the captured statement's WHERE conditions are evaluated against canonical rows by a test-only evaluator that follows SQL three-valued logic (UNKNOWN does not match) and fails on unsupported condition shapes or unbound parameters. Rows come from the real PayPal parser/normalizer and, for controls, realistic Razorpay webhooks through the real Razorpay parser/normalizer. Synthetic minimal-difference controls (a PayPal-derived row with only `source_system` changed) are used separately to isolate the provider predicate and are not treated as realistic Razorpay events.
+- **Existing protections confirmed:**
+  - Stage 5 prediction eligibility (`is_eligible_for_prediction`) and terminal labels (`lookup_terminal_label`) exclude PayPal rows, including when `payment_id` overlaps, through the existing `NON_RAZORPAY_PIPELINE_SOURCES` filter and event-type constraints.
+  - Stage 6 sizing (`get_payment_event_by_id`) and the Stage 8 attribution amount lookup (`get_canonical_payment_amount`) never select real PayPal events, and exclude even a synthetic PayPal-sourced `payment.authorized` row by provider alone.
+  - The live prediction branch in `run_live_pipeline` is entered for `payment.authorized` events: a realistic Razorpay authorization enters it, and none of the six real PayPal canonical events does. The trigger checks event type only, not provider; PayPal stays out because its normalizer never emits `payment.authorized` and the PayPal webhook route never calls `run_live_pipeline`.
+- **Confirmed gaps (characterized, not fixed):**
+  1. **Stage 6/7 terminal-event queries** — `intervention_repository.check_terminal_event_exists`, `execution_repository.check_terminal_event_exists_before` and `execution_repository.get_canonical_terminal_events` — have no provider predicate (only `payment_id`, `event_type`, `ingested_at`). A real PayPal capture or decline whose `payment_id` overlaps a Razorpay attempt's matches these conditions exactly like the Razorpay terminal event. Today isolation relies only on PayPal capture ids and Razorpay payment ids differing; no schema constraint enforces this.
+     - *Code-review inference, not exercised by the tests:* Stage 6 would then treat the attempt as already terminal (pre-terminal gate), Stage 7 would observe the PayPal outcome as `CAPTURED`/`FAILED`, and Stage 8 would attribute from that observation.
+  2. **Dashboard `/summary`** (`get_executive_summary` in `src/api/inspection_routes.py`) counts events by type across all providers (the event-count statement has no WHERE clause). PayPal captures inflate `total_captures`, and `overall_success_rate` can exceed 1.0 (2.0 in the test with one Razorpay authorization, one Razorpay capture and one PayPal capture). `total_gmv_minor_units` is unaffected only because PayPal never emits `payment.authorized`.
+- **Validation (offline only: `TEST_DATABASE_URL` unset, `DATABASE_URL` pointed at unreachable localhost port 1):**
+  - New regression test file: 73 passed on two consecutive runs.
+  - Related provider-isolation, lifecycle, parser, normalizer, attribution, intervention, execution, live-pipeline and boundary tests: 542 passed, 3 warnings.
+  - `tests/unit` + `tests/boundaries`: 877 passed, 4 warnings (the pre-existing httpx deprecation warning).
+  - `tests/api`: 30 passed, 21 skipped (require a database).
+  - Sensitivity checks (in memory, no files changed): disabling the provider filter made the filter-dependent tests fail, and simulating a provider predicate in the Stage 6/7 queries made the corresponding characterization tests fail, as expected.
+  - No PostgreSQL, Docker or PayPal Sandbox validation.
+- **Limitations:**
+  - The SQL evaluator supports only the documented subset of conditions (AND of comparisons, `IN`/`NOT IN` against the `payment_events` table) and ignores `ORDER BY` and `LIMIT`; it shows whether a row matches, not which row a query would select.
+  - Live-pipeline downstream services are stubbed; routing is tested, not full pipeline execution.
+  - Dashboard aggregation (`COUNT ... GROUP BY`, `SUM`) is emulated in Python, not verified against PostgreSQL; the expected counts are calculated manually from the fixtures.
+  - The characterization tests pin current behavior and must be deliberately revised when an approved production fix changes it.
+- **Remaining work:**
+  - Stage 6/7 provider-isolation production fix: not implemented.
+  - Dashboard provider-isolation / reporting fix: not implemented.
+  - P1b optional `provider_resource_id` schema decision: not started.
+  - PayPal pipeline activation: not started.
+  - Each production fix requires separate explicit approval.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**.
