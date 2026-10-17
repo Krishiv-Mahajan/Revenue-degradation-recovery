@@ -17,11 +17,12 @@ Fixtures:
     predicate from every other column.
 
 Two groups of tests:
-  * Guarantees: Stage 5 eligibility, labels and the live prediction trigger, Stage 6 sizing and
-    the Stage 8 amount lookup do not use PayPal rows, even when payment_id overlaps.
-  * Known gaps (characterization, not desired behavior): the Stage 6/7 terminal-event lookups
-    and the dashboard summary have no provider filter. These tests pin the current behavior;
-    changing it needs a separately approved production fix, after which they must be updated.
+  * Guarantees: Stage 5 eligibility, labels and the live prediction trigger, Stage 6 sizing,
+    the Stage 6/7 terminal-event lookups and the Stage 8 amount lookup do not use PayPal rows,
+    even when payment_id overlaps.
+  * Known gap (characterization, not desired behavior): the dashboard summary has no provider
+    filter. This test pins the current behavior; changing it needs a separately approved
+    production fix, after which it must be updated.
 """
 import json
 import operator
@@ -492,33 +493,31 @@ async def test_sizing_lookups_exclude_paypal_even_for_an_authorized_event_type(q
     assert _matches(executed, _synthetic_source_swap(synthetic_paypal))
 
 
-# --- known gap: Stage 6/7 terminal-event lookups ------------------------------------------------
+# --- guarantees: Stage 6/7 terminal-event lookups -----------------------------------------------
 
 @pytest.mark.parametrize("query", list(TERMINAL_QUERIES))
-async def test_terminal_lookups_have_no_provider_predicate_known_gap(query):
+async def test_terminal_lookups_filter_by_provider(query):
     executed = await _executed(TERMINAL_QUERIES[query])
-    assert _predicate_columns(executed) == {"payment_id", "event_type", "ingested_at"}
+    assert _predicate_columns(executed) == {"payment_id", "event_type", "ingested_at", "source_system"}
 
 
 @pytest.mark.parametrize("query", list(TERMINAL_QUERIES))
 @pytest.mark.parametrize("builder, razorpay_event, razorpay_status", TERMINAL_PAIRS)
-async def test_terminal_lookups_currently_match_paypal_terminal_events_with_overlapping_payment_id(
+async def test_terminal_lookups_ignore_paypal_terminal_events_with_overlapping_payment_id(
     query, builder, razorpay_event, razorpay_status,
 ):
-    # KNOWN GAP (characterization): a real PayPal capture or decline whose payment_id equals the
-    # Razorpay attempt's matches exactly like the realistic Razorpay terminal event does.
-    # Code-review inference, not exercised here: Stage 6 would then treat the attempt as already
-    # terminal, Stage 7 would observe the PayPal outcome, and Stage 8 would attribute from it.
     executed = await _executed(TERMINAL_QUERIES[query])
+    paypal = _paypal_row(builder)
     assert _matches(executed, _razorpay_row(razorpay_event, razorpay_status))
-    assert _matches(executed, _paypal_row(builder))
+    assert not _matches(executed, paypal)
+    assert _matches(executed, _synthetic_source_swap(paypal))
 
 
 @pytest.mark.parametrize("query", list(TERMINAL_QUERIES))
 @pytest.mark.parametrize("builder", TERMINAL_BUILDERS)
-async def test_terminal_lookups_rely_on_identifier_disjointness_for_paypal_captures(query, builder):
-    # Current protection is only that PayPal capture ids and Razorpay payment ids differ;
-    # no schema constraint enforces this.
+async def test_terminal_lookups_do_not_match_non_overlapping_paypal_captures(query, builder):
+    # Real PayPal capture ids differ from Razorpay payment ids, so these rows are excluded by
+    # payment_id as well as by the provider predicate.
     executed = await _executed(TERMINAL_QUERIES[query])
     paypal = _paypal_row(builder, payment_id=None)
     assert paypal["payment_id"] == samples.CAPTURE_ID != RAZORPAY_ATTEMPT_ID
@@ -530,6 +529,41 @@ async def test_terminal_lookups_rely_on_identifier_disjointness_for_paypal_captu
 async def test_terminal_lookups_ignore_non_terminal_paypal_events_with_overlapping_payment_id(query, builder):
     executed = await _executed(TERMINAL_QUERIES[query])
     assert not _matches(executed, _paypal_row(builder))
+
+
+def _emulated_canonical_terminal_events(executed, rows):
+    """Emulates get_canonical_terminal_events over in-memory rows: the statement's WHERE clause is
+    applied by the evaluator and its ORDER BY ingested_at ASC is reproduced in Python. Not PostgreSQL."""
+    statement, _ = executed
+    assert str(statement.compile()).rstrip().endswith("ORDER BY payment_events.ingested_at ASC")
+    return sorted((row for row in rows if _matches(executed, row)), key=lambda row: row["ingested_at"])
+
+
+async def test_canonical_terminal_events_drop_overlapping_paypal_and_keep_ingested_at_order():
+    executed = await _executed(_stage7_outcome_events)
+    paypal_decline = _paypal_row(samples.capture_declined, ingested_at=T - timedelta(minutes=4))
+    razorpay_capture = _razorpay_row("payment.captured", "captured", ingested_at=T - timedelta(minutes=3))
+    paypal_capture = _paypal_row(samples.capture_completed, ingested_at=T - timedelta(minutes=2))
+    razorpay_failure = _razorpay_row("payment.failed", "failed", ingested_at=T - timedelta(minutes=1))
+
+    selected = _emulated_canonical_terminal_events(
+        executed, [razorpay_failure, paypal_capture, razorpay_capture, paypal_decline]
+    )
+
+    assert selected == [razorpay_capture, razorpay_failure]
+
+
+async def test_paypal_terminal_events_do_not_create_razorpay_outcome_conflicts():
+    # An earlier overlapping PayPal decline must neither become the first terminal event nor add
+    # a second event type to the Razorpay attempt's terminal events.
+    executed = await _executed(_stage7_outcome_events)
+    paypal_decline = _paypal_row(samples.capture_declined, ingested_at=T - timedelta(minutes=4))
+    razorpay_capture = _razorpay_row("payment.captured", "captured", ingested_at=T - timedelta(minutes=2))
+
+    selected = _emulated_canonical_terminal_events(executed, [paypal_decline, razorpay_capture])
+
+    assert selected == [razorpay_capture]
+    assert {row["event_type"] for row in selected} == {"payment.captured"}
 
 
 # --- known gap: dashboard summary --------------------------------------------------------------

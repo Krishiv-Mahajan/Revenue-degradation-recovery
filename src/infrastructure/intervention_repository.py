@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func, select, text
+from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.intervention_models import (
@@ -20,6 +20,7 @@ from src.core.domain.intervention_models import (
     InterventionDecision,
     InterventionRouteKey,
 )
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import InterventionDecisionModel, PaymentEventModel
 
 # Fixed global lock key pair for atomic Stage 6 ACT admission
@@ -139,9 +140,14 @@ class InterventionRepository:
                 WHERE payment_id = :payment_id
                   AND event_type IN ('payment.captured', 'payment.failed')
                   AND ingested_at < :t_decide
+                  AND source_system NOT IN :excluded_sources
             )
-        """)
-        result = await self.session.execute(stmt, {"payment_id": payment_id, "t_decide": t_decide})
+        """).bindparams(bindparam("excluded_sources", expanding=True))
+        result = await self.session.execute(stmt, {
+            "payment_id": payment_id,
+            "t_decide": t_decide,
+            "excluded_sources": list(NON_RAZORPAY_PIPELINE_SOURCES),
+        })
         return bool(result.scalar())
 
     async def get_stage5_prediction_as_of(

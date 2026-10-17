@@ -1,5 +1,6 @@
 """
-Milestone 1 provider isolation: PayPal events must not reach the existing Stage 2-5 reads.
+Provider isolation: PayPal events must not reach the existing Stage 2-5 reads or the
+Stage 6/7 terminal-event lookups.
 
 Each changed query is executed against a mocked session; the captured statement is compiled
 with the PostgreSQL dialect and its source_system exclusion is checked against the bound
@@ -21,7 +22,9 @@ from src.core.rca.service import RCAService
 from src.core.services.failure_prediction_service import FailurePredictionService
 from src.infrastructure.analytics_repository import AnalyticsRepository
 from src.infrastructure.attribution_repository import AttributionRepository
+from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
+from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import PaymentEventModel
 
 PG = postgresql.dialect()
@@ -88,6 +91,18 @@ async def _attribution_payment_amount(session):
     await AttributionRepository(session).get_canonical_payment_amount("pay_1", T)
 
 
+async def _intervention_terminal_check(session):
+    await InterventionRepository(session).check_terminal_event_exists("pay_1", T)
+
+
+async def _execution_terminal_check(session):
+    await ExecutionRepository(session).check_terminal_event_exists_before("pay_1", T)
+
+
+async def _execution_terminal_events(session):
+    await ExecutionRepository(session).get_canonical_terminal_events("pay_1", T)
+
+
 async def _training_authorized_events(session):
     await Stage5PipelineValidator(session).get_authorized_events()
 
@@ -141,6 +156,19 @@ CASES = {
     "attribution.get_canonical_payment_amount": (
         _attribution_payment_amount, "src.infrastructure.attribution_repository", 1,
         ["payment_events.payment_id = ", "payment_events.event_type = ", "payment_events.ingested_at <= "],
+    ),
+    "intervention.check_terminal_event_exists": (
+        _intervention_terminal_check, "src.infrastructure.intervention_repository", 1,
+        ["WHERE payment_id = ", "event_type IN ('payment.captured', 'payment.failed')", "ingested_at < "],
+    ),
+    "execution.check_terminal_event_exists_before": (
+        _execution_terminal_check, "src.infrastructure.execution_repository", 1,
+        ["WHERE payment_id = ", "event_type IN ('payment.captured', 'payment.failed')", "ingested_at <= "],
+    ),
+    "execution.get_canonical_terminal_events": (
+        _execution_terminal_events, "src.infrastructure.execution_repository", 1,
+        ["payment_events.payment_id = ", "payment_events.event_type IN ", "payment_events.ingested_at <= ",
+         "ORDER BY payment_events.ingested_at ASC"],
     ),
     "training.get_authorized_events": (
         _training_authorized_events, "src.core.ml.training", 1,
@@ -212,6 +240,22 @@ async def test_eligibility_raw_sql_binds_the_exclusion_as_an_expanding_parameter
     assert "source_system NOT IN :excluded_sources" in statement.text
     assert "paypal" not in statement.text
     assert params == {"payment_id": "pay_1", "T": T, "excluded_sources": [PAYPAL_SOURCE_SYSTEM]}
+
+
+async def test_stage6_terminal_raw_sql_binds_the_exclusion_as_an_expanding_parameter():
+    [(statement, params)] = await _executed(_intervention_terminal_check)
+    assert isinstance(statement, TextClause)
+    assert "source_system NOT IN :excluded_sources" in statement.text
+    assert "paypal" not in statement.text
+    assert params == {"payment_id": "pay_1", "t_decide": T, "excluded_sources": [PAYPAL_SOURCE_SYSTEM]}
+
+
+async def test_stage7_terminal_raw_sql_binds_the_exclusion_as_an_expanding_parameter():
+    [(statement, params)] = await _executed(_execution_terminal_check)
+    assert isinstance(statement, TextClause)
+    assert "source_system NOT IN :excluded_sources" in statement.text
+    assert "paypal" not in statement.text
+    assert params == {"payment_id": "pay_1", "as_of": T, "excluded_sources": [PAYPAL_SOURCE_SYSTEM]}
 
 
 async def test_global_feature_keeps_its_source_dimension_filter():

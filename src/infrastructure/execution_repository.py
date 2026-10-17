@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import bindparam, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.execution_models import (
@@ -25,6 +25,7 @@ from src.core.domain.execution_models import (
     PaymentOutcomeObservation,
 )
 from src.core.domain.intervention_models import InterventionRouteKey
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     InterventionCommandModel,
     InterventionExecutionAttemptModel,
@@ -245,9 +246,14 @@ class ExecutionRepository:
                 WHERE payment_id = :payment_id
                   AND event_type IN ('payment.captured', 'payment.failed')
                   AND ingested_at <= :as_of
+                  AND source_system NOT IN :excluded_sources
             )
-        """)
-        result = await self.session.execute(stmt, {"payment_id": payment_attempt_id, "as_of": as_of})
+        """).bindparams(bindparam("excluded_sources", expanding=True))
+        result = await self.session.execute(stmt, {
+            "payment_id": payment_attempt_id,
+            "as_of": as_of,
+            "excluded_sources": list(NON_RAZORPAY_PIPELINE_SOURCES),
+        })
         return bool(result.scalar())
 
     async def get_canonical_terminal_events(
@@ -263,6 +269,7 @@ class ExecutionRepository:
                 PaymentEventModel.payment_id == payment_attempt_id,
                 PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
                 PaymentEventModel.ingested_at <= as_of,
+                PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
             )
             .order_by(PaymentEventModel.ingested_at.asc())
         )
