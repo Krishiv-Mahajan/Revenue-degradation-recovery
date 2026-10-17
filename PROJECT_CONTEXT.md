@@ -357,6 +357,47 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - PayPal pipeline activation: not started.
   - Each production fix requires separate explicit approval.
 
+### Razorpay-Only Dashboard Provider Isolation (2026-10-17, complete)
+
+- **Commit:** `c24f549057855c7cbb09e9966208fbc94de80cc0` — `fix: exclude PayPal events from Razorpay dashboard reporting`
+- **Builds on:** the Stage 6/7 fix (`99e0d1fd520f5c3d37fff3daddeca531da95754e`). Closes P1c confirmed gap 2 (dashboard `/summary`) and the dashboard "Remaining work" item above; the earlier sections are kept as the historical record.
+- **Scope decision:** the inspection dashboard is Razorpay-only for now. PayPal ingestion stays enabled, but PayPal events must not appear in dashboard reporting.
+- **Problem:** the three dashboard endpoints that read `payment_events` directly (`src/api/inspection_routes.py`) had no provider filter:
+  - `/summary` counted PayPal `payment.captured` events in `total_captures` and `overall_success_rate` (which could exceed 100%).
+  - `/payments` (Payment Audit Inspector) listed PayPal payments alongside Razorpay ones, counted them in `total_count` and status filters, and, for an overlapping `payment_id`, merged their terminal status and could take the row's amount and currency from a PayPal event.
+  - `/timeline/{payment_id}` returned PayPal events, and for an overlapping `payment_id` could take `payment_info` and `terminal_status` from them.
+- **Approved change:** each read now also requires `source_system NOT IN NON_RAZORPAY_PIPELINE_SOURCES` (ORM `source_system.notin_(...)`, using the shared constant from `src/core/domain/source_systems.py`):
+  - `/summary`: both `payment_events` statements — the authorization-volume sum and the grouped event count.
+  - `/payments`: the terminal-status subquery and the canonical-event (`DISTINCT ON (payment_id)`) subquery. The list and `total_count` both select rows through the canonical-event subquery, so PayPal rows are excluded from items, counts, search and status-filtered results.
+  - `/timeline/{payment_id}`: the raw events query. The Stage 5–8 lookups are unchanged; they key on the requested Razorpay payment id, and only the Razorpay pipeline writes those records.
+- **Behavior change:** PayPal-only payment ids now return 404 (`Payment {payment_id} not found`) from `/timeline`; the 404 response itself is unchanged.
+- **Unchanged:** response fields, ordering, pagination, status semantics and the other dashboard endpoints (`/episodes`, `/rca`, `/recovery`, `/attributions`), which read only Stage 3–8 tables populated by the provider-isolated pipeline. No schema, migration, frontend or Stage 2–8 changes.
+- **Tests:**
+  - `tests/unit/test_paypal_cross_provider_isolation.py`:
+    - The `/summary` known-gap characterization was replaced with `test_dashboard_summary_ignores_paypal_events` (adding all six PayPal event types and an overlapping PayPal capture leaves the summary identical) and `test_dashboard_summary_excludes_paypal_by_provider_alone`.
+    - New timeline tests over an emulated session: `test_timeline_ignores_overlapping_paypal_events_and_keeps_the_razorpay_trace` and `test_timeline_returns_404_for_a_paypal_only_payment_id`.
+  - `tests/unit/test_provider_isolation.py` (compiled PostgreSQL SQL): `/timeline` added to `CASES`; both `/summary` statements; both `/payments` subqueries for every list/count variant (default, three status filters, search, both lifecycle filters); shared-constant use; and preserved ordering, `LIMIT`/`OFFSET` and status lowercasing.
+  - `tests/api/test_inspection_routes.py` (database-backed): `test_summary_excludes_paypal_events`, `test_payments_list_excludes_paypal_events` and `test_timeline_excludes_paypal_events`.
+- **Validation (offline only: `TEST_DATABASE_URL` unset, `DATABASE_URL` pointed at unreachable localhost port 1):**
+  - Updated P1c, provider-isolation and inspection-route test files before the fix: 17 failed, 128 passed, 23 skipped; every failure was a new or rewritten assertion.
+  - Same files after the fix: 145 passed, 23 skipped on two consecutive runs.
+  - `tests/unit` + `tests/boundaries`: 906 passed, 4 warnings (the pre-existing httpx deprecation warning).
+  - `tests/api`: 30 passed, 24 skipped (require a database).
+  - Related live-pipeline, PayPal parser/normalizer/lifecycle/ingestion, attribution-amount and outcome-observation tests: 256 passed, 3 warnings.
+- **Not validated:**
+  - The three new database-backed API tests above have not run against PostgreSQL (skipped, `TEST_DATABASE_URL` not set), nor have the other database-backed `tests/api` tests or the `tests/integration` suites.
+  - PostgreSQL has not executed `DISTINCT ON (payment_id)` combined with the new `source_system` filter in the `/payments` canonical-event subquery.
+  - No Docker or PayPal Sandbox validation.
+- **Known limitations:**
+  - Currency formatting remains INR-oriented: the frontend formats all amounts as INR (M2.2, unchanged).
+  - No backfill of existing records.
+  - Offline tests evaluate filters against in-memory rows or compiled SQL; they are not PostgreSQL validation.
+- **Remaining work:**
+  - Currency-correct API and dashboard (M2.2): not implemented.
+  - P1b optional `provider_resource_id` schema decision: not started.
+  - PayPal pipeline activation: not started.
+  - Each production fix requires separate explicit approval.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**.
