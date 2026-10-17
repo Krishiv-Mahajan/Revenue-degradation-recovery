@@ -21,6 +21,23 @@ from src.core.domain.attribution_models import (
 )
 from src.infrastructure.attribution_repository import AttributionRepository
 
+# Stage 5 development models; their predictions are never empirical evidence.
+DEVELOPMENT_MODEL_NAMES = frozenset({"DeterministicBaselineModel"})
+
+# (model_name, model_version) pairs validated on genuine production outcomes. Only an explicitly
+# reviewed validation may add an entry; no Stage 5 model has been validated yet.
+VERIFIED_EMPIRICAL_MODELS: frozenset = frozenset()
+
+
+def classify_model_provenance(model_name: Optional[str], model_version: Optional[str]) -> ModelProvenance:
+    """Classifies a Stage 5 model; EMPIRICAL_PRODUCTION requires an exact registered model version."""
+    name = model_name or ""
+    if name in DEVELOPMENT_MODEL_NAMES or "synthetic" in name.lower():
+        return ModelProvenance.SYNTHETIC_DEVELOPMENT
+    if (name, model_version) in VERIFIED_EMPIRICAL_MODELS:
+        return ModelProvenance.EMPIRICAL_PRODUCTION
+    return ModelProvenance.UNKNOWN
+
 
 class CounterfactualAttributionService:
     """Service orchestrating counterfactual attribution and protected GMV derivation."""
@@ -115,12 +132,8 @@ class CounterfactualAttributionService:
                 else None
             )
             pred_status = prediction.prediction_status
-            if "synthetic" in (prediction.model_name or "").lower():
-                provenance = ModelProvenance.SYNTHETIC_DEVELOPMENT
-                is_synthetic = True
-            else:
-                provenance = ModelProvenance.EMPIRICAL_PRODUCTION
-                is_synthetic = False
+            provenance = classify_model_provenance(prediction.model_name, prediction.model_version)
+            is_synthetic = provenance != ModelProvenance.EMPIRICAL_PRODUCTION
 
         # 8. Compute Timing Proximity Delta
         if attempt is not None and observation is not None and observation.terminal_event_timestamp is not None:

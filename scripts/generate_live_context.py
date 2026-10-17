@@ -60,6 +60,9 @@ from src.infrastructure.rca_repository import RCARepository
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("generate_live_context")
 
+# Generated rows must never be indistinguishable from provider-sourced Razorpay events.
+GENERATED_SOURCE_SYSTEM = "synthetic"
+
 
 def compute_tumbling_windows(
     now: datetime,
@@ -149,7 +152,9 @@ async def seed_upstream_synthetic_traffic(
     """
     Generates 60 synthetic transactions (48 failed, 12 captured) per completed window.
     Total = 180 terminal transactions.
-    All events use source_system = 'razorpay' so Stage 5 feature reconstruction matches.
+    All events use source_system = 'synthetic'. Stage 2-4 still see them, but Stage 5 global
+    failure-rate features (keyed by the payment's own source_system) do not count them for
+    real Razorpay payments.
     """
     logger.info("Generating upstream synthetic payment events for W-3, W-2, W-1...")
     rng = random.Random(seed)
@@ -198,7 +203,7 @@ async def seed_upstream_synthetic_traffic(
             }
             raw_auth = RawIngestionRecordModel(
                 id=uuid.uuid4(),
-                source_system="razorpay",
+                source_system=GENERATED_SOURCE_SYSTEM,
                 source_event_id=auth_event_id,
                 received_at=auth_time,
                 raw_payload=auth_payload,
@@ -206,7 +211,7 @@ async def seed_upstream_synthetic_traffic(
             )
             evt_auth = PaymentEventModel(
                 event_id=uuid.uuid4(),
-                source_system="razorpay",
+                source_system=GENERATED_SOURCE_SYSTEM,
                 source_event_id=auth_event_id,
                 payment_id=pid,
                 order_id=oid,
@@ -241,7 +246,7 @@ async def seed_upstream_synthetic_traffic(
             }
             raw_term = RawIngestionRecordModel(
                 id=uuid.uuid4(),
-                source_system="razorpay",
+                source_system=GENERATED_SOURCE_SYSTEM,
                 source_event_id=term_event_id,
                 received_at=term_time,
                 raw_payload=term_payload,
@@ -249,7 +254,7 @@ async def seed_upstream_synthetic_traffic(
             )
             evt_term = PaymentEventModel(
                 event_id=uuid.uuid4(),
-                source_system="razorpay",
+                source_system=GENERATED_SOURCE_SYSTEM,
                 source_event_id=term_event_id,
                 payment_id=pid,
                 order_id=oid,
@@ -491,15 +496,14 @@ async def run_stage4_rca(
 
 async def check_lookback_terminal_volume(session: AsyncSession, now: datetime) -> int:
     """
-    Verifies that the preceding 30 minutes contain >= 50 terminal transactions
-    for source_system = 'razorpay'.
+    Counts the generated synthetic terminal transactions in the preceding 30 minutes.
     """
     t_30m_ago = now - timedelta(minutes=30)
     stmt = (
         select(func.count())
         .select_from(PaymentEventModel)
         .where(
-            PaymentEventModel.source_system == "razorpay",
+            PaymentEventModel.source_system == GENERATED_SOURCE_SYSTEM,
             PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
             PaymentEventModel.timestamp >= t_30m_ago,
             PaymentEventModel.timestamp <= now,
@@ -580,8 +584,9 @@ async def main_async(pm: str, curr: str, seed: int) -> int:
     print(f"Severity                : {critical_ep.severity.value}")
     print(f"RCA Candidate           : {rca_result['candidate_dimension']} = {rca_result['candidate_value']}")
     print(f"RCA Evidence Strength   : {rca_result['evidence_strength']}")
-    print(f"30-min Terminal Volume  : {terminal_volume_30m} (Threshold >= 50: PASS)")
-    print(f"Prediction Context      : READY (High Risk + ACT expected on card)")
+    print(f"30-min Synthetic Volume : {terminal_volume_30m} terminal transactions")
+    print(f"Prediction Context      : READY (degradation + RCA; MONITOR expected on card, not ACT,")
+    print(f"                          because synthetic traffic is not counted in Razorpay failure rates)")
     print("-" * 60)
     print("  MAKE THE REAL RAZORPAY TEST PAYMENT NOW")
     print("-" * 60)

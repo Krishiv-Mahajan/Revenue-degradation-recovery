@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scripts.generate_live_context import (
+    check_lookback_terminal_volume,
     compute_tumbling_windows,
     seed_historical_baselines,
     seed_upstream_synthetic_traffic,
@@ -105,7 +106,7 @@ async def test_seed_historical_baselines_dimensions():
 
 @pytest.mark.asyncio
 async def test_seed_upstream_synthetic_traffic_contract():
-    """Verifies synthetic traffic structure: 60 tx/window, razorpay source, card pm, INR currency."""
+    """Verifies synthetic traffic structure: 60 tx/window, synthetic source, card pm, INR currency."""
     mock_session = AsyncMock()
     mock_session.add_all = MagicMock()
 
@@ -143,15 +144,29 @@ async def test_seed_upstream_synthetic_traffic_contract():
         assert len(fails) == 48
         assert len(fails) / len(window_terms) == 0.80
 
-    # Source system must be 'razorpay'
-    assert all(e.source_system == "razorpay" for e in payment_events)
-    assert all(r.source_system == "razorpay" for r in raw_records)
+    # Generated rows are labelled synthetic, never as provider-sourced Razorpay events
+    assert all(e.source_system == "synthetic" for e in payment_events)
+    assert all(r.source_system == "synthetic" for r in raw_records)
 
     # Payment method must be 'card'
     assert all(e.payment_method == "card" for e in payment_events)
 
     # Currency must be 'INR'
     assert all(e.currency == "INR" for e in payment_events)
+
+
+@pytest.mark.asyncio
+async def test_lookback_volume_counts_generated_synthetic_traffic_not_razorpay():
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = MagicMock(scalar=MagicMock(return_value=180))
+
+    volume = await check_lookback_terminal_volume(mock_session, datetime(2026, 9, 4, 10, 20, tzinfo=timezone.utc))
+
+    assert volume == 180
+    [call] = mock_session.execute.call_args_list
+    bound_values = list(call[0][0].compile().params.values())
+    assert "synthetic" in bound_values
+    assert "razorpay" not in bound_values
 
 
 def test_no_destructive_database_operations_in_helper():
