@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import uuid
 
 from src.api.dependencies import get_db_session
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     PaymentEventModel,
     PaymentHealthSnapshotModel,
@@ -29,7 +30,10 @@ async def get_executive_summary(session: AsyncSession = Depends(get_db_session))
     Read-only internal/demo inspection endpoint.
     """
     # Total processed GMV (from auths)
-    auth_stmt = select(func.sum(PaymentEventModel.amount_minor_units)).where(PaymentEventModel.event_type == 'payment.authorized')
+    auth_stmt = select(func.sum(PaymentEventModel.amount_minor_units)).where(
+        PaymentEventModel.event_type == 'payment.authorized',
+        PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+    )
     auth_res = await session.execute(auth_stmt)
     total_gmv = auth_res.scalar_one_or_none() or 0
 
@@ -49,7 +53,11 @@ async def get_executive_summary(session: AsyncSession = Depends(get_db_session))
     total_interventions = interventions_res.scalar_one_or_none() or 0
     
     # Successful payment capture rate (overall)
-    all_events_stmt = select(PaymentEventModel.event_type, func.count(PaymentEventModel.event_id)).group_by(PaymentEventModel.event_type)
+    all_events_stmt = (
+        select(PaymentEventModel.event_type, func.count(PaymentEventModel.event_id))
+        .where(PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES))
+        .group_by(PaymentEventModel.event_type)
+    )
     all_events_res = await session.execute(all_events_stmt)
     event_counts = dict(all_events_res.all())
     
@@ -432,13 +440,17 @@ async def get_payments_list(
             PaymentEventModel.payment_id,
             func.max(PaymentEventModel.payment_status).label("terminal_status")
         )
-        .where(PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]))
+        .where(
+            PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+        )
         .group_by(PaymentEventModel.payment_id)
         .subquery()
     )
 
     canonical_events_stmt = (
         select(PaymentEventModel.event_id)
+        .where(PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES))
         .distinct(PaymentEventModel.payment_id)
         .order_by(PaymentEventModel.payment_id, PaymentEventModel.timestamp.asc())
     )
@@ -553,7 +565,10 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
     # A payment's domain identity strictly originates in PaymentEventModel.payment_id.
     events_stmt = (
         select(PaymentEventModel)
-        .where(PaymentEventModel.payment_id == clean_pid)
+        .where(
+            PaymentEventModel.payment_id == clean_pid,
+            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+        )
         .order_by(PaymentEventModel.timestamp)
     )
     events_res = await session.execute(events_stmt)

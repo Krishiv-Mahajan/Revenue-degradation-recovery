@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
@@ -783,3 +783,99 @@ async def test_payments_list_canonical_events(client, db_engine):
     assert items[0]["is_intervened"] is False
     assert items[0]["is_attributed"] is False
     assert items[0]["amount_minor_units"] == 3000
+
+
+def _provider_event(now, source_system, payment_id, event_type, payment_status, minutes_ago,
+                    currency="INR", amount_minor_units=50000):
+    at = now - timedelta(minutes=minutes_ago)
+    return PaymentEventModel(
+        event_id=uuid.uuid4(), source_system=source_system, source_event_id=uuid.uuid4().hex,
+        payment_id=payment_id, timestamp=at, event_type=event_type, currency=currency,
+        amount_minor_units=amount_minor_units, payment_status=payment_status,
+        payment_method="UPI" if source_system == "razorpay" else None, ingested_at=at,
+    )
+
+
+async def _seed_razorpay_payment_with_paypal_events(db_engine):
+    """
+    Seeds one Razorpay payment (authorized, then captured), PayPal events reusing its payment_id
+    (an earlier decline and a later refund) and a separate PayPal-only capture.
+    """
+    now = datetime.now(timezone.utc)
+    razorpay_pid = f"pay_rzp_{uuid.uuid4().hex[:8]}"
+    paypal_pid = f"PAYPAL{uuid.uuid4().hex[:11].upper()}"
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add_all([
+            _provider_event(now, "razorpay", razorpay_pid, "payment.authorized", "authorized", 5),
+            _provider_event(now, "razorpay", razorpay_pid, "payment.captured", "captured", 4),
+            _provider_event(now, "paypal", razorpay_pid, "payment.failed", "failed", 10, "USD", 7000),
+            _provider_event(now, "paypal", razorpay_pid, "payment.refunded", "refunded", 1, "USD", 7000),
+            _provider_event(now, "paypal", paypal_pid, "payment.captured", "captured", 3, "USD", 9000),
+        ])
+        await session.commit()
+    return razorpay_pid, paypal_pid
+
+
+@pytest.mark.asyncio
+async def test_summary_excludes_paypal_events(client, db_engine):
+    await _seed_razorpay_payment_with_paypal_events(db_engine)
+
+    resp = await client.get("/api/v1/summary")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert (data["total_auths"], data["total_captures"], data["overall_success_rate"]) == (1, 1, 1.0)
+    assert data["total_gmv_minor_units"] == 50000
+
+
+@pytest.mark.asyncio
+async def test_payments_list_excludes_paypal_events(client, db_engine):
+    razorpay_pid, paypal_pid = await _seed_razorpay_payment_with_paypal_events(db_engine)
+
+    data = (await client.get("/api/v1/payments")).json()
+    assert data["total_count"] == 1
+    [item] = data["items"]
+    assert item["payment_id"] == razorpay_pid
+    assert (item["payment_status"], item["currency"], item["amount_minor_units"]) == ("captured", "INR", 50000)
+
+    for status, expected in (("captured", [razorpay_pid]), ("failed", []), ("authorized", [])):
+        filtered = (await client.get(f"/api/v1/payments?status={status}")).json()
+        assert [i["payment_id"] for i in filtered["items"]] == expected
+        assert filtered["total_count"] == len(expected)
+
+    searched = (await client.get(f"/api/v1/payments?search={paypal_pid}")).json()
+    assert (searched["items"], searched["total_count"]) == ([], 0)
+
+
+@pytest.mark.asyncio
+async def test_timeline_excludes_paypal_events(client, db_engine):
+    from src.infrastructure.models import InterventionDecisionModel
+
+    razorpay_pid, paypal_pid = await _seed_razorpay_payment_with_paypal_events(db_engine)
+    now = datetime.now(timezone.utc)
+    dec_id = uuid.uuid4()
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add(InterventionDecisionModel(
+            decision_id=dec_id, payment_attempt_id=razorpay_pid, decision_version=1,
+            decided_at=now - timedelta(minutes=4, seconds=30), decision_type="ACT",
+            selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=uuid.uuid4(),
+            diagnosis_confidence="HIGH", decision_confidence=0.9,
+            gate_verdict="PASSED", policy_id="P1", policy_version="1.0",
+            input_fingerprint="sha256:0", evaluation_audit_payload={}, created_at=now
+        ))
+        await session.commit()
+
+    resp = await client.get(f"/api/v1/timeline/{razorpay_pid}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [e["event_type"] for e in data["events"]] == ["payment.authorized", "payment.captured"]
+    assert data["payment_info"]["currency"] == "INR"
+    assert data["payment_info"]["amount_minor_units"] == 50000
+    assert data["payment_info"]["terminal_status"] == "captured"
+    assert data["decision"]["decision_id"] == str(dec_id)
+
+    paypal_resp = await client.get(f"/api/v1/timeline/{paypal_pid}")
+    assert paypal_resp.status_code == 404
+    assert paypal_resp.json()["detail"] == f"Payment {paypal_pid} not found"

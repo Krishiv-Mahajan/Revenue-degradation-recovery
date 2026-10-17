@@ -1,6 +1,6 @@
 """
-Provider isolation: PayPal events must not reach the existing Stage 2-5 reads or the
-Stage 6/7 terminal-event lookups.
+Provider isolation: PayPal events must not reach the existing Stage 2-5 reads, the
+Stage 6/7 terminal-event lookups or the Razorpay-only dashboard reads.
 
 Each changed query is executed against a mocked session; the captured statement is compiled
 with the PostgreSQL dialect and its source_system exclusion is checked against the bound
@@ -11,9 +11,11 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 
+from src.api.inspection_routes import get_executive_summary, get_payment_timeline, get_payments_list
 from src.core.domain import source_systems
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.core.ml.training import Stage5PipelineValidator
@@ -103,6 +105,13 @@ async def _execution_terminal_events(session):
     await ExecutionRepository(session).get_canonical_terminal_events("pay_1", T)
 
 
+async def _dashboard_timeline_events(session):
+    session.execute.return_value.scalars.return_value.all.return_value = []
+    with pytest.raises(HTTPException) as excinfo:
+        await get_payment_timeline("pay_1", session)
+    assert excinfo.value.status_code == 404
+
+
 async def _training_authorized_events(session):
     await Stage5PipelineValidator(session).get_authorized_events()
 
@@ -169,6 +178,10 @@ CASES = {
         _execution_terminal_events, "src.infrastructure.execution_repository", 1,
         ["payment_events.payment_id = ", "payment_events.event_type IN ", "payment_events.ingested_at <= ",
          "ORDER BY payment_events.ingested_at ASC"],
+    ),
+    "dashboard.get_payment_timeline": (
+        _dashboard_timeline_events, "src.api.inspection_routes", 1,
+        ["payment_events.payment_id = ", "ORDER BY payment_events.timestamp"],
     ),
     "training.get_authorized_events": (
         _training_authorized_events, "src.core.ml.training", 1,
@@ -256,6 +269,110 @@ async def test_stage7_terminal_raw_sql_binds_the_exclusion_as_an_expanding_param
     assert "source_system NOT IN :excluded_sources" in statement.text
     assert "paypal" not in statement.text
     assert params == {"payment_id": "pay_1", "as_of": T, "excluded_sources": [PAYPAL_SOURCE_SYSTEM]}
+
+
+def _payment_event_statements(executed):
+    return [(s, p) for s, p in executed if PaymentEventModel.__table__ in s.get_final_froms()]
+
+
+async def _dashboard_summary(session):
+    result = session.execute.return_value
+    result.scalar_one_or_none.return_value = 0
+    result.all.return_value = []
+    await get_executive_summary(session)
+
+
+async def test_dashboard_summary_excludes_paypal_from_both_payment_event_statements():
+    executed = await _executed(_dashboard_summary)
+    statements = _payment_event_statements(executed)
+
+    assert len(executed) == 5 and len(statements) == 2
+    auth_sql, count_sql = (_compile(statement)[0] for statement, _ in statements)
+    assert "sum(payment_events.amount_minor_units)" in auth_sql
+    assert "payment_events.event_type = " in auth_sql
+    assert "GROUP BY payment_events.event_type" in count_sql
+    for statement, params in statements:
+        assert _excluded_sources(statement, params) == [PAYPAL_SOURCE_SYSTEM]
+
+
+async def test_dashboard_summary_reads_the_shared_constant(monkeypatch):
+    monkeypatch.setattr("src.api.inspection_routes.NON_RAZORPAY_PIPELINE_SOURCES", ("sentinel-source",))
+    statements = _payment_event_statements(await _executed(_dashboard_summary))
+    assert len(statements) == 2
+    for statement, params in statements:
+        assert _excluded_sources(statement, params) == ["sentinel-source"]
+
+
+_PAYMENTS_TERMINAL_SUBQUERY = re.compile(
+    r"max\(payment_events\.payment_status\) AS terminal_status(.*?)GROUP BY payment_events\.payment_id", re.S
+)
+_PAYMENTS_CANONICAL_SUBQUERY = re.compile(
+    r"DISTINCT ON \(payment_events\.payment_id\) payment_events\.event_id(.*?)"
+    r"ORDER BY payment_events\.payment_id, payment_events\.timestamp ASC", re.S
+)
+PAYMENTS_OPTIONS = {
+    "default": {},
+    "status-captured": {"status": "captured"},
+    "status-failed": {"status": "failed"},
+    "status-authorized": {"status": "authorized"},
+    "search": {"search": "pay_1"},
+    "intervened": {"filter_type": "INTERVENED"},
+    "attributed": {"filter_type": "ATTRIBUTED"},
+}
+
+
+async def _payments_statements(**options):
+    """Runs get_payments_list on a mocked session; returns its (count, list) statements."""
+    session = _session()
+    session.scalar.return_value = 0
+    session.execute.return_value.all.return_value = []
+    await get_payments_list(**{"limit": 50, "offset": 0, "search": None, "filter_type": None, "status": None,
+                               **options}, session=session)
+    [count_call] = session.scalar.call_args_list
+    [list_call] = session.execute.call_args_list
+    return {"count": count_call.args[0], "list": list_call.args[0]}
+
+
+def _subquery_exclusions(statement):
+    """Returns the values bound to the exclusion inside the terminal and canonical-event subqueries."""
+    sql, compiled_params = _compile(statement)
+    assert len(_ORM_EXCLUSION.findall(sql)) == 2, sql
+    exclusions = []
+    for pattern in (_PAYMENTS_TERMINAL_SUBQUERY, _PAYMENTS_CANONICAL_SUBQUERY):
+        [segment] = pattern.findall(sql)
+        [name] = _ORM_EXCLUSION.findall(segment)
+        exclusions.append(list(compiled_params[name]))
+    return exclusions
+
+
+@pytest.mark.parametrize("options", list(PAYMENTS_OPTIONS))
+async def test_payments_list_excludes_paypal_in_both_subqueries(options):
+    statements = await _payments_statements(**PAYMENTS_OPTIONS[options])
+    for kind, statement in statements.items():
+        assert _subquery_exclusions(statement) == [[PAYPAL_SOURCE_SYSTEM]] * 2, kind
+
+
+async def test_payments_list_reads_the_shared_constant(monkeypatch):
+    monkeypatch.setattr("src.api.inspection_routes.NON_RAZORPAY_PIPELINE_SOURCES", ("sentinel-source",))
+    for statement in (await _payments_statements()).values():
+        assert _subquery_exclusions(statement) == [["sentinel-source"]] * 2
+
+
+async def test_payments_list_keeps_its_ordering_pagination_and_status_semantics():
+    statements = await _payments_statements(status="Captured", limit=20, offset=40)
+    list_sql, list_params = _compile(statements["list"])
+    count_sql, _ = _compile(statements["count"])
+
+    [terminal_segment] = _PAYMENTS_TERMINAL_SUBQUERY.findall(list_sql)
+    assert "payment_events.event_type IN " in terminal_segment
+    assert "ORDER BY payment_events.timestamp DESC" in list_sql
+    assert "LIMIT " in list_sql and "OFFSET " in list_sql
+    bound_values = list(list_params.values())
+    assert 20 in bound_values and 40 in bound_values
+    assert "captured" in bound_values
+    for sql in (list_sql, count_sql):
+        assert "coalesce(anon_1.terminal_status, payment_events.payment_status) = " in sql
+        assert "payment_events.event_id IN (SELECT DISTINCT ON (payment_events.payment_id)" in sql
 
 
 async def test_global_feature_keeps_its_source_dimension_filter():

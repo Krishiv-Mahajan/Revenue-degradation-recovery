@@ -16,27 +16,25 @@ Fixtures:
     source_system. They are NOT realistic Razorpay events; they isolate the source_system
     predicate from every other column.
 
-Two groups of tests:
-  * Guarantees: Stage 5 eligibility, labels and the live prediction trigger, Stage 6 sizing,
-    the Stage 6/7 terminal-event lookups and the Stage 8 amount lookup do not use PayPal rows,
-    even when payment_id overlaps.
-  * Known gap (characterization, not desired behavior): the dashboard summary has no provider
-    filter. This test pins the current behavior; changing it needs a separately approved
-    production fix, after which it must be updated.
+Guarantees: Stage 5 eligibility, labels and the live prediction trigger, Stage 6 sizing, the
+Stage 6/7 terminal-event lookups, the Stage 8 amount lookup and the Razorpay-only dashboard
+(summary metrics and payment timeline) do not use PayPal rows, even when payment_id overlaps.
 """
 import json
 import operator
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import bindparam, or_, select, text
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import BinaryExpression, BindParameter, BooleanClauseList, TextClause
 
-from src.api.inspection_routes import get_executive_summary
+from src.api.inspection_routes import get_executive_summary, get_payment_timeline
 from src.core.normalizers.paypal import normalize_paypal_event
 from src.core.normalizers.razorpay import normalize_razorpay_event
 from src.core.parsers.paypal import parse_paypal_event
@@ -47,7 +45,7 @@ from src.infrastructure.attribution_repository import AttributionRepository
 from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
-from src.infrastructure.models import PaymentEventModel
+from src.infrastructure.models import InterventionDecisionModel, PaymentEventModel
 from tests.unit import paypal_event_samples as samples
 
 T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
@@ -566,7 +564,7 @@ async def test_paypal_terminal_events_do_not_create_razorpay_outcome_conflicts()
     assert {row["event_type"] for row in selected} == {"payment.captured"}
 
 
-# --- known gap: dashboard summary --------------------------------------------------------------
+# --- guarantees: Razorpay-only dashboard ---------------------------------------------------------
 
 class _EmulatedSummarySession:
     """
@@ -594,27 +592,110 @@ class _EmulatedSummarySession:
         return result
 
 
-async def test_dashboard_summary_counts_paypal_captures_in_the_success_rate_known_gap():
-    # KNOWN GAP (characterization): the summary's event-count statement has no WHERE clause, so a
-    # PayPal capture is counted with Razorpay captures. The counts and rate come from the real
-    # summary code over the emulated aggregate; this is not PostgreSQL validation.
+def _summary_statements(session):
+    """Returns the summary's (authorization sum, event-count) payment_events statements."""
+    [count_statement] = [s for s in session.payment_event_statements
+                         if "event_type" in [c.key for c in s.selected_columns]]
+    [auth_statement] = [s for s in session.payment_event_statements if s is not count_statement]
+    return auth_statement, count_statement
+
+
+async def test_dashboard_summary_ignores_paypal_events():
+    # The counts and rate come from the real summary code over the emulated aggregate; this is not
+    # PostgreSQL validation.
     razorpay_auth = _razorpay_row("payment.authorized", "authorized")
     razorpay_capture = _razorpay_row("payment.captured", "captured")
-    paypal_capture = _paypal_row(samples.capture_completed, payment_id=None)
+    paypal_rows = [_paypal_row(builder, payment_id=None) for builder in samples.ALL_SUPPORTED.values()]
+    overlapping_paypal_capture = _paypal_row(samples.capture_completed)
 
     razorpay_session = _EmulatedSummarySession([razorpay_auth, razorpay_capture])
-    mixed_session = _EmulatedSummarySession([razorpay_auth, razorpay_capture, paypal_capture])
+    mixed_session = _EmulatedSummarySession(
+        [razorpay_auth, razorpay_capture, *paypal_rows, overlapping_paypal_capture]
+    )
     razorpay_only = await get_executive_summary(razorpay_session)
     mixed = await get_executive_summary(mixed_session)
 
-    # The event-count statement (selecting event_type) is unfiltered: observed directly, not emulated.
-    [count_statement] = [s for s in mixed_session.payment_event_statements
-                         if "event_type" in [c.key for c in s.selected_columns]]
-    assert count_statement.whereclause is None
-
-    # Manually calculated from the fixtures: Razorpay contributes 1 authorization and 1 capture,
-    # PayPal contributes 1 capture and no authorization, so captures/authorizations is 1/1 then 2/1.
+    # Manually calculated from the fixtures: Razorpay contributes 1 authorization and 1 capture.
     assert (razorpay_only["total_auths"], razorpay_only["total_captures"], razorpay_only["overall_success_rate"]) == (1, 1, 1.0)
-    assert (mixed["total_auths"], mixed["total_captures"], mixed["overall_success_rate"]) == (1, 2, 2.0)
-    # total_gmv sums payment.authorized amounts only; PayPal never emits payment.authorized.
-    assert mixed["total_gmv_minor_units"] == razorpay_only["total_gmv_minor_units"] == razorpay_auth["amount_minor_units"]
+    assert razorpay_only["total_gmv_minor_units"] == razorpay_auth["amount_minor_units"]
+    assert mixed == razorpay_only
+
+
+async def test_dashboard_summary_excludes_paypal_by_provider_alone():
+    session = _EmulatedSummarySession([])
+    await get_executive_summary(session)
+    auth_statement, count_statement = _summary_statements(session)
+
+    assert _predicate_columns((auth_statement, {})) == {"event_type", "source_system"}
+    assert _predicate_columns((count_statement, {})) == {"source_system"}
+    # PayPal never emits payment.authorized; this synthetic row and its source-swapped twin differ
+    # only in source_system, so the provider filter alone decides.
+    synthetic_paypal = {**_paypal_row(samples.order_approved), "event_type": "payment.authorized"}
+    for statement in (auth_statement, count_statement):
+        assert not _matches((statement, {}), synthetic_paypal)
+        assert _matches((statement, {}), _synthetic_source_swap(synthetic_paypal))
+
+
+class _EmulatedTimelineSession:
+    """
+    Python emulation of the database for get_payment_timeline; NOT PostgreSQL.
+    The payment_events statement's WHERE clause is applied by the evaluator and its ORDER BY
+    timestamp is reproduced in Python. The latest-decision lookup returns `decision` and records
+    the payment_attempt_id it was asked for; every other statement returns no row.
+    """
+
+    def __init__(self, rows, decision=None):
+        self.rows = rows
+        self.decision = decision
+        self.decision_lookups = []
+
+    async def execute(self, statement):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        froms = statement.get_final_froms()
+        if PaymentEventModel.__table__ in froms:
+            assert str(statement.compile()).rstrip().endswith("ORDER BY payment_events.timestamp")
+            matched = sorted(
+                (row for row in self.rows if _orm_evaluate(statement.whereclause, row) is True),
+                key=lambda row: row["timestamp"],
+            )
+            result.scalars.return_value.all.return_value = [SimpleNamespace(**row) for row in matched]
+        elif InterventionDecisionModel.__table__ in froms:
+            self.decision_lookups.append(statement.whereclause.right.value)
+            result.scalar_one_or_none.return_value = self.decision
+        return result
+
+
+async def test_timeline_ignores_overlapping_paypal_events_and_keeps_the_razorpay_trace():
+    razorpay_auth = _razorpay_row("payment.authorized", "authorized")
+    razorpay_capture = {**_razorpay_row("payment.captured", "captured"), "timestamp": T - timedelta(minutes=1)}
+    # The real PayPal capture's 2024 timestamp sorts before the Razorpay events; the refund is moved
+    # after them, so either PayPal row would otherwise supply payment_info or terminal_status.
+    paypal_capture = _paypal_row(samples.capture_completed)
+    paypal_refund = {**_paypal_row(samples.capture_refunded), "timestamp": AFTER_T}
+    decision = SimpleNamespace(
+        decision_id="dec-1", decision_type="ACT", selected_route_id="ROUTE_A", gate_verdict="PASSED",
+        decided_at=T, failure_probability=0.8, evaluation_audit_payload={},
+    )
+    session = _EmulatedTimelineSession([paypal_refund, razorpay_capture, paypal_capture, razorpay_auth], decision)
+
+    timeline = await get_payment_timeline(RAZORPAY_ATTEMPT_ID, session)
+
+    assert timeline["payment_id"] == RAZORPAY_ATTEMPT_ID
+    assert [e["event_type"] for e in timeline["events"]] == ["payment.authorized", "payment.captured"]
+    assert timeline["payment_info"]["currency"] == "INR"
+    assert timeline["payment_info"]["amount_minor_units"] == razorpay_auth["amount_minor_units"]
+    assert timeline["payment_info"]["terminal_status"] == "captured"
+    assert session.decision_lookups == [RAZORPAY_ATTEMPT_ID]
+    assert timeline["decision"]["decision_id"] == "dec-1"
+
+
+async def test_timeline_returns_404_for_a_paypal_only_payment_id():
+    rows = [_paypal_row(builder, payment_id=None) for builder in samples.ALL_SUPPORTED.values()]
+    assert samples.CAPTURE_ID in {row["payment_id"] for row in rows}
+
+    with pytest.raises(HTTPException) as excinfo:
+        await get_payment_timeline(samples.CAPTURE_ID, _EmulatedTimelineSession(rows))
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == f"Payment {samples.CAPTURE_ID} not found"
