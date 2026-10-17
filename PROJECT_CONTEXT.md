@@ -313,6 +313,50 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - PayPal pipeline activation: not started.
   - Each production fix requires separate explicit approval.
 
+### Stage 6/7 Terminal-Event Provider Isolation (2026-10-17, complete)
+
+- **Commit:** `99e0d1fd520f5c3d37fff3daddeca531da95754e` — `fix: isolate Stage 6/7 terminal-event lookups from PayPal events`
+- **Builds on:** P1c (`9ba75f7b6c1b00a3aea6b7cfad79dcf02aed0c5a`). Closes P1c confirmed gap 1; the P1c section above is kept as the historical record of the pre-fix behavior.
+- **Problem:** the three Stage 6/7 terminal-event queries filtered only by `payment_id`, `event_type IN ('payment.captured', 'payment.failed')` and `ingested_at`. The PayPal normalizer emits the same two event types, so a PayPal capture or decline whose `payment_id` overlapped a Razorpay attempt's matched exactly like a Razorpay terminal event.
+- **Approved change:** each query now also requires `source_system NOT IN NON_RAZORPAY_PIPELINE_SOURCES`, using the same shared constant and patterns as Stage 5:
+  - `InterventionRepository.check_terminal_event_exists` (raw SQL, expanding `excluded_sources` bind parameter).
+  - `ExecutionRepository.check_terminal_event_exists_before` (raw SQL, expanding `excluded_sources` bind parameter).
+  - `ExecutionRepository.get_canonical_terminal_events` (ORM `source_system.notin_(...)`).
+- **Behavior change:** PayPal rows can no longer:
+  - make Stage 6 treat a Razorpay attempt as already terminal;
+  - move a Stage 7 command from `PENDING` to `NOT_NEEDED` (`TERMINAL_OUTCOME_ALREADY_INGESTED`);
+  - become the Stage 7 observed outcome, or add a conflicting event type that sets `conflict_detected`;
+  - reach Stage 8, which reads only the Stage 7 observation and so needed no code change.
+- **Unchanged:** event types, temporal boundaries (`< t_decide` in Stage 6, `<= as_of` in Stage 7), `ORDER BY ingested_at ASC`, parameter names, return types, Razorpay behavior, and `synthetic` / `test_system` sources, which are not in the exclusion list. No schema, migration, dashboard, API or PayPal pipeline changes.
+- **Decisions:**
+  - Exclusion list (`NOT IN NON_RAZORPAY_PIPELINE_SOURCES`) rather than a Razorpay-only filter, matching existing convention and preserving synthetic and test-system fixtures.
+  - **No backfill:** existing append-only commands, observations and attributions are not re-evaluated or corrected.
+- **Tests:**
+  - `tests/unit/test_paypal_cross_provider_isolation.py`:
+    - The Stage 6/7 known-gap characterization tests were replaced with guarantees: the terminal lookups filter on `source_system`, and an overlapping PayPal terminal row does not match while the realistic Razorpay row and the synthetic source-swapped twin do.
+    - The identifier-disjointness test was renamed `test_terminal_lookups_do_not_match_non_overlapping_paypal_captures`.
+    - New: `test_canonical_terminal_events_drop_overlapping_paypal_and_keep_ingested_at_order` and `test_paypal_terminal_events_do_not_create_razorpay_outcome_conflicts`.
+  - `tests/unit/test_provider_isolation.py`: the three queries were added to `CASES`, covering the bound exclusion parameter, shared-constant use, preserved predicates including `ORDER BY` and the module import. Two raw-SQL parameter tests were also added.
+- **Validation (offline only: `TEST_DATABASE_URL` unset, `DATABASE_URL` pointed at unreachable localhost port 1):**
+  - Updated tests before the fix: 21 failed, 106 passed; every failure was a new or rewritten assertion.
+  - Focused files after the fix: 127 passed on two consecutive runs.
+  - Related intervention, execution, observation, attribution, live-pipeline and PayPal parser/normalizer/lifecycle tests: 262 passed, 3 warnings.
+  - `tests/unit` + `tests/boundaries`: 889 passed, 4 warnings (the pre-existing httpx deprecation warning).
+  - `tests/api`: 30 passed, 21 skipped (require a database).
+- **Not validated:**
+  - PostgreSQL has not executed the new filters. Database-backed tests skipped (30, `TEST_DATABASE_URL` not set): `tests/integration/test_intervention_temporal.py`, `test_execution_temporal.py`, `test_execution_lifecycle.py`, `test_intervention_lifecycle.py`, `test_boundary_stage5_stage6.py`, `test_attribution_lifecycle.py`, `test_attribution_temporal.py`, `test_execution_persistence.py` and `test_execution_concurrency.py`.
+  - No Docker or PayPal Sandbox validation.
+- **Known limitations:**
+  - No backfill of existing append-only records (see Decisions).
+  - Tests evaluate the query filters against in-memory rows; the ordering test reproduces `ORDER BY ingested_at ASC` in Python after asserting it is the statement's final clause.
+  - A new provider is included in these lookups by default until it is added to `NON_RAZORPAY_PIPELINE_SOURCES`.
+  - Unchanged and out of scope: terminal events with identical `ingested_at` have no secondary tie-breaker, and the terminal branch of `run_live_pipeline` checks event type, not provider (the PayPal route never calls it).
+- **Remaining work:**
+  - Dashboard provider-isolation / reporting fix: not implemented.
+  - P1b optional `provider_resource_id` schema decision: not started.
+  - PayPal pipeline activation: not started.
+  - Each production fix requires separate explicit approval.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**.
