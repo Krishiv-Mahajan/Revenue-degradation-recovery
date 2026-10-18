@@ -398,12 +398,92 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - PayPal pipeline activation: not started.
   - Each production fix requires separate explicit approval.
 
+### Event and Attribution Provenance (2026-10-18, complete)
+
+- **Commit:** `6648909c8dfae0e74e42b4e0ec2bdb296a3dd7fa` — `fix: correct event and attribution provenance`
+- **Problems:**
+  - `scripts/generate_live_context.py` wrote its generated events as `source_system="razorpay"`, making them indistinguishable from genuine Razorpay events.
+  - Stage 8 classified any Stage 5 model whose name lacked "synthetic" as `EMPIRICAL_PRODUCTION`, so the live and demo `DeterministicBaselineModel` heuristic received full empirical weight.
+- **Approved changes:**
+  - The live-context generator labels every raw and canonical event it writes `source_system="synthetic"` (`GENERATED_SOURCE_SYSTEM`), and its lookback check counts synthetic traffic.
+  - Stage 8 provenance comes from `classify_model_provenance(model_name, model_version)` in `src/core/attribution/attribution_service.py`:
+    - names in `DEVELOPMENT_MODEL_NAMES` (`DeterministicBaselineModel`) or containing "synthetic" → `SYNTHETIC_DEVELOPMENT`;
+    - an exact `(model_name, model_version)` pair in `VERIFIED_EMPIRICAL_MODELS` → `EMPIRICAL_PRODUCTION`;
+    - anything else → `UNKNOWN`.
+  - `VERIFIED_EMPIRICAL_MODELS` is empty: no Stage 5 model is registered as empirically validated. Adding an entry requires an explicitly reviewed validation.
+  - `is_synthetic_baseline` is now true whenever provenance is not `EMPIRICAL_PRODUCTION`.
+- **Behavior change:**
+  - Provenance weights are unchanged (`EMPIRICAL_PRODUCTION` 1.0, `SYNTHETIC_DEVELOPMENT` 0.6, `UNKNOWN` 0.3). Attribution confidence is `c_provenance × c_diagnosis × c_timing`, attributions below the 0.25 floor become `INDETERMINATE_INSUFFICIENT_EVIDENCE`, and protected GMV is `amount × p0 × confidence`, capped at the loss exposure.
+  - Future attributions from the deterministic heuristic therefore carry provenance weight 0.6 instead of 1.0: about 40% lower confidence and protected GMV, and some fall below the floor.
+  - Live Razorpay payments no longer count generated live-context events in their Stage 5 global failure rate, because that rate is keyed by the payment's own `source_system`. The live-context demo's prediction for its target payment drops from 0.925 (ACT) to 0.55 (MONITOR), computed offline with the deterministic model. Degradation and RCA context from the generated traffic still apply.
+- **Unchanged:** provenance weights, the confidence floor and attribution formula, Stage 2–7 behavior, schema and migrations. No backfill: rows written earlier by the generator stay labelled `razorpay` (identifiable by `pay_live_ctx_`, `order_live_ctx_`, `evt_live_auth_` and `evt_live_term_` ids), and earlier attributions keep their recorded provenance.
+- **Tests:** `tests/unit/test_attribution_provenance.py` (new) and `tests/unit/test_live_context_generator.py` (updated).
+- **Validation (offline only: `TEST_DATABASE_URL` unset, `DATABASE_URL` pointed at unreachable localhost port 1):** verified independently on HEAD plus only these four files: 43 focused attribution and generator tests passed; `tests/unit` + `tests/boundaries`: 919 passed, 4 warnings (the existing httpx deprecation warning).
+- **Not validated:** `tests/integration/test_attribution_lifecycle.py` and `test_attribution_temporal.py` (the real attribution service against PostgreSQL) have not run.
+
+### Stage 5 Provider-Evaluation Mode (2026-10-18, complete; not production-validated)
+
+- **Commit:** `383c0b9deda55f82be4616613f9bcf3935a28ff5` — `feat: add opt-in Stage 5 provider-evaluation mode with fingerprinted provider models`
+- **Builds on:** the provenance commit above (`6648909c8dfae0e74e42b4e0ec2bdb296a3dd7fa`).
+- **Purpose:** an opt-in, offline training/evaluation path for Stage 5 that uses genuine Razorpay events only and refuses data that generated events could have shaped. It does not change live predictions, Stages 6–8, or PayPal handling, and it does not implement PayPal API integration or production intervention.
+- **Populations** (`TrainingPopulation` in `src/core/ml/training.py`, chosen when constructing `Stage5PipelineValidator`):
+  - `SYNTHETIC_DEVELOPMENT` (default): today's extract over every non-PayPal source, including synthetic and test data. Its SQL, its behavior and `SyntheticLogisticRegressionModel` output are unchanged.
+  - `PROVIDER_EVALUATION` (opt-in): samples and labels require `source_system = 'razorpay'` (in addition to the PayPal exclusion), with `event_id` breaking `ingested_at` ties in both queries.
+- **Entry point:** none. `scripts/train_synthetic_model.py` and every other caller use the default mode; the live pipeline does not use the training path.
+- **Legacy live-context detection:** `is_legacy_live_context_event()` matches only the generator's full id pattern with one shared token: `pay_live_ctx_` plus 12 lowercase hex digits, `order_live_ctx_` plus the same token, and `evt_live_auth_` or `evt_live_term_` plus the same token. Matching samples are dropped. There is no `raw_payload` check.
+- **Contamination guard** (`assert_evaluation_window_uncontaminated`):
+  - It runs before any label or feature query, over [earliest sample − `CONTAMINATION_LOOKBACK`, latest sample + `LABEL_HORIZON`]. `CONTAMINATION_LOOKBACK` is 4 weeks + 24 hours: the Stage 2 baseline and Stage 4 RCA history plus the 24-hour failure-rate features. `LABEL_HORIZON` is 30 minutes.
+  - It refuses (`EvaluationDataContaminationError`, counts only) if the window, by `timestamp` or `ingested_at`, holds any event whose source is neither `razorpay` nor `paypal`, or any legacy live-context event. Legacy candidates are pre-filtered with an escaped `LIKE` prefix match and confirmed by the full id check.
+  - It refuses rather than filtering because snapshots, episodes and RCA records carry no source.
+- **Consistent snapshot:**
+  - Provider `extract_dataset` refuses a session already in a transaction, begins one with `isolation_level="REPEATABLE READ"`, and requires `SHOW transaction_isolation` to report `repeatable read` or `serializable` before any data query (`EvaluationIsolationError` otherwise).
+  - Sample selection, the guard, labels and feature reconstruction all use that one session and transaction. Afterwards, the same root transaction must still be current and active, or the extraction fails.
+  - In provider mode, `get_authorized_events`, `get_terminal_label` and the guard refuse to run outside that snapshot, including before and after extraction. Default mode does not check.
+- **Checked-dataset binding:**
+  - Each provider extraction clears any previous checked state. It records the guarded window and a dataset fingerprint only after the guard, labels, features and the final transaction check all succeed.
+  - In provider mode, `run_pipeline` refuses without a successful check, with no samples, or when its inputs' fingerprint differs from the checked one.
+- **Dataset fingerprint** (`compute_dataset_fingerprint`):
+  - SHA-256 over the ordered samples: every `FeatureSnapshot` field (key order ignored), the label and the sample time normalized to UTC. Timezone-naive times are rejected, and sample order matters.
+  - It excludes training code, hyperparameters, library versions, artifact bytes and payment ids, so identical data trained differently yields the same fingerprint.
+- **Provider model identity:**
+  - Provider training returns `ProviderLogisticRegressionModel` (`src/core/ml/model.py`), a sibling of `SyntheticLogisticRegressionModel`, not a subclass.
+  - Its version is `provider-eval-` plus the first 12 hex characters of the fingerprint, validated on construction, with status "PROVIDER-TRAINED — NOT VALIDATED".
+  - Its metadata records the population, sample window, sample count, metrics and `metrics_computed`, the contamination window and lookback, the label horizon and the full fingerprint. Metadata is evidence for review, not proof of validation.
+  - Stage 8 classifies it as `UNKNOWN` unless its exact name/version pair is registered in `VERIFIED_EMPIRICAL_MODELS` (empty).
+  - `load_synthetic_development_model` rejects provider artifacts.
+- **Compatibility:**
+  - `SyntheticLogisticRegressionModel` keeps its class path, constructor and identity. Its prediction now goes through a shared helper that is behaviorally identical (parity-tested against the original implementation).
+  - New class-level defaults (`training_population = "SYNTHETIC_DEVELOPMENT"`, `training_metadata = None`) let the committed `models/synthetic-development-v1.joblib` load unchanged.
+- **Tests:** `tests/unit/test_training_provider_evaluation.py` and `tests/unit/test_provider_model_provenance.py` (new, 104 tests), all using mocked sessions and in-memory datasets.
+- **Validation (offline only, same environment):**
+  - New provider tests: 104 passed (repeated).
+  - `tests/unit` + `tests/boundaries`: 1,025 passed, 4 warnings (the existing httpx deprecation warning).
+  - `tests/api`: 30 passed, 24 skipped (require a database).
+  - `tests/integration`: 60 skipped (require a database).
+  - These offline results do not replace database-backed validation.
+- **Not validated:**
+  - No provider evaluation has been run against PostgreSQL. Unverified: asyncpg applying `REPEATABLE READ` through `session.connection`, the `SHOW` result, the snapshot covering every statement, transaction identity across statements, isolation reset when connections return to the pool, the escaped `LIKE`, and guard query plans over 4+ weeks of data.
+  - The database-backed default training test (`test_synthetic_training_pipeline.py`) and feature-reconstruction tests have not run.
+  - Provider metrics are not validated production metrics.
+- **Safety requirements and known limitations:**
+  - **Transaction cleanup belongs to the caller.** The validator never commits or rolls back: a successful extraction, and every failure after the transaction begins, leave it open. Callers must use a fresh session per evaluation (e.g. `async with Session() as session:`) or explicitly roll back/close after success or failure. Reusing a session with an open transaction is refused.
+  - The contamination guard inspects `payment_events` only. It cannot see long-running episodes that began before the window, or fabricated Stage 2 snapshots with no corresponding events (`generate_live_context.py` writes baseline snapshots this way). Provider evaluation should run against a database that has never held generated data.
+  - Model identity does not cover training code, hyperparameters or artifact bytes. A registry entry is not pinned to an artifact hash, and `joblib.load` executes the pickle.
+  - Frozen Stage 5 feature queries (`get_payment_event_by_id`; step 2 of `get_active_episode_context`) can return tied rows in varying order. Duplicate `payment.authorized` events for one payment become duplicate samples, as in default mode.
+  - `UNKNOWN` (0.3) is weighted below `SYNTHETIC_DEVELOPMENT` (0.6). Read-only is not enforced. Provider mode still logs "SYNTHETIC / DEVELOPMENT".
+  - No LLM participates in core financial calculations, policy gates, provenance classification or provider evaluation.
+- **Remaining work:**
+  - A provider-evaluation entry point (fresh session per run, explicit cleanup).
+  - Database-backed validation against an isolated PostgreSQL test database, and a provider-evaluation smoke test.
+  - Optional: pin registry entries to artifact hashes.
+  - Each production change requires separate explicit approval.
+
 ## Current State
 
-The repository is currently **Stage 8 complete and frozen**.
+The repository is currently **Stage 8 complete and frozen**, with the approved post-Stage 8 extensions recorded above.
 
 - **Branch:** `main`
-- **Test Count:** 210 tests passing cleanly.
+- **Test Count (offline, as of `383c0b9deda55f82be4616613f9bcf3935a28ff5`):** `tests/unit` + `tests/boundaries`: 1,025 passed; `tests/api`: 30 passed, 24 skipped; `tests/integration`: 60 skipped (database required). Database-backed tests have not been run for the recent extensions.
 - **Working Tree:** Clean.
 
 ## Terminal Status
