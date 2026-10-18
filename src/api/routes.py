@@ -62,31 +62,33 @@ async def ingest_razorpay(
             content={"status": "success", "event_id": str(payment_event.event_id)}
         )
         
+    # Exception messages and chained database errors can carry payload values or SQL parameters;
+    # log the exception type only and return fixed details.
     except InvalidWebhookSignatureError as e:
-        logger.warning(f"Webhook signature verification failed: {e}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+        logger.warning(f"Razorpay webhook signature verification failed ({type(e).__name__})")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature")
         
     except MalformedInputError as e:
-        logger.error(f"Malformed input: {e}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.error(f"Malformed Razorpay webhook ({type(e).__name__})")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed request")
         
     except SchemaValidationError as e:
-        logger.error(f"Schema validation failed: {e}")
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        logger.error(f"Razorpay webhook schema validation failed ({type(e).__name__})")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unprocessable webhook event")
         
     except NormalizationError as e:
-        logger.error(f"Normalization failed: {e}")
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        logger.error(f"Razorpay webhook normalization failed ({type(e).__name__})")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unprocessable webhook event")
         
     except DuplicateEventConflictError as e:
-        logger.warning(f"Duplicate event conflict: {e}")
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        logger.warning(f"Razorpay duplicate event conflict ({type(e).__name__})")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Conflicting duplicate event")
         
     except PersistenceError as e:
-        logger.error(f"Persistence error: {e}")
+        logger.error(f"Razorpay webhook persistence failed ({type(e).__name__})")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
     except Exception as e:
-        logger.exception("Unexpected error during ingestion")
+        logger.error(f"Unexpected error during Razorpay ingestion ({type(e).__name__})")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 

@@ -1,8 +1,10 @@
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.main import app
 from src.api.dependencies import get_db_session
@@ -34,19 +36,41 @@ async def test_dashboard_root_endpoint(client):
     assert "Payment Recovery Engine" in response.text
 
 @pytest.mark.asyncio
-async def test_health_check_db_failure():
+async def test_health_check_db_failure_returns_generic_detail_and_logs_type_only(caplog):
+    database_details = ("db-internal.example", "10.0.0.5", "5433", "svc_payments", "payment_recovery_prod")
+    driver_error = OperationalError(
+        "SELECT 1",
+        None,
+        Exception(
+            'connection to server at "db-internal.example" (10.0.0.5), port 5433 failed: '
+            'FATAL: password authentication failed for user "svc_payments" database "payment_recovery_prod"'
+        ),
+    )
+    assert all(detail in str(driver_error) for detail in database_details)
+
     async def failing_get_db_session():
         class FailingSession:
             async def execute(self, stmt):
-                raise Exception("Connection refused")
+                raise driver_error
         yield FailingSession()
 
+    caplog.set_level(logging.DEBUG)
     app.dependency_overrides[get_db_session] = failing_get_db_session
-    async with AsyncClient(app=app, base_url="http://test") as ac:
-        response = await ac.get("/health")
-    app.dependency_overrides.pop(get_db_session, None)
+    try:
+        async with AsyncClient(app=app, base_url="http://test") as ac:
+            response = await ac.get("/health")
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
     assert response.status_code == 503
-    assert "Database unreachable" in response.json()["detail"]
+    assert response.json() == {"detail": "Database unreachable"}
+    for detail in database_details:
+        assert detail not in response.text
+        assert detail not in caplog.text
+    assert any(
+        r.name == "src.main" and r.getMessage() == "Health check database probe failed (OperationalError)"
+        for r in caplog.records
+    )
 
 @pytest.mark.asyncio
 async def test_executive_summary_endpoint(client):

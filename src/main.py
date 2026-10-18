@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -14,6 +15,8 @@ from src.api import dependencies
 from src.api.routes import router as ingestion_router
 from src.api.inspection_routes import router as inspection_router
 from src.infrastructure.database import get_db_session
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -44,10 +47,12 @@ async def health_check(session: AsyncSession = Depends(get_db_session)):
         await session.execute(text("SELECT 1"))
         return {"status": "ok"}
     except Exception as e:
+        # Driver messages name the host, port, user and database; log the type only.
+        logger.error(f"Health check database probe failed ({type(e).__name__})")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Database unreachable: {str(e)}"
-        )
+            detail="Database unreachable"
+        ) from None
 
 # Static file serving for Phase 7 Dashboard
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")

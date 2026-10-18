@@ -8,7 +8,7 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery"
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(DATABASE_URL, echo=False, hide_parameters=True)
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,

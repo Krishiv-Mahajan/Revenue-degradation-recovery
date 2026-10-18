@@ -493,9 +493,9 @@ Copy the example environment configuration:
 ```bash
 cp .env.example .env
 ```
-Edit `.env` if necessary. Default configuration:
+Edit `.env` and set `RAZORPAY_WEBHOOK_SECRET` to your own secret. The value below is an example only and must never be used as a production secret. Razorpay webhook intake returns HTTP 503 while the secret is missing or still the `.env.example` placeholder.
 ```env
-RAZORPAY_WEBHOOK_SECRET=test_webhook_secret
+RAZORPAY_WEBHOOK_SECRET=replace_with_a_local_test_secret
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery
 ```
 Scripts under `scripts/` read `DATABASE_URL` from the environment or `.env`. There is no hardcoded fallback.
