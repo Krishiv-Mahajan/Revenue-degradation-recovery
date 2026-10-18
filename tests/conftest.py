@@ -63,6 +63,15 @@ class DefaultSessionGuard:
         )
 
 
+TEST_CLIENT_HOSTS = "localhost,127.0.0.1,testserver,test"
+
+
+@pytest.fixture(autouse=True)
+def allowed_test_client_hosts(monkeypatch):
+    """The app rejects Host headers outside ALLOWED_HOSTS; TestClient sends 'testserver' and AsyncClient 'test'."""
+    monkeypatch.setenv("ALLOWED_HOSTS", TEST_CLIENT_HOSTS)
+
+
 @pytest.fixture(autouse=True)
 def default_session_guard(monkeypatch):
     guard = DefaultSessionGuard()

@@ -369,7 +369,9 @@ The engine includes a modern, dark-mode operational dashboard served directly by
 
 ## 11. API Surface
 
-The engine exposes read-only inspection endpoints designed for operator dashboards, automated verification, and external monitoring:
+The engine exposes read-only inspection endpoints designed for operator dashboards, automated verification, and external monitoring.
+
+**Access**: `/`, `/static/*` and every `/api/v1/*` route require the HTTP Basic dashboard credentials. `/health` is public. The webhook routes are public but authenticate each delivery by its provider signature. `/docs`, `/redoc` and `/openapi.json` are disabled unless `ENABLE_API_DOCS=true`, and then also require the dashboard credentials.
 
 | Method | Endpoint Route | Description & Telemetry Returned |
 |---|---|---|
@@ -497,8 +499,29 @@ Edit `.env` and set `RAZORPAY_WEBHOOK_SECRET` to your own secret. The value belo
 ```env
 RAZORPAY_WEBHOOK_SECRET=replace_with_a_local_test_secret
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery
+DASHBOARD_USERNAME=
+DASHBOARD_PASSWORD=
+ALLOWED_HOSTS=localhost,127.0.0.1
+ENABLE_API_DOCS=false
 ```
 Scripts under `scripts/` read `DATABASE_URL` from the environment or `.env`. There is no hardcoded fallback.
+
+Set `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to credentials of your choice. The dashboard, `/static/*` and `/api/v1/*` use HTTP Basic authentication and return HTTP 503 until both are set. There are no default credentials. `ALLOWED_HOSTS` controls which `Host` header values the server accepts (see below). `ENABLE_API_DOCS=true` serves `/docs`, `/redoc` and `/openapi.json` behind the same credentials; otherwise they return 404.
+
+#### `ALLOWED_HOSTS`
+A comma-separated list of hostnames the server answers. Ports are ignored. When unset or empty, the default is `localhost,127.0.0.1`. A configured list **replaces** the default, so keep `localhost,127.0.0.1` in it if you still use them. Requests for any other hostname return HTTP 400.
+
+Each entry is an exact hostname, an IPv4 address, or a wildcard of the form `*.<domain>`, which matches subdomains of `<domain>` but not `<domain>` itself:
+```env
+ALLOWED_HOSTS=localhost,127.0.0.1,*.example.com,<your-tunnel-domain>.ngrok-free.app
+```
+The server refuses to use a configuration containing any of the following, and answers every request with HTTP 503 until it is corrected (the log names the problem, never the configured value):
+- `*` on its own, which would allow every host;
+- malformed entries, such as `foo*`, `*.`, `host:8000`, URLs, paths, or names with spaces or underscores;
+- overly broad wildcards that cover a whole top-level domain or only IP addresses, such as `*.com` or `*.0.1`;
+- wildcards over known shared or tunnel-provider suffixes, such as `*.co.uk`, `*.org.uk`, `*.com.au`, `*.co.in` or `*.ngrok-free.app`.
+
+For a tunnel, add the exact tunnel hostname, never a wildcard over the provider's domain: every user's tunnel shares that domain. The shared-suffix check is a short, conservative denylist in `src/api/security.py`, not a full public-suffix list, so it cannot detect every public suffix. Choose wildcards only for domains you control.
 
 ### Step 3: Start PostgreSQL
 Launch the PostgreSQL 15 container (mapped to host port 5433):
@@ -528,24 +551,28 @@ PYTHONPATH=. python scripts/demo_orchestrator.py --reset
 ```
 
 ### Step 6: Start the Application Server
-Launch FastAPI with Uvicorn:
+Launch FastAPI with Uvicorn, bound to localhost only:
 ```bash
-uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn src.main:app --host 127.0.0.1 --port 8000 --reload
 ```
+Avoid `--host 0.0.0.0` for local demos: it accepts connections from every network interface.
 
 ### Step 7: Open the Operations Dashboard
 Open your browser and navigate to:
 ```text
 http://localhost:8000
 ```
-Inspect the Executive Overview, degradation incidents, intervention ledger, and payment timelines.
+The browser asks for the `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` credentials. Inspect the Executive Overview, degradation incidents, intervention ledger, and payment timelines.
 
 ### Step 8: (Optional) Connect Live Razorpay Sandbox Webhooks
+> **Warning**: ngrok and similar tunnels publish the entire application on the public internet, not only the webhook route. Before starting a tunnel, set strong `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` values and keep `ENABLE_API_DOCS` off. HTTP Basic credentials are only protected in transit over HTTPS, so open the dashboard through the tunnel's `https://` URL, never `http://`. `ALLOWED_HOSTS` restricts which hostnames are served; it is not access control.
+
 To test real payment events:
 1. Start an ngrok tunnel to port 8000:
    ```bash
    ngrok http 8000
    ```
+   Add the exact tunnel hostname to `ALLOWED_HOSTS` (for example `ALLOWED_HOSTS=localhost,127.0.0.1,<your-tunnel-domain>.ngrok-free.app`) and restart the server if the value is set in `.env`; requests for any other hostname return HTTP 400. A wildcard such as `*.ngrok-free.app` is rejected because it would match every ngrok user's tunnel.
 2. In the Razorpay Dashboard (Settings → Webhooks), create a webhook targeting:
    `https://<your-tunnel-domain>.ngrok-free.app/ingest/razorpay`
 3. Set the Webhook Secret to match your `RAZORPAY_WEBHOOK_SECRET` and enable `payment.authorized`, `payment.captured`, and `payment.failed`.

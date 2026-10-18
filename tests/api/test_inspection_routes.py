@@ -11,16 +11,21 @@ from src.api.dependencies import get_db_session
 
 from src.infrastructure.models import PaymentEventModel
 
+DASHBOARD_TEST_CREDENTIALS = ("inspection-test-user", "inspection-test-password")
+
+
 @pytest_asyncio.fixture
-async def client(db_engine):
+async def client(db_engine, monkeypatch):
     Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
 
     async def override_get_db_session():
         async with Session() as session:
             yield session
 
+    monkeypatch.setenv("DASHBOARD_USERNAME", DASHBOARD_TEST_CREDENTIALS[0])
+    monkeypatch.setenv("DASHBOARD_PASSWORD", DASHBOARD_TEST_CREDENTIALS[1])
     app.dependency_overrides[get_db_session] = override_get_db_session
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(app=app, base_url="http://test", auth=DASHBOARD_TEST_CREDENTIALS) as ac:
         yield ac
     app.dependency_overrides.pop(get_db_session, None)
 @pytest.mark.asyncio

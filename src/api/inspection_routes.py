@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import uuid
 
 from src.api.dependencies import get_db_session
+from src.api.security import require_dashboard_auth
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     PaymentEventModel,
@@ -21,7 +22,10 @@ from src.infrastructure.models import (
     CounterfactualAttributionModel
 )
 
-router = APIRouter(prefix="/api/v1", tags=["internal-inspection"])
+# Router-level so every inspection route, including future ones, requires dashboard credentials.
+router = APIRouter(
+    prefix="/api/v1", tags=["internal-inspection"], dependencies=[Depends(require_dashboard_auth)]
+)
 
 @router.get("/summary")
 async def get_executive_summary(session: AsyncSession = Depends(get_db_session)) -> Dict[str, Any]:

@@ -5,15 +5,21 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Load environment variables from .env file
 
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Depends, HTTPException, Request, status
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from src.api import dependencies
 from src.api.routes import router as ingestion_router
 from src.api.inspection_routes import router as inspection_router
+from src.api.security import (
+    AuthenticatedStaticFiles,
+    ConfiguredTrustedHostMiddleware,
+    require_api_docs_enabled,
+    require_dashboard_auth,
+)
 from src.infrastructure.database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -32,11 +38,37 @@ async def lifespan(app: FastAPI):
             await paypal_client.aclose()
 
 
-app = FastAPI(title="Payment Recovery Engine API", lifespan=lifespan)
+# The default documentation routes are public; the guarded routes below replace them.
+app = FastAPI(
+    title="Payment Recovery Engine API",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+app.add_middleware(ConfiguredTrustedHostMiddleware)
 
 # Primary API routers
 app.include_router(ingestion_router)
 app.include_router(inspection_router)
+
+API_DOCS_GUARDS = [Depends(require_api_docs_enabled), Depends(require_dashboard_auth)]
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=API_DOCS_GUARDS)
+async def openapi_schema(request: Request):
+    return JSONResponse(request.app.openapi())
+
+
+@app.get("/docs", include_in_schema=False, dependencies=API_DOCS_GUARDS)
+async def swagger_ui():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
+
+
+@app.get("/redoc", include_in_schema=False, dependencies=API_DOCS_GUARDS)
+async def redoc():
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
+
 
 @app.get("/health")
 async def health_check(session: AsyncSession = Depends(get_db_session)):
@@ -57,8 +89,10 @@ async def health_check(session: AsyncSession = Depends(get_db_session)):
 # Static file serving for Phase 7 Dashboard
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", AuthenticatedStaticFiles(directory=STATIC_DIR), name="static")
 
-    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route(
+        "/", methods=["GET", "HEAD"], include_in_schema=False, dependencies=[Depends(require_dashboard_auth)]
+    )
     async def serve_dashboard():
         return FileResponse(os.path.join(STATIC_DIR, "index.html"))
