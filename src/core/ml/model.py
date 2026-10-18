@@ -1,3 +1,4 @@
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Tuple
 
@@ -96,6 +97,23 @@ DEFAULT_SYNTHETIC_MODEL_PATH = os.path.join(
 )
 
 
+def _logistic_failure_probability(model, feature_names, encoders, feature_vector: Dict[str, Any]) -> float:
+    row = []
+    for feature in feature_names:
+        val = feature_vector.get(feature)
+        # Categorical encoding fallback
+        if feature in encoders:
+            encoded = encoders[feature].get(val, 0)
+            row.append(encoded)
+        else:
+            row.append(float(val) if val is not None else 0.0)
+
+    X = np.array([row])
+    # Logistic Regression predict_proba returns [prob_0, prob_1]
+    prob = model.predict_proba(X)[0][1]
+    return float(prob)
+
+
 class SyntheticLogisticRegressionModel(FailurePredictionModel):
     """
     SYNTHETIC / DEVELOPMENT — NOT EMPIRICAL
@@ -105,6 +123,9 @@ class SyntheticLogisticRegressionModel(FailurePredictionModel):
     and must never be treated as an empirical production model.
     """
     status: str = "SYNTHETIC / DEVELOPMENT — NOT EMPIRICAL"
+    # Class-level so previously pickled artifacts, which lack these attributes, still expose them.
+    training_population: str = "SYNTHETIC_DEVELOPMENT"
+    training_metadata: Optional[Dict[str, Any]] = None
 
     def __init__(self, model, feature_names, encoders):
         self.model = model
@@ -116,20 +137,42 @@ class SyntheticLogisticRegressionModel(FailurePredictionModel):
         self.status = "SYNTHETIC / DEVELOPMENT — NOT EMPIRICAL"
 
     def predict(self, feature_vector: Dict[str, Any]) -> float:
-        row = []
-        for feature in self.feature_names:
-            val = feature_vector.get(feature)
-            # Categorical encoding fallback
-            if feature in self.encoders:
-                encoded = self.encoders[feature].get(val, 0)
-                row.append(encoded)
-            else:
-                row.append(float(val) if val is not None else 0.0)
-                
-        X = np.array([row])
-        # Logistic Regression predict_proba returns [prob_0, prob_1]
-        prob = self.model.predict_proba(X)[0][1]
-        return float(prob)
+        return _logistic_failure_probability(self.model, self.feature_names, self.encoders, feature_vector)
+
+    def get_feature_schema_version(self) -> str:
+        return self._feature_schema_version
+
+
+PROVIDER_MODEL_VERSION_PATTERN = re.compile(r"provider-eval-[0-9a-f]{12}")
+
+
+class ProviderLogisticRegressionModel(FailurePredictionModel):
+    """
+    PROVIDER-TRAINED — NOT VALIDATED
+
+    A logistic regression model trained in Stage 5 provider-evaluation mode on genuine
+    provider events. Training on provider data does not validate it: Stage 8 treats it as
+    UNKNOWN provenance until its exact (model_name, model_version) is registered as
+    empirically validated.
+    """
+    status: str = "PROVIDER-TRAINED — NOT VALIDATED"
+    training_population: str = "PROVIDER_EVALUATION"
+
+    def __init__(self, model, feature_names, encoders, model_version: str, training_metadata: Dict[str, Any]):
+        if not isinstance(model_version, str) or not PROVIDER_MODEL_VERSION_PATTERN.fullmatch(model_version):
+            raise ValueError(f"Provider model version must match {PROVIDER_MODEL_VERSION_PATTERN.pattern}")
+        self.model = model
+        self.feature_names = feature_names
+        self.encoders = encoders
+        self.model_name = "ProviderLogisticRegressionModel"
+        self.model_version = model_version
+        self._feature_schema_version = "v1.0.0"
+        self.training_population = "PROVIDER_EVALUATION"
+        self.training_metadata = dict(training_metadata)
+        self.status = "PROVIDER-TRAINED — NOT VALIDATED"
+
+    def predict(self, feature_vector: Dict[str, Any]) -> float:
+        return _logistic_failure_probability(self.model, self.feature_names, self.encoders, feature_vector)
 
     def get_feature_schema_version(self) -> str:
         return self._feature_schema_version
