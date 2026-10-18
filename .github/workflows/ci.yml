@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  POETRY_VERSION: "2.2.1"
+  # Unreachable on purpose: nothing in CI may resolve to a development database.
+  DATABASE_URL: postgresql+asyncpg://nobody:nobody@127.0.0.1:1/unreachable_db
+
+jobs:
+  offline:
+    name: Offline unit and boundary tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Poetry
+        run: pipx install "poetry==${POETRY_VERSION}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: poetry
+
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "$(command -v python)"
+          poetry check --lock
+          poetry install --no-interaction
+
+      # TEST_DATABASE_URL is deliberately unset in this job.
+      - name: Run offline tests
+        run: |
+          mkdir -p reports
+          poetry run python -m pytest tests/unit tests/boundaries -q -rs -p no:cacheprovider --junitxml=reports/offline.xml
+
+      - name: Fail if no tests ran or any test was skipped
+        run: |
+          python - reports/offline.xml <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          if suite is None:
+              sys.exit("No testsuite element in the JUnit report.")
+          counts = {k: int(suite.get(k, 0)) for k in ("tests", "skipped", "failures", "errors")}
+          print(counts)
+          if counts["tests"] == 0:
+              sys.exit("No tests ran.")
+          if counts["skipped"]:
+              sys.exit(f"{counts['skipped']} test(s) were skipped.")
+          PY
+
+  database:
+    name: PostgreSQL integration and API tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          # Throwaway credential for a job-scoped container that is reachable only from this runner.
+          POSTGRES_PASSWORD: ci-throwaway
+          POSTGRES_DB: payment_recovery_test
+        ports:
+          - 5434:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd "pg_isready -U postgres -d payment_recovery_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:ci-throwaway@localhost:5434/payment_recovery_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Poetry
+        run: pipx install "poetry==${POETRY_VERSION}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: poetry
+
+      - name: Install dependencies from poetry.lock
+        run: |
+          poetry env use "$(command -v python)"
+          poetry check --lock
+          poetry install --no-interaction
+
+      - name: Validate TEST_DATABASE_URL with the test fixtures' rules
+        run: |
+          poetry run python - <<'PY'
+          import os
+
+          from src.infrastructure.db_safety import validate_test_database_url
+          from tests.conftest import _protected_database_urls
+
+          parsed = validate_test_database_url(
+              os.environ["TEST_DATABASE_URL"], protected_urls=_protected_database_urls()
+          )
+          print("Validated test database:", parsed.render_as_string(hide_password=True))
+          PY
+
+      - name: Run database-backed tests
+        run: |
+          mkdir -p reports
+          poetry run python -m pytest tests/integration tests/api -q -rs -p no:cacheprovider --junitxml=reports/database.xml
+
+      - name: Fail if no tests ran or any test was skipped
+        run: |
+          python - reports/database.xml <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          if suite is None:
+              sys.exit("No testsuite element in the JUnit report.")
+          counts = {k: int(suite.get(k, 0)) for k in ("tests", "skipped", "failures", "errors")}
+          print(counts)
+          if counts["tests"] == 0:
+              sys.exit("No tests ran.")
+          if counts["skipped"]:
+              sys.exit(f"{counts['skipped']} test(s) were skipped.")
+          PY
