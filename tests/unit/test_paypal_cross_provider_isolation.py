@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import bindparam, or_, select, text
+from sqlalchemy import bindparam, null, or_, select, text
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import BinaryExpression, BindParameter, BooleanClauseList, TextClause
 
@@ -324,7 +324,7 @@ def test_evaluator_rejects_parameters_without_a_bound_value(executed):
     pytest.param(_orm(M.order_id.is_(None)), id="orm-is-null"),
     pytest.param(_orm(M.payment_id.like("pay_%")), id="orm-like"),
     pytest.param(_orm(M.payment_id == M.order_id), id="orm-column-to-column"),
-    pytest.param(_orm(M.payment_id.in_(["pay_1", None])), id="orm-in-with-literal-null"),
+    pytest.param(_orm(M.payment_id.in_(["pay_1", null()])), id="orm-in-with-sql-null-element"),
     pytest.param(_text("payment_id = :p OR event_type = :e", {"p": "pay_1", "e": "x"}), id="text-or"),
     pytest.param(_text("ingested_at BETWEEN :a AND :b", {"a": T, "b": T}), id="text-between"),
     pytest.param(_text("event_type IN (:a, :b)", {"a": "x", "b": "y"}), id="text-in-non-literals"),
