@@ -478,12 +478,55 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - Optional: pin registry entries to artifact hashes.
   - Each production change requires separate explicit approval.
 
+### Provider-Evaluation Database Validation (2026-10-18, complete)
+
+- **Commit:** `64be134764583380cdf8c893d0a73f91a06d008e` — `test: cover provider evaluation database isolation`
+- **Scope:** tests only. No production code, existing tests, migrations or configuration changed.
+- **New file:** `tests/integration/test_provider_training_evaluation.py`, with 21 database-backed tests (17 functions, two parametrized). They use only the shared `TEST_DATABASE_URL` fixtures and open a fresh session per extraction. They cover:
+  - **Isolation:** provider extraction runs at `repeatable read` and leaves the transaction to the caller. After rollback, the session reports the server default again. A session whose transaction already began is refused.
+  - **Snapshot consistency:** rows committed by another session after the snapshot began are invisible to the label lookup and to feature reconstruction (the global 30-minute failure rate).
+  - **Transaction lifecycle:** a commit during extraction fails closed with no checked state. Callers must end the transaction before extracting again. A failed extraction still leaves the transaction open for the caller.
+  - **Contamination guard:** a non-provider source inside the window is refused before any label or feature query. The window bounds are inclusive, checked one microsecond either side. Legacy live-context rows are refused, while look-alike ids are not. The escaped `LIKE` prefix matches only the literal `pay_live_ctx_` prefix in PostgreSQL. Legacy samples outside the window are dropped without refusal.
+  - **Deterministic ordering:** tied authorizations are ordered by `event_id`, and so are tied terminal events (both label outcomes). Repeated extractions over unchanged data give the same fingerprint and window.
+  - **Default compatibility:** default `SYNTHETIC_DEVELOPMENT` extraction keeps synthetic samples and the server's default isolation.
+- **Environment:**
+  - PostgreSQL 15 (`postgres:15-alpine`), using the disposable Compose `db_test` service (`--profile test`, port 5434, database `payment_recovery_test`, tmpfs data, no volumes).
+  - Only `db_test` was started, and it was stopped after every stage.
+  - Before each stage, `TEST_DATABASE_URL` passed `validate_test_database_url` against the fixtures' protected URL list, and `current_database()` was confirmed as `payment_recovery_test`. `DATABASE_URL` pointed at unreachable localhost port 1.
+  - The `db_engine` fixture applied the migrations (`alembic upgrade head`) and truncated the application tables before each test.
+  - The development database container (`db`, port 5433) kept the same id and start time with 0 restarts, and its `paymentrecovery_postgres_data` volume was retained. It was not started, restarted, truncated or connected to.
+- **Results** (run on `9afc16f` with the new file untracked; the committed file is byte-identical, SHA-256 verified):
+  - The new file alone: 21 passed.
+  - Staged database-backed validation (each stage on a fresh `db_test`):
+    - schema parity: 1 passed;
+    - focused Stage 5 (feature reconstruction, synthetic training pipeline, failure-prediction lifecycle and persistence, Stage 4/5 and Stage 5/6 boundaries, and the new file): 32 passed;
+    - attribution lifecycle and temporal: 8 passed;
+    - the remaining 14 integration files: 40 passed;
+    - `tests/api`: 54 passed, 2 warnings.
+  - Offline `tests/unit` + `tests/boundaries` (`TEST_DATABASE_URL` unset): 1,028 passed, 4 warnings.
+  - Totals: 135 database-backed tests (all 81 integration tests and 54 API tests) plus 1,028 offline tests, 1,163 tests in all, with 0 failures, 0 skips and 0 setup errors.
+  - The 6 warnings are the existing httpx deprecation warning (raw request bodies sent with `data=`).
+- **Now established against PostgreSQL 15:**
+  - asyncpg applies `REPEATABLE READ` through `session.connection`, and the `SHOW` result is checked.
+  - The snapshot covers the label and feature queries.
+  - A commit mid-extraction is detected.
+  - The escaped `LIKE` prefix behaves as intended.
+  - The default training and feature-reconstruction tests pass.
+  - These runs also include the database-backed tests that earlier sections record as skipped: Stage 6/7 terminal-event isolation, the Razorpay-only dashboard routes, and the attribution tests used for event and attribution provenance.
+- **Still unverified:**
+  - Behavior specific to `SERIALIZABLE`. The code accepts it, but only `REPEATABLE READ` was exercised.
+  - Contamination guard performance and query plans over large or 4+ week datasets.
+  - Alternate PostgreSQL configurations: other versions, or a server whose default isolation is already `REPEATABLE READ` (the reset test requires a different default).
+  - Server-side transaction aborts and lost connections during extraction.
+  - Isolation reset after a connection returns to the pool. Only reset after rollback in the same session was checked.
+  - Provider metrics remain unvalidated as production metrics, and no provider evaluation has been run on real provider data.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**, with the approved post-Stage 8 extensions recorded above.
 
 - **Branch:** `main`
-- **Test Count (offline, as of `383c0b9deda55f82be4616613f9bcf3935a28ff5`):** `tests/unit` + `tests/boundaries`: 1,025 passed; `tests/api`: 30 passed, 24 skipped; `tests/integration`: 60 skipped (database required). Database-backed tests have not been run for the recent extensions.
+- **Test Count (as of `64be134764583380cdf8c893d0a73f91a06d008e`):** 1,163 passed, with 0 failures and 0 skips. That is `tests/unit` + `tests/boundaries` offline, 1,028 passed; plus 135 database-backed tests against the disposable PostgreSQL 15 `db_test` service: `tests/integration`, 81 passed, and `tests/api`, 54 passed. There are 6 warnings, all the existing httpx deprecation warning.
 - **Working Tree:** Clean.
 
 ## Terminal Status
