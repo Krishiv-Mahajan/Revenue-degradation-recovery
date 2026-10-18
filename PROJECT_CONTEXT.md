@@ -535,12 +535,50 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - This was the first full CI run on the locked `poetry.lock` dependencies, including SQLAlchemy 2.0.52 and Alembic 1.19.1.
   - Earlier local results recorded in this file, including the 1,163 tests under Provider-Evaluation Database Validation, used older dependency versions (for example SQLAlchemy 2.0.23 and Alembic 1.13.0). They are local evidence and are distinct from this verified CI run.
 
+### Live Pipeline End-to-End Verification (2026-10-18, verified in CI)
+
+- **Commit:** `29c487486b93d0b961b88f2f9fe1d9a02b341a25` — `test: add live pipeline end-to-end integration coverage`
+- **Scope:** tests only. New file `tests/integration/test_live_pipeline_e2e.py` with 14 database-backed tests. No production code, existing tests, fixtures, dependencies or CI workflow changed.
+- **Verified run:** [39136880225](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/39136880225). Result: success. Both jobs checked out commit `29c4874`.
+  - Offline unit and boundary tests: 1,031 passed, 0 failed, 0 skipped, 0 errors. The three tests added since the previous run are boundary safety checks that automatically cover the new file.
+  - PostgreSQL integration and API tests (PostgreSQL 15 service): 149 passed, 0 failed, 0 skipped, 0 errors. That is the previous 135 plus the 14 new tests.
+  - Both zero-skip checks passed. Six known httpx deprecation warnings across both jobs.
+  - These 14 tests have run only in CI, not locally.
+- **Verified flow:**
+  - Signed Razorpay webhooks are sent to the real `POST /ingest/razorpay` route.
+  - The route's real background task runs `run_live_pipeline`, Stages 2–8, against the disposable CI test database only.
+  - The tests assert the persisted records for each stage, and the pipeline's success or error log records (the route discards the task's return value). Direct replays assert the returned result.
+  - Overlapping PayPal events are ingested through `POST /webhooks/paypal`. A stub verifier accepts them, so PayPal is never contacted.
+- **Test seams** (scoped to the test fixture and restored afterwards):
+  - Dependency overrides: the test database session, a test webhook secret, the real `get_ingestion_service` (undoing a mock that `tests/api/test_routes.py` installs at import time), and the stub PayPal verifier.
+  - `live_pipeline.AsyncSessionLocal`, bound to the test database.
+  - `live_pipeline.get_development_model`, replaced only in tests that need a fixed failure probability, by a test double whose name marks it as synthetic.
+- **Also verified:**
+  - Overlapping PayPal events with the same `payment_id` are stored as `paypal`, never run the pipeline, and leave the Razorpay decision, command, observation, attribution and Stage 2 snapshot unchanged.
+  - Duplicate webhooks (200) and conflicting bodies under the same event id (409) do not rerun the pipeline or change any table.
+  - Replaying a stored authorization returns the existing prediction, decision and command. Only Stage 3 appends new signal versions, by design.
+  - With the live-context generator's degraded card scenario plus 50 seeded Razorpay captures (24-hour Razorpay failure rate 0.0), the real `DeterministicBaselineModel` sees an active CRITICAL episode with STRONG, segment-matching RCA. It predicts p = 0.525, which yields a MONITOR decision and no command.
+  - Without that Razorpay history, the same generator scenario yields `INSUFFICIENT_DATA`, because generated traffic is `synthetic` and excluded from Razorpay rates. This supersedes the offline 0.55 / MONITOR estimate under Event and Attribution Provenance, which did not account for the volume requirement. That section is kept as the historical record.
+- **Characterized existing behavior and known limitations.** The tests pin current behavior. These are not fixes or desired guarantees, and the tests must be revised deliberately if the behavior changes:
+  1. **Stage 5 insufficient volume (existing behavior):** Stage 5 records `INSUFFICIENT_DATA` with no failure probability, and never calls the model, when the payment's provider has fewer than 50 terminal events in both the 30-minute and 24-hour windows. On a cold start no Stage 6 decision is made.
+  2. **Runner pre-gate (known limitation):** `run_live_pipeline` calls Stage 6 only when p > 0.5 (strict). The policy's MONITOR band from 0.35, and NO_ACTION decisions below 0.5, are never recorded. The tests pin p = 0.30, 0.40 and 0.50 → no decision; just above 0.5 and 0.55 → MONITOR; 0.70 → ACT.
+  3. **Duplicate response `event_id` (known limitation):** a duplicate Razorpay webhook's response carries a freshly generated `event_id`, not the stored event's id.
+  4. **Capture replay (known limitation):** replaying a stored capture through `run_live_pipeline` is not idempotent. Stage 7 observation recomputes the same `as_of`, hits the `(command_id, as_of_timestamp)` unique constraint, and the run returns `failed` at `STAGE_7_OBSERVATION_TERMINAL`. Stages 5–8 are rolled back, so no duplicate rows are written.
+  5. **Simulated execution and attribution (existing behavior under test inputs):** with a fixed p = 0.90, an authorization followed by a capture 30 seconds later produces:
+     - an ACT decision through a route that needs no diagnosis;
+     - a `SUCCEEDED` command executed by `SIMULATOR_V1` (`is_simulation = true`);
+     - a `CAPTURED` observation of the Razorpay capture;
+     - an `ATTRIBUTED` attribution: p0 0.9000, α 0.3600 (0.6 synthetic × 0.6 no diagnosis × 1.0 timing), loss exposure 45,000, natural success 5,000 and protected GMV 16,200 minor units on a 50,000 amount, flagged as simulated execution and synthetic baseline.
+
+     This is a deterministic test scenario with simulated execution and a test model. It is not a production measurement.
+- **Still unverified:** real intervention execution (no non-simulator executor exists), real Razorpay traffic, PayPal pipeline activation, and any empirically validated Stage 5 model.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**, with the approved post-Stage 8 extensions recorded above.
 
 - **Branch:** `main`
-- **Test Count (GitHub Actions run [39126899222](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/39126899222) on `ae32da2ffd872721dea35ddbe002b5518ef58fd1`, locked dependencies):** 1,163 passed, 0 failed, 0 skipped: offline unit and boundary tests 1,028 passed; PostgreSQL integration and API tests 135 passed. There are six known httpx deprecation warnings across both jobs.
+- **Test Count (GitHub Actions run [39136880225](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/39136880225) on `29c487486b93d0b961b88f2f9fe1d9a02b341a25`, locked dependencies):** 1,180 passed, 0 failed, 0 skipped, 0 errors: offline unit and boundary tests 1,031 passed; PostgreSQL 15 integration and API tests 149 passed. There are six known httpx deprecation warnings across both jobs.
 - **Working Tree:** Clean.
 
 ## Terminal Status
