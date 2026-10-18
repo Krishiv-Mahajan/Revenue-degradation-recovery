@@ -521,12 +521,26 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - Isolation reset after a connection returns to the pool. Only reset after rollback in the same session was checked.
   - Provider metrics remain unvalidated as production metrics, and no provider evaluation has been run on real provider data.
 
+### Continuous Integration (2026-10-18, verified)
+
+- **Workflow:** `CI` (`.github/workflows/ci.yml`), added in `a746e77854046f5246bb52b241032f24dfba0a9b` — `ci: add offline and PostgreSQL test workflow`.
+- **Verified run:** [39126899222](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/39126899222) on commit `ae32da2ffd872721dea35ddbe002b5518ef58fd1` (`test: make unsupported IN predicate test version-independent`). Result: success.
+- **Results:**
+  - Offline unit and boundary tests: 1,028 passed, 0 failed, 0 skipped.
+  - PostgreSQL integration and API tests: 135 passed, 0 failed, 0 skipped.
+  - Both zero-skip checks passed.
+  - Total: 1,163 passed, 0 failed, 0 skipped.
+  - Six known httpx deprecation warnings across both jobs.
+- **Dependency context:**
+  - This was the first full CI run on the locked `poetry.lock` dependencies, including SQLAlchemy 2.0.52 and Alembic 1.19.1.
+  - Earlier local results recorded in this file, including the 1,163 tests under Provider-Evaluation Database Validation, used older dependency versions (for example SQLAlchemy 2.0.23 and Alembic 1.13.0). They are local evidence and are distinct from this verified CI run.
+
 ## Current State
 
 The repository is currently **Stage 8 complete and frozen**, with the approved post-Stage 8 extensions recorded above.
 
 - **Branch:** `main`
-- **Test Count (as of `64be134764583380cdf8c893d0a73f91a06d008e`):** 1,163 passed, with 0 failures and 0 skips. That is `tests/unit` + `tests/boundaries` offline, 1,028 passed; plus 135 database-backed tests against the disposable PostgreSQL 15 `db_test` service: `tests/integration`, 81 passed, and `tests/api`, 54 passed. There are 6 warnings, all the existing httpx deprecation warning.
+- **Test Count (GitHub Actions run [39126899222](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/39126899222) on `ae32da2ffd872721dea35ddbe002b5518ef58fd1`, locked dependencies):** 1,163 passed, 0 failed, 0 skipped: offline unit and boundary tests 1,028 passed; PostgreSQL integration and API tests 135 passed. There are six known httpx deprecation warnings across both jobs.
 - **Working Tree:** Clean.
 
 ## Terminal Status
