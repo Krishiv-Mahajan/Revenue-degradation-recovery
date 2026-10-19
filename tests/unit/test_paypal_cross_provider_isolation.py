@@ -570,8 +570,8 @@ class _EmulatedSummarySession:
     """
     Python emulation of the database for get_executive_summary; NOT PostgreSQL.
     payment_events statements are answered from in-memory rows: each statement's own WHERE
-    clause is applied by the evaluator, then COUNT ... GROUP BY event_type or SUM(amount) is
-    emulated in Python. Statements on any other table return 0 (empty tables).
+    clause is applied by the evaluator, then COUNT ... GROUP BY event_type or SUM(amount) ...
+    GROUP BY currency is emulated in Python. Statements on any other table return 0 (empty tables).
     """
 
     def __init__(self, rows):
@@ -585,8 +585,14 @@ class _EmulatedSummarySession:
             return result
         self.payment_event_statements.append(statement)
         matched = [row for row in self.rows if _orm_evaluate(statement.whereclause, row) is True]
-        if "event_type" in [column.key for column in statement.selected_columns]:
+        selected = [column.key for column in statement.selected_columns]
+        if "event_type" in selected:
             result.all.return_value = list(Counter(row["event_type"] for row in matched).items())
+        elif "currency" in selected:
+            totals = Counter()
+            for row in matched:
+                totals[row["currency"]] += row["amount_minor_units"]
+            result.all.return_value = sorted(totals.items())
         else:
             result.scalar_one_or_none.return_value = sum(row["amount_minor_units"] for row in matched)
         return result

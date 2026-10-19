@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Payment Recovery Engine — Operational Dashboard</title>
-  <meta name="description" content="Automated revenue protection, real-time payment degradation detection, root cause analysis, and counterfactual recovery attribution." />
+  <meta name="description" content="Payment degradation detection, root cause analysis, intervention decisioning with simulated execution, and estimated counterfactual recovery attribution." />
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body>
@@ -16,7 +16,7 @@
         <div class="brand-badge" aria-hidden="true">🛡️</div>
         <div>
           <h1 class="brand-title">Payment Recovery Engine</h1>
-          <p class="brand-subtitle">Automated Revenue Protection &amp; Loss Prevention</p>
+          <p class="brand-subtitle">Payment Degradation Detection &amp; Recovery Decisioning</p>
         </div>
       </div>
 
@@ -48,10 +48,16 @@
       </button>
     </nav>
 
+    <!-- Provenance Notice: simulated execution, unvalidated models and estimated GMV (shown when the data says so) -->
+    <div id="provenance-banner" class="provenance-banner" role="status" style="display: none;">
+      <span class="provenance-banner-title">Simulation &amp; estimate notice</span>
+      <ul id="provenance-banner-list" class="provenance-banner-list"></ul>
+    </div>
+
     <!-- Workflow Architecture Narrative Strip -->
     <section class="workflow-strip" aria-label="Revenue protection workflow">
       <div class="workflow-header">
-        <span class="workflow-title">Product Narrative &amp; Causal Recovery Lifecycle</span>
+        <span class="workflow-title">Product Narrative &amp; Recovery Lifecycle</span>
       </div>
       <div class="workflow-nodes">
         <div class="workflow-node">
@@ -71,12 +77,12 @@
         <span class="workflow-arrow" aria-hidden="true">→</span>
         <div class="workflow-node">
           <span class="node-step-number">04</span>
-          <span class="node-label">Intervention Executed</span>
+          <span class="node-label">Intervention Executed (Simulator)</span>
         </div>
         <span class="workflow-arrow" aria-hidden="true">→</span>
         <div class="workflow-node">
           <span class="node-step-number">05</span>
-          <span class="node-label">Protected Revenue Attributed</span>
+          <span class="node-label">Protected GMV Estimated</span>
         </div>
       </div>
     </section>
@@ -88,7 +94,7 @@
         <!-- Section Title -->
         <div class="section-title-row">
           <h2 class="section-title">Executive Overview</h2>
-          <span class="section-hint">Real-time financial protection and health telemetry</span>
+          <span class="section-hint">Payment health telemetry and estimated recovery attribution</span>
         </div>
 
         <!-- Summary Error Alert Banner (Hidden by default) -->
@@ -105,11 +111,11 @@
           <!-- Card 1: Protected Revenue -->
           <div class="kpi-card highlight">
             <div class="kpi-label-row">
-              <span class="kpi-label">Protected Revenue</span>
-              <span class="kpi-tag protected">Attributed</span>
+              <span class="kpi-label">Estimated Protected GMV</span>
+              <span class="kpi-tag protected">Model Estimate</span>
             </div>
             <div id="kpi-protected-revenue" class="kpi-value protected-value">—</div>
-            <div class="kpi-subtext">Causal financial value protected via Stage 8 attribution</div>
+            <div class="kpi-subtext">Risk-weighted Stage 8 counterfactual estimate per currency, not observed recovered revenue</div>
           </div>
 
           <!-- Card 2: Processed Volume -->
@@ -119,17 +125,17 @@
               <span class="kpi-tag neutral">Gross Auth</span>
             </div>
             <div id="kpi-processed-volume" class="kpi-value">—</div>
-            <div class="kpi-subtext">Total authorized payment volume evaluated</div>
+            <div class="kpi-subtext">Total authorized payment volume evaluated, per currency</div>
           </div>
 
           <!-- Card 3: Success Rate -->
           <div class="kpi-card">
             <div class="kpi-label-row">
-              <span class="kpi-label">Authorization Success Rate</span>
+              <span class="kpi-label">Capture / Authorization Ratio</span>
               <span class="kpi-tag neutral">Overall</span>
             </div>
             <div id="kpi-success-rate" class="kpi-value">—</div>
-            <div class="kpi-subtext">Ratio of completed captures to total authorizations</div>
+            <div class="kpi-subtext">Captured events divided by authorized events</div>
           </div>
 
           <!-- Card 4: Active Incidents -->
@@ -139,17 +145,17 @@
               <span class="kpi-tag alert">Live Status</span>
             </div>
             <div id="kpi-active-incidents" class="kpi-value">—</div>
-            <div class="kpi-subtext">Current episodes crossing critical/high thresholds</div>
+            <div class="kpi-subtext">Degradation episodes currently ACTIVE, any severity</div>
           </div>
 
           <!-- Card 5: Interventions Dispatched -->
           <div class="kpi-card">
             <div class="kpi-label-row">
-              <span class="kpi-label">Interventions Dispatched</span>
+              <span class="kpi-label">Interventions Completed</span>
               <span class="kpi-tag neutral">Commands</span>
             </div>
             <div id="kpi-interventions" class="kpi-value">—</div>
-            <div class="kpi-subtext">Automated recovery actions executed through policy gates</div>
+            <div id="kpi-interventions-subtext" class="kpi-subtext">Commands that reached SUCCEEDED after passing policy gates</div>
           </div>
 
           <!-- Card 6: Auth / Capture Counts -->
@@ -316,9 +322,9 @@
                   <span class="impact-metric-sub">Point-in-time transactions</span>
                 </div>
                 <div class="impact-metric-card">
-                  <span class="impact-metric-label">Window Protected Revenue</span>
+                  <span class="impact-metric-label">Estimated Protected GMV</span>
                   <div id="det-impact-protected" class="impact-metric-val emerald">—</div>
-                  <span class="impact-metric-sub">Attributed in incident window</span>
+                  <span class="impact-metric-sub">Latest attribution estimates for this episode's decisions</span>
                 </div>
               </div>
 
@@ -357,7 +363,11 @@
                     </div>
                     <div class="context-metric-row">
                       <span class="context-metric-name">ACT Intervention Gate Threshold</span>
-                      <span class="context-metric-value">0.7000 (70.0%)</span>
+                      <span id="det-pred-threshold" class="context-metric-value">—</span>
+                    </div>
+                    <div class="context-metric-row">
+                      <span class="context-metric-name">Prediction Model</span>
+                      <span id="det-pred-model" class="context-metric-value">—</span>
                     </div>
                     <div class="context-metric-row">
                       <span class="context-metric-name">Active Episode Severity Bonus</span>
@@ -382,24 +392,16 @@
                   </div>
                   <div class="context-body">
                     <div class="context-metric-row">
-                      <span class="context-metric-name">Intervention Verdicts Dispatched</span>
+                      <span class="context-metric-name">Intervention Decisions</span>
                       <span id="det-inter-verdicts" class="context-metric-value emerald">—</span>
                     </div>
                     <div class="context-metric-row">
-                      <span class="context-metric-name">Selected Recovery Route</span>
+                      <span class="context-metric-name">Most Selected Recovery Route</span>
                       <span id="det-inter-route" class="context-metric-value highlight">—</span>
                     </div>
                     <div class="context-metric-row">
-                      <span class="context-metric-name">Circuit / Safety Gate Verdict</span>
-                      <span class="context-metric-value status-pill">PASSED</span>
-                    </div>
-                    <div class="context-metric-row">
                       <span class="context-metric-name">Policy Utility Formulation</span>
-                      <span class="context-metric-value">U = R·P(fail)·(1-c) - C_cost</span>
-                    </div>
-                    <div class="context-metric-row">
-                      <span class="context-metric-name">Rate Limiting &amp; Invariance</span>
-                      <span class="context-metric-value status-pill">ACTIVE ENFORCEMENT</span>
+                      <span class="context-metric-value">U = P(fail) · amount · recovery_rate − cost</span>
                     </div>
                   </div>
                 </div>
@@ -408,7 +410,7 @@
 
               <!-- G. Operational Causal Chain Stepper -->
               <div class="causal-chain-card">
-                <div class="causal-chain-title">End-to-End Operational Causal Sequence</div>
+                <div class="causal-chain-title">End-to-End Operational Sequence</div>
                 <div class="causal-stepper">
                   <div class="causal-step">
                     <span class="causal-step-num">1</span>
@@ -437,8 +439,8 @@
                   <div class="causal-step">
                     <span class="causal-step-num">4</span>
                     <div class="causal-step-content">
-                      <span class="causal-step-label">Intervention Dispatched</span>
-                      <span id="causal-step-4-val" class="causal-step-desc">Permitted route executed</span>
+                      <span class="causal-step-label">Intervention Selected</span>
+                      <span id="causal-step-4-val" class="causal-step-desc">Permitted route chosen</span>
                     </div>
                   </div>
                 </div>
@@ -462,7 +464,7 @@
           <div>
             <h2 class="workspace-title">Recovery Operations &amp; Revenue Protection</h2>
             <p class="workspace-subtitle">
-              Automated intervention dispatch, observed transaction outcomes, and Stage 8 counterfactual attribution ledger.
+              Intervention commands, observed transaction outcomes, and Stage 8 counterfactual attribution estimates.
             </p>
           </div>
           <div class="header-actions">
@@ -476,9 +478,9 @@
         <!-- Recovery KPI Cards (8 items) -->
         <div class="recovery-kpi-grid">
           <div class="recovery-kpi-card">
-            <span class="kpi-label">Dispatched Interventions</span>
+            <span class="kpi-label">Intervention Commands</span>
             <div id="rec-stat-dispatched" class="kpi-value">—</div>
-            <span class="kpi-sub">Stage 7 executed commands</span>
+            <span id="rec-stat-dispatched-sub" class="kpi-sub">Stage 7 commands created, any status</span>
           </div>
           <div class="recovery-kpi-card">
             <span class="kpi-label">ACT Decisions</span>
@@ -491,29 +493,29 @@
             <span class="kpi-sub">Standard / low-risk routing</span>
           </div>
           <div class="recovery-kpi-card">
-            <span class="kpi-label">Rescued Captures</span>
+            <span class="kpi-label">Captured After Intervention</span>
             <div id="rec-stat-captures" class="kpi-value accent-success">—</div>
-            <span class="kpi-sub">Post-intervention captures</span>
+            <span class="kpi-sub">Observed CAPTURED outcomes; not proof of rescue</span>
           </div>
           <div class="recovery-kpi-card">
-            <span class="kpi-label">Terminal Failures</span>
+            <span class="kpi-label">Failed After Intervention</span>
             <div id="rec-stat-failed" class="kpi-value accent-fail">—</div>
-            <span class="kpi-sub">Unrecovered attempts</span>
+            <span class="kpi-sub">Observed FAILED outcomes</span>
           </div>
           <div class="recovery-kpi-card highlighted">
-            <span class="kpi-label">Protected GMV</span>
+            <span class="kpi-label">Estimated Protected GMV</span>
             <div id="rec-stat-gmv" class="kpi-value accent-gmv">—</div>
-            <span class="kpi-sub">Attributed revenue</span>
+            <span class="kpi-sub">Latest attribution estimates, per currency</span>
           </div>
           <div class="recovery-kpi-card">
-            <span class="kpi-label">Attributed Rescues</span>
+            <span class="kpi-label">Positive Attributions</span>
             <div id="rec-stat-attributions" class="kpi-value">—</div>
-            <span class="kpi-sub">Stage 8 verified rescues</span>
+            <span class="kpi-sub">Latest attributions with protected GMV &gt; 0</span>
           </div>
           <div class="recovery-kpi-card">
             <span class="kpi-label">Attribution Confidence</span>
             <div id="rec-stat-confidence" class="kpi-value">—</div>
-            <span class="kpi-sub">Mean attribution confidence</span>
+            <span class="kpi-sub">Mean confidence of positive attributions</span>
           </div>
         </div>
 
@@ -523,7 +525,7 @@
             <div>
               <h3 class="section-heading">Operational Recovery Ledger</h3>
               <p class="section-subheading">
-                Granular ledger mapping intervention decisions, route executions, and verified post-treatment outcomes.
+                Granular ledger mapping intervention decisions, route executions, and observed post-treatment outcomes.
               </p>
             </div>
             <div class="filter-btn-group" role="group" aria-label="Filter ledger by verdict">
@@ -570,13 +572,13 @@
           </div>
         </section>
 
-        <!-- Section 2: Counterfactual Attribution Ledger (Financial Proof Surface) -->
+        <!-- Section 2: Counterfactual Attribution Ledger (Model Estimates) -->
         <section class="recovery-section attribution-proof-section" aria-label="Counterfactual Attribution Ledger">
           <div class="section-header-bar">
             <div>
-              <h3 class="section-heading">Counterfactual Attribution Ledger (Financial Proof Surface)</h3>
+              <h3 class="section-heading">Counterfactual Attribution Ledger (Model Estimates)</h3>
               <p class="section-subheading">
-                Stage 8 causal attribution records proving protected GMV. Model: Observed: CAPTURED vs Counterfactual: WOULD_HAVE_FAILED.
+                Latest Stage 8 attribution per command. Protected GMV is a risk-weighted estimate: the observed outcome is compared with a modelled counterfactual (WOULD_HAVE_FAILED is an assumption, not an observation).
               </p>
             </div>
           </div>
@@ -604,12 +606,13 @@
                   <th>C_pred</th>
                   <th>C_diag</th>
                   <th>C_time</th>
+                  <th>Provenance</th>
                   <th>Attributed At</th>
                 </tr>
               </thead>
               <tbody id="attribution-ledger-body">
                 <tr>
-                  <td colspan="11" class="empty-cell">Loading attribution ledger...</td>
+                  <td colspan="12" class="empty-cell">Loading attribution ledger...</td>
                 </tr>
               </tbody>
             </table>
@@ -681,7 +684,7 @@
                 <thead>
                   <tr>
                     <th>Payment ID</th>
-                    <th>Ingested At</th>
+                    <th>Event Time</th>
                     <th class="text-right">Amount</th>
                     <th>Method / Bank</th>
                     <th>Status</th>
@@ -742,7 +745,7 @@
                       <span id="audit-fact-status" class="drawer-fact-val">—</span>
                     </div>
                     <div class="drawer-fact-item">
-                      <span class="drawer-fact-label">Ingested Time</span>
+                      <span class="drawer-fact-label">First Event Time</span>
                       <span id="audit-fact-time" class="drawer-fact-val">—</span>
                     </div>
                   </div>

@@ -1,6 +1,7 @@
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
@@ -9,7 +10,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.main import app
 from src.api.dependencies import get_db_session
 
-from src.infrastructure.models import PaymentEventModel
+from src.infrastructure.models import (
+    CounterfactualAttributionModel,
+    DegradationEpisodeModel,
+    FailurePredictionModel,
+    InterventionCommandModel,
+    InterventionDecisionModel,
+    InterventionExecutionAttemptModel,
+    PaymentEventModel,
+    PaymentOutcomeObservationModel,
+    RCAEvaluationModel,
+)
 
 DASHBOARD_TEST_CREDENTIALS = ("inspection-test-user", "inspection-test-password")
 
@@ -908,3 +919,288 @@ async def test_timeline_excludes_paypal_events(client, db_engine):
     paypal_resp = await client.get(f"/api/v1/timeline/{paypal_pid}")
     assert paypal_resp.status_code == 404
     assert paypal_resp.json()["detail"] == f"Payment {paypal_pid} not found"
+
+
+# --- Phase 1: latest-version aggregation, per-currency money and provenance ---------------------
+
+HEURISTIC_MODEL = ("DeterministicBaselineModel", "untrained-heuristic-v2")
+
+
+async def _seed_attributed_payment(
+    db_engine,
+    *,
+    currency="INR",
+    amount=100000,
+    protected_versions=(10000,),
+    observation_versions=1,
+    authorized=True,
+    simulated=True,
+    executor_name="SIMULATOR_V1",
+    model=HEURISTIC_MODEL,
+    model_provenance="SYNTHETIC_DEVELOPMENT",
+    episode_id=None,
+):
+    """
+    Seeds one Stage 1-8 trace: authorization and capture events, a prediction, an ACT decision,
+    a SUCCEEDED command with one execution attempt, `observation_versions` outcome observations and
+    one attribution row per entry in `protected_versions` (versions 1..n of the same command).
+    """
+    now = datetime.now(timezone.utc)
+    pid = f"pay_phase1_{uuid.uuid4().hex[:10]}"
+    prediction_id, decision_id, command_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with Session() as session:
+        if authorized:
+            session.add(PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
+                payment_id=pid, timestamp=now - timedelta(minutes=10), event_type="payment.authorized",
+                currency=currency, amount_minor_units=amount, payment_status="authorized",
+                payment_method="UPI", ingested_at=now - timedelta(minutes=10),
+            ))
+        session.add_all([
+            PaymentEventModel(
+                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
+                payment_id=pid, timestamp=now - timedelta(minutes=5), event_type="payment.captured",
+                currency=currency, amount_minor_units=amount, payment_status="captured",
+                payment_method="UPI", ingested_at=now - timedelta(minutes=5),
+            ),
+            FailurePredictionModel(
+                prediction_id=prediction_id, payment_attempt_id=pid, prediction_version=1,
+                predicted_at=now - timedelta(minutes=10), prediction_horizon="30m", failure_probability=0.8,
+                risk_band="HIGH", prediction_status="PREDICTED", model_name=model[0], model_version=model[1],
+                feature_schema_version="v1.0.0", feature_snapshot={}, input_fingerprint="sha256:" + "a" * 64,
+                created_at=now,
+            ),
+            InterventionDecisionModel(
+                decision_id=decision_id, payment_attempt_id=pid, decision_version=1,
+                decided_at=now - timedelta(minutes=9), decision_type="ACT", selected_route_id="FALLBACK_PAYMENT_LINK",
+                failure_probability=0.8, stage5_prediction_id=prediction_id, diagnosis_confidence="STRONG",
+                decision_confidence=0.9, gate_verdict="PASSED", policy_id="default-recovery-v1",
+                policy_version="1.0.0", input_fingerprint="sha256:" + "b" * 64,
+                evaluation_audit_payload={"upstream_context": {"episode_id": str(episode_id) if episode_id else None}},
+                created_at=now,
+            ),
+            InterventionCommandModel(
+                command_id=command_id, decision_id=decision_id, payment_attempt_id=pid, decision_version=1,
+                route_key="FALLBACK_PAYMENT_LINK", policy_id="default-recovery-v1", policy_version="1.0.0",
+                command_status="SUCCEEDED", idempotency_key=f"cmd_{decision_id}",
+                created_at=now - timedelta(minutes=9), expires_at=now, updated_at=now - timedelta(minutes=9),
+            ),
+            InterventionExecutionAttemptModel(
+                attempt_id=uuid.uuid4(), command_id=command_id, attempt_number=1,
+                started_at=now - timedelta(minutes=9), completed_at=now - timedelta(minutes=9), duration_ms=15,
+                execution_status="SUCCESS", executor_name=executor_name, is_simulation=simulated,
+                provider_action_type="PAYMENT_LINK_DISPATCH", provider_response_payload={},
+                created_at=now - timedelta(minutes=9),
+            ),
+        ])
+        for version in range(1, observation_versions + 1):
+            observed = now - timedelta(minutes=5) + timedelta(seconds=version)
+            session.add(PaymentOutcomeObservationModel(
+                observation_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid,
+                observation_version=version, observed_at=observed, as_of_timestamp=observed,
+                payment_outcome="CAPTURED", observation_audit_payload={}, created_at=observed,
+            ))
+        await session.flush()
+        for version, protected in enumerate(protected_versions, start=1):
+            attributed = now - timedelta(minutes=4) + timedelta(seconds=version)
+            session.add(CounterfactualAttributionModel(
+                attribution_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid,
+                decision_id=decision_id, attribution_version=version, attributed_at=attributed,
+                as_of_timestamp=attributed, attribution_status="ATTRIBUTED",
+                methodology_name="COUNTERFACTUAL_RISK_WEIGHTED_V1", methodology_version="1.0.0",
+                treatment_status="TREATED", observed_payment_outcome="CAPTURED", payment_amount_minor_units=amount,
+                counterfactual_failure_probability=0.8, counterfactual_loss_exposure_minor_units=protected,
+                counterfactual_natural_success_gmv_minor_units=amount - protected,
+                attributed_protected_gmv_minor_units=protected, attribution_confidence=0.6,
+                is_synthetic_baseline=model_provenance != "EMPIRICAL_PRODUCTION", is_simulated_execution=simulated,
+                attribution_audit_payload={"stage5_model_id": model[0], "stage5_model_provenance": model_provenance},
+                created_at=attributed,
+            ))
+        await session.commit()
+    return SimpleNamespace(payment_id=pid, decision_id=decision_id, command_id=command_id)
+
+
+async def _seed_episode_with_rca(db_engine):
+    episode_id, now = uuid.uuid4(), datetime.now(timezone.utc)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add(DegradationEpisodeModel(
+            episode_id=episode_id, segment_dimension="BANK", segment_value="HDFC", started_at_window=now,
+            status="ACTIVE", peak_absolute_drop=0.5, affected_window_count=2, severity="CRITICAL",
+        ))
+        await session.flush()
+        session.add(RCAEvaluationModel(
+            evaluation_id=uuid.uuid4(), episode_id=episode_id, evaluation_version=1, classification="SEGMENT_SPECIFIC",
+            analysis_window_start=now, analysis_window_end=now, input_fingerprint="sha256:" + "c" * 64,
+            generated_at=now, evidence_audit_payload={},
+        ))
+        await session.commit()
+    return episode_id
+
+
+def _inr(amount, simulated=1, synthetic=1, positive=1):
+    return {
+        "currency": "INR", "amount_minor_units": amount, "positive_attribution_count": positive,
+        "simulated_execution_count": simulated, "synthetic_baseline_count": synthetic,
+    }
+
+
+@pytest.mark.asyncio
+async def test_superseded_attribution_versions_are_not_double_counted(client, db_engine):
+    episode_id = await _seed_episode_with_rca(db_engine)
+    trace = await _seed_attributed_payment(
+        db_engine, protected_versions=(10000, 4000), observation_versions=2, episode_id=episode_id
+    )
+
+    summary = (await client.get("/api/v1/summary")).json()
+    assert summary["total_protected_gmv_minor_units"] == 4000
+    assert summary["total_protected_gmv_by_currency"] == [_inr(4000)]
+
+    recovery = (await client.get("/api/v1/recovery")).json()
+    assert recovery["summary"]["total_protected_gmv_minor_units"] == 4000
+    assert recovery["summary"]["total_protected_gmv_by_currency"] == [_inr(4000)]
+    assert (recovery["summary"]["attribution_count"], recovery["summary"]["rescued_count"]) == (1, 1)
+    assert recovery["summary"]["successful_captures"] == 1
+    rows = [row for row in recovery["ledger"] if row["decision_id"] == str(trace.decision_id)]
+    assert len(rows) == 1 and recovery["total_count"] == 1
+    assert (rows[0]["attributed_protected_gmv_minor_units"], rows[0]["currency"]) == (4000, "INR")
+
+    latest = (await client.get("/api/v1/attributions")).json()
+    assert [(a["attribution_version"], a["attributed_protected_gmv_minor_units"]) for a in latest] == [(2, 4000)]
+    history = (await client.get("/api/v1/attributions?include_history=true")).json()
+    assert sorted(a["attribution_version"] for a in history) == [1, 2]
+
+    payments = (await client.get(f"/api/v1/payments?search={trace.payment_id}")).json()
+    assert payments["total_count"] == 1
+    assert [i["attributed_protected_gmv_minor_units"] for i in payments["items"]] == [4000]
+
+    timeline = (await client.get(f"/api/v1/timeline/{trace.payment_id}")).json()
+    assert (timeline["attribution"]["attribution_version"], timeline["attribution"]["protected_gmv"]) == (2, 4000)
+
+    rca = (await client.get(f"/api/v1/rca/{episode_id}")).json()
+    assert rca["intervention_context"]["window_protected_gmv_minor_units"] == 4000
+    assert rca["intervention_context"]["window_protected_gmv_by_currency"] == [_inr(4000)]
+
+
+@pytest.mark.asyncio
+async def test_amounts_in_different_currencies_are_never_summed(client, db_engine):
+    inr = await _seed_attributed_payment(db_engine, currency="INR", amount=100000, protected_versions=(10000,))
+    usd = await _seed_attributed_payment(db_engine, currency="USD", amount=7000, protected_versions=(2000,))
+    unknown = await _seed_attributed_payment(db_engine, amount=3000, protected_versions=(500,), authorized=False)
+
+    summary = (await client.get("/api/v1/summary")).json()
+    assert summary["total_gmv_minor_units"] is None
+    assert summary["total_gmv_by_currency"] == [
+        {"currency": "INR", "amount_minor_units": 100000},
+        {"currency": "USD", "amount_minor_units": 7000},
+    ]
+    assert summary["total_protected_gmv_minor_units"] is None
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary["total_protected_gmv_by_currency"]] == [
+        ("INR", 10000), ("USD", 2000), (None, 500),
+    ]
+
+    recovery = (await client.get("/api/v1/recovery")).json()
+    assert recovery["summary"]["total_protected_gmv_minor_units"] is None
+    assert recovery["summary"]["total_protected_gmv_by_currency"] == summary["total_protected_gmv_by_currency"]
+    ledger_currency = {row["payment_attempt_id"]: row["currency"] for row in recovery["ledger"]}
+    assert ledger_currency == {inr.payment_id: "INR", usd.payment_id: "USD", unknown.payment_id: None}
+
+    attributions = (await client.get("/api/v1/attributions")).json()
+    assert {a["payment_attempt_id"]: a["currency"] for a in attributions} == ledger_currency
+
+
+@pytest.mark.asyncio
+async def test_single_currency_totals_keep_the_legacy_scalar_fields(client, db_engine):
+    await _seed_attributed_payment(db_engine, currency="USD", amount=7000, protected_versions=(2000,))
+    await _seed_attributed_payment(db_engine, currency="USD", amount=3000, protected_versions=(1000,))
+
+    summary = (await client.get("/api/v1/summary")).json()
+    assert summary["total_gmv_minor_units"] == 10000
+    assert summary["total_gmv_by_currency"] == [{"currency": "USD", "amount_minor_units": 10000}]
+    assert summary["total_protected_gmv_minor_units"] == 3000
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary["total_protected_gmv_by_currency"]] == [
+        ("USD", 3000)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provenance_reports_simulated_execution_and_heuristic_predictions(client, db_engine):
+    simulated = await _seed_attributed_payment(db_engine)
+    other = await _seed_attributed_payment(
+        db_engine, simulated=False, executor_name="TEST_NON_SIMULATED_EXECUTOR",
+        model=("ExternalTestModel", "v9"), model_provenance="UNKNOWN",
+    )
+
+    summary = (await client.get("/api/v1/summary")).json()
+    assert (summary["total_successful_interventions"], summary["simulated_successful_interventions"]) == (2, 1)
+    assert summary["execution_provenance"] == [
+        {"executor_name": "SIMULATOR_V1", "is_simulation": True, "succeeded_command_count": 1},
+        {"executor_name": "TEST_NON_SIMULATED_EXECUTOR", "is_simulation": False, "succeeded_command_count": 1},
+    ]
+    assert summary["prediction_models"] == [
+        {"model_name": "DeterministicBaselineModel", "model_version": "untrained-heuristic-v2",
+         "model_provenance": "SYNTHETIC_DEVELOPMENT", "prediction_count": 1},
+        {"model_name": "ExternalTestModel", "model_version": "v9",
+         "model_provenance": "UNKNOWN", "prediction_count": 1},
+    ]
+
+    timeline = (await client.get(f"/api/v1/timeline/{simulated.payment_id}")).json()
+    assert {k: timeline["prediction"][k] for k in ("model_name", "model_version", "model_provenance")} == {
+        "model_name": "DeterministicBaselineModel", "model_version": "untrained-heuristic-v2",
+        "model_provenance": "SYNTHETIC_DEVELOPMENT",
+    }
+    assert (timeline["execution"]["executor_name"], timeline["execution"]["is_simulation"]) == ("SIMULATOR_V1", True)
+    attribution = timeline["attribution"]
+    assert (attribution["is_simulated_execution"], attribution["is_synthetic_baseline"]) == (True, True)
+    assert attribution["stage5_model_provenance"] == "SYNTHETIC_DEVELOPMENT"
+    assert (attribution["methodology_name"], attribution["methodology_version"]) == (
+        "COUNTERFACTUAL_RISK_WEIGHTED_V1", "1.0.0"
+    )
+    other_timeline = (await client.get(f"/api/v1/timeline/{other.payment_id}")).json()
+    assert other_timeline["execution"]["is_simulation"] is False
+    assert other_timeline["prediction"]["model_provenance"] == "UNKNOWN"
+
+    recovery = (await client.get("/api/v1/recovery")).json()
+    assert recovery["summary"]["simulated_execution_count"] == 1
+    flags = {row["payment_attempt_id"]: (row["executor_name"], row["is_simulation"]) for row in recovery["ledger"]}
+    assert flags == {
+        simulated.payment_id: ("SIMULATOR_V1", True),
+        other.payment_id: ("TEST_NON_SIMULATED_EXECUTOR", False),
+    }
+
+    attributions = {a["payment_attempt_id"]: a for a in (await client.get("/api/v1/attributions")).json()}
+    assert attributions[simulated.payment_id]["is_simulated_execution"] is True
+    assert attributions[other.payment_id]["is_simulated_execution"] is False
+    assert attributions[simulated.payment_id]["stage5_model_provenance"] == "SYNTHETIC_DEVELOPMENT"
+
+    payments = (await client.get(f"/api/v1/payments?search={simulated.payment_id}")).json()
+    assert payments["items"][0]["is_simulated_execution"] is True
+
+
+@pytest.mark.asyncio
+async def test_payments_list_uses_only_the_latest_decision_version(client, db_engine):
+    pid = f"pay_versions_{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add(PaymentEventModel(
+            event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex, payment_id=pid,
+            timestamp=now, event_type="payment.authorized", currency="INR", amount_minor_units=1000,
+            payment_status="authorized", payment_method="UPI", ingested_at=now,
+        ))
+        for version, decision_type in ((1, "MONITOR"), (2, "ACT")):
+            session.add(InterventionDecisionModel(
+                decision_id=uuid.uuid4(), payment_attempt_id=pid, decision_version=version,
+                decided_at=now + timedelta(seconds=version), decision_type=decision_type,
+                selected_route_id="FALLBACK_PAYMENT_LINK" if decision_type == "ACT" else None,
+                failure_probability=0.8, stage5_prediction_id=uuid.uuid4(), diagnosis_confidence="STRONG",
+                decision_confidence=0.9, gate_verdict="PASSED", policy_id="P1", policy_version="1.0",
+                input_fingerprint=f"sha256:{version}", evaluation_audit_payload={}, created_at=now,
+            ))
+        await session.commit()
+
+    data = (await client.get(f"/api/v1/payments?search={pid}")).json()
+
+    assert data["total_count"] == 1
+    assert [(i["payment_id"], i["decision_type"]) for i in data["items"]] == [(pid, "ACT")]

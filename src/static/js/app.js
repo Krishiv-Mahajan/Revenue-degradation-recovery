@@ -14,7 +14,8 @@ import {
   getAttributions,
   getPayments,
   getPaymentTimeline,
-  formatINR,
+  formatMoney,
+  formatMoneyTotals,
   formatPercentage,
   formatCount,
   formatDateTime
@@ -50,6 +51,8 @@ const elements = {
   refreshButton: document.getElementById('btn-refresh'),
   navTabs: document.querySelectorAll('.nav-tab'),
   viewContainers: document.querySelectorAll('.view-container'),
+  provenanceBanner: document.getElementById('provenance-banner'),
+  provenanceBannerList: document.getElementById('provenance-banner-list'),
 
   // Summary KPI Values
   kpiProtectedRevenue: document.getElementById('kpi-protected-revenue'),
@@ -57,6 +60,7 @@ const elements = {
   kpiSuccessRate: document.getElementById('kpi-success-rate'),
   kpiActiveIncidents: document.getElementById('kpi-active-incidents'),
   kpiInterventions: document.getElementById('kpi-interventions'),
+  kpiInterventionsSubtext: document.getElementById('kpi-interventions-subtext'),
   kpiAuthCaptureVolume: document.getElementById('kpi-auth-capture-volume'),
   summaryErrorBanner: document.getElementById('summary-error-banner'),
   summaryErrorMessage: document.getElementById('summary-error-message'),
@@ -98,6 +102,8 @@ const elements = {
   detRcaCandidatesList: document.getElementById('det-rca-candidates-list'),
 
   detPredPeakProb: document.getElementById('det-pred-peak-prob'),
+  detPredThreshold: document.getElementById('det-pred-threshold'),
+  detPredModel: document.getElementById('det-pred-model'),
   detPredSeverityBonus: document.getElementById('det-pred-severity-bonus'),
   detPredRcaBonus: document.getElementById('det-pred-rca-bonus'),
   detPredStatus: document.getElementById('det-pred-status'),
@@ -113,6 +119,7 @@ const elements = {
   // Phase 7C: Recovery Elements
   refreshRecoveryBtn: document.getElementById('refresh-recovery-btn'),
   recStatDispatched: document.getElementById('rec-stat-dispatched'),
+  recStatDispatchedSub: document.getElementById('rec-stat-dispatched-sub'),
   recStatAct: document.getElementById('rec-stat-act'),
   recStatMonitor: document.getElementById('rec-stat-monitor'),
   recStatCaptures: document.getElementById('rec-stat-captures'),
@@ -167,6 +174,21 @@ const elements = {
   auditRecConfidence: document.getElementById('audit-rec-confidence'),
   auditTimelineStepper: document.getElementById('audit-timeline-stepper'),
 };
+
+// The only provenance the attribution service treats as validated on genuine production outcomes.
+const EMPIRICAL_PRODUCTION = 'EMPIRICAL_PRODUCTION';
+// The untrained heuristic whose additive severity and RCA bonuses the incident view explains.
+const HEURISTIC_MODEL_NAME = 'DeterministicBaselineModel';
+const HEURISTIC_SEVERITY_BONUS = { CRITICAL: '+0.30', HIGH: '+0.15', MODERATE: '+0.05' };
+const HEURISTIC_RCA_BONUS = { STRONG: '+0.20', MODERATE: '+0.10', WEAK: '+0.00' };
+
+function describeModel(model) {
+  return `${model.model_name} ${model.model_version} (${model.model_provenance})`;
+}
+
+function usesOnlyHeuristicModel(models) {
+  return Array.isArray(models) && models.length > 0 && models.every((m) => m.model_name === HEURISTIC_MODEL_NAME);
+}
 
 /**
  * Initialize application listeners and trigger initial data load.
@@ -397,14 +419,14 @@ function renderSummary() {
   if (elements.summaryErrorBanner) elements.summaryErrorBanner.style.display = 'none';
   if (!data) return;
 
-  // 1. Protected Revenue (Stage 8 Attributed)
+  // 1. Estimated Protected GMV (Stage 8, latest attribution versions), one figure per currency
   if (elements.kpiProtectedRevenue) {
-    elements.kpiProtectedRevenue.textContent = formatINR(data.total_protected_gmv_minor_units);
+    elements.kpiProtectedRevenue.textContent = formatMoneyTotals(data.total_protected_gmv_by_currency);
   }
 
-  // 2. Processed Volume (Stage 1 Auth GMV)
+  // 2. Processed Volume (Stage 1 Auth GMV), one figure per currency
   if (elements.kpiProcessedVolume) {
-    elements.kpiProcessedVolume.textContent = formatINR(data.total_gmv_minor_units);
+    elements.kpiProcessedVolume.textContent = formatMoneyTotals(data.total_gmv_by_currency);
   }
 
   // 3. Authorization Success Rate
@@ -417,15 +439,63 @@ function renderSummary() {
     elements.kpiActiveIncidents.textContent = formatCount(data.active_degradation_episodes);
   }
 
-  // 5. Interventions Dispatched
+  // 5. Interventions Completed, with how many ran on a simulator
   if (elements.kpiInterventions) {
     elements.kpiInterventions.textContent = formatCount(data.total_successful_interventions);
+  }
+  if (elements.kpiInterventionsSubtext) {
+    const total = data.total_successful_interventions || 0;
+    const simulated = data.simulated_successful_interventions || 0;
+    elements.kpiInterventionsSubtext.textContent = total > 0
+      ? `${formatCount(simulated)} of ${formatCount(total)} executed by a simulator (no real gateway call)`
+      : 'No interventions have completed';
   }
 
   // 6. Authorization vs Capture Counts
   if (elements.kpiAuthCaptureVolume) {
     elements.kpiAuthCaptureVolume.textContent = `${formatCount(data.total_auths)} / ${formatCount(data.total_captures)}`;
   }
+
+  renderProvenance(data);
+}
+
+/**
+ * Shows the provenance notice whenever the data includes simulated execution,
+ * predictions from models that are not empirically validated, or estimated protected GMV.
+ */
+function renderProvenance(data) {
+  if (!elements.provenanceBanner || !elements.provenanceBannerList) return;
+  const notices = [];
+
+  const simulated = data.simulated_successful_interventions || 0;
+  if (simulated > 0) {
+    const executors = (data.execution_provenance || [])
+      .filter((e) => e.is_simulation)
+      .map((e) => e.executor_name)
+      .join(', ');
+    notices.push(
+      `${formatCount(simulated)} of ${formatCount(data.total_successful_interventions)} completed interventions `
+      + `were executed by a simulator (${executors}); no real gateway or customer action took place.`
+    );
+  }
+
+  const unvalidated = (data.prediction_models || []).filter((m) => m.model_provenance !== EMPIRICAL_PRODUCTION);
+  if (unvalidated.length > 0) {
+    notices.push(
+      `Failure predictions come from models that are not empirically validated: ${unvalidated.map(describeModel).join(', ')}.`
+    );
+  }
+
+  if ((data.total_protected_gmv_by_currency || []).length > 0) {
+    notices.push('Protected GMV figures are risk-weighted counterfactual estimates, not observed recovered revenue.');
+  }
+
+  elements.provenanceBannerList.replaceChildren(...notices.map((text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+  elements.provenanceBanner.style.display = notices.length > 0 ? 'block' : 'none';
 }
 
 /**
@@ -697,12 +767,12 @@ function renderIncidentDetail(rca) {
     elements.detImpactPredictions.textContent = formatCount(pred.window_predictions_evaluated);
   }
   if (elements.detImpactProtected) {
-    elements.detImpactProtected.textContent = formatINR(inter.window_protected_gmv_minor_units);
+    elements.detImpactProtected.textContent = formatMoneyTotals(inter.window_protected_gmv_by_currency);
   }
 
   // C & D. Root Cause Analysis & Ranked Candidates Visualization
   if (elements.detRcaClassification) {
-    elements.detRcaClassification.textContent = rca.classification || 'SEGMENT_SPECIFIC';
+    elements.detRcaClassification.textContent = rca.classification || 'Unknown';
   }
 
   if (elements.detRcaCandidatesList) {
@@ -734,21 +804,47 @@ function renderIncidentDetail(rca) {
   }
 
   // E. Downstream Prediction Context
+  const models = pred.prediction_models || [];
+  // The bonus rows describe the untrained heuristic's additive rules; other models do not use them.
+  const heuristicOnly = usesOnlyHeuristicModel(models);
   if (elements.detPredPeakProb) {
     elements.detPredPeakProb.textContent = formatPercentage(pred.peak_failure_probability, 1);
   }
+  if (elements.detPredThreshold) {
+    const threshold = inter.decision_threshold;
+    elements.detPredThreshold.textContent = threshold != null
+      ? `${Number(threshold).toFixed(4)} (${formatPercentage(threshold, 1)})`
+      : '—';
+  }
+  if (elements.detPredModel) {
+    elements.detPredModel.textContent = models.length > 0 ? models.map(describeModel).join(', ') : 'No predictions';
+  }
   if (elements.detPredSeverityBonus) {
     const sev = pred.severity_bonus_tier;
-    const bonus = sev === 'CRITICAL' ? '+0.30' : (sev === 'HIGH' ? '+0.15' : '+0.05');
-    elements.detPredSeverityBonus.textContent = sev ? `${sev} (${bonus})` : '—';
+    const bonus = HEURISTIC_SEVERITY_BONUS[sev];
+    if (!sev || models.length === 0) {
+      elements.detPredSeverityBonus.textContent = '—';
+    } else if (!heuristicOnly) {
+      elements.detPredSeverityBonus.textContent = `${sev} (not used by this model)`;
+    } else {
+      elements.detPredSeverityBonus.textContent = bonus ? `${sev} (${bonus}, heuristic rule)` : `${sev} (no heuristic rule)`;
+    }
   }
   if (elements.detPredRcaBonus) {
     const strength = pred.top_rca_evidence_strength;
-    const bonus = strength === 'STRONG' ? '+0.20' : (strength === 'MODERATE' ? '+0.10' : '+0.00');
-    elements.detPredRcaBonus.textContent = strength ? `${strength} (${bonus})` : '—';
+    const bonus = HEURISTIC_RCA_BONUS[strength];
+    if (!strength || models.length === 0) {
+      elements.detPredRcaBonus.textContent = '—';
+    } else if (!heuristicOnly) {
+      elements.detPredRcaBonus.textContent = `${strength} (not used by this model)`;
+    } else {
+      elements.detPredRcaBonus.textContent = bonus
+        ? `${strength} (${bonus} when the payment matches, heuristic rule)`
+        : `${strength} (no heuristic rule)`;
+    }
   }
   if (elements.detPredStatus) {
-    elements.detPredStatus.textContent = pred.prediction_status || 'PREDICTED';
+    elements.detPredStatus.textContent = pred.prediction_status || 'Unknown';
   }
 
   // F. Downstream Intervention Decision Context
@@ -758,7 +854,7 @@ function renderIncidentDetail(rca) {
     elements.detInterVerdicts.textContent = `${formatCount(actCount)} ACT / ${formatCount(monCount)} MONITOR`;
   }
   if (elements.detInterRoute) {
-    elements.detInterRoute.textContent = inter.primary_selected_route || 'FALLBACK_PAYMENT_LINK';
+    elements.detInterRoute.textContent = inter.primary_selected_route || 'None selected';
   }
 
   // G. Operational Causal Chain Sequence
@@ -775,7 +871,7 @@ function renderIncidentDetail(rca) {
   }
   if (elements.causalStep4Val) {
     const actNum = inter.act_decisions || 0;
-    elements.causalStep4Val.textContent = `${inter.primary_selected_route || 'FALLBACK_PAYMENT_LINK'} (${actNum} ACT)`;
+    elements.causalStep4Val.textContent = `${inter.primary_selected_route || 'No route selected'} (${actNum} ACT)`;
   }
 }
 
@@ -830,15 +926,22 @@ export async function loadRecoveryData() {
 function renderRecoverySummary(summary) {
   if (!summary) return;
   if (elements.recStatDispatched) elements.recStatDispatched.textContent = formatCount(summary.interventions_dispatched);
+  if (elements.recStatDispatchedSub) {
+    const simulated = summary.simulated_execution_count || 0;
+    elements.recStatDispatchedSub.textContent = simulated > 0
+      ? `${formatCount(simulated)} executed by a simulator (no real gateway call)`
+      : 'Stage 7 commands created, any status';
+  }
   if (elements.recStatAct) elements.recStatAct.textContent = formatCount(summary.act_count);
   if (elements.recStatMonitor) elements.recStatMonitor.textContent = formatCount(summary.monitor_count);
   if (elements.recStatCaptures) elements.recStatCaptures.textContent = formatCount(summary.successful_captures);
   if (elements.recStatFailed) elements.recStatFailed.textContent = formatCount(summary.failed_outcomes);
-  if (elements.recStatGmv) elements.recStatGmv.textContent = formatINR(summary.total_protected_gmv_minor_units);
-  if (elements.recStatAttributions) elements.recStatAttributions.textContent = formatCount(summary.rescued_count || summary.attribution_count);
+  if (elements.recStatGmv) elements.recStatGmv.textContent = formatMoneyTotals(summary.total_protected_gmv_by_currency);
+  if (elements.recStatAttributions) elements.recStatAttributions.textContent = formatCount(summary.rescued_count);
   if (elements.recStatConfidence) {
-    const conf = summary.rescued_avg_confidence || summary.avg_attribution_confidence || 0.0;
-    elements.recStatConfidence.textContent = formatPercentage(conf, 1);
+    elements.recStatConfidence.textContent = summary.rescued_count > 0
+      ? formatPercentage(summary.rescued_avg_confidence, 1)
+      : '—';
   }
 }
 
@@ -862,13 +965,19 @@ function renderRecoveryLedger(ledger, totalCount) {
   }
 
   elements.recoveryLedgerBody.innerHTML = ledger.map((row) => {
-    const verdictBadge = row.decision_type === 'ACT'
-      ? '<span class="badge-act">ACT</span>'
-      : '<span class="badge-monitor">MONITOR</span>';
+    let verdictBadge;
+    if (row.decision_type === 'ACT') {
+      verdictBadge = '<span class="badge-act">ACT</span>';
+    } else if (row.decision_type === 'MONITOR') {
+      verdictBadge = '<span class="badge-monitor">MONITOR</span>';
+    } else {
+      verdictBadge = `<span class="badge-not-dispatched">${escapeHTML(row.decision_type || 'UNKNOWN')}</span>`;
+    }
 
     const execClass = row.execution_status === 'SUCCEEDED' ? 'badge-succeeded' :
       (row.execution_status === 'FAILED' ? 'badge-failed' : 'badge-not-dispatched');
-    const execBadge = `<span class="${execClass}">${escapeHTML(row.execution_status)}</span>`;
+    const execLabel = row.is_simulation ? `${row.execution_status} (SIMULATED)` : row.execution_status;
+    const execBadge = `<span class="${execClass}" title="${escapeHTML(row.executor_name || '')}">${escapeHTML(execLabel)}</span>`;
 
     const outcomeClass = row.observed_outcome === 'CAPTURED' ? 'badge-captured' :
       (row.observed_outcome === 'FAILED' ? 'badge-failed-outcome' : 'badge-not-observed');
@@ -879,7 +988,9 @@ function renderRecoveryLedger(ledger, totalCount) {
 
     const decShort = row.decision_id ? row.decision_id.slice(0, 8) : '—';
     const epShort = row.episode_id ? row.episode_id.slice(0, 8) : '—';
-    const gmvText = formatINR(row.attributed_protected_gmv_minor_units);
+    const gmvText = row.attribution_status === 'NOT_ATTRIBUTABLE'
+      ? '—'
+      : formatMoney(row.attributed_protected_gmv_minor_units, row.currency);
 
     return `
       <tr>
@@ -904,7 +1015,7 @@ function renderRecoveryLedger(ledger, totalCount) {
         <td>${execBadge}</td>
         <td>${outcomeBadge}</td>
         <td class="text-right" style="font-weight: 700; font-family: var(--font-mono); color: ${row.attributed_protected_gmv_minor_units > 0 ? 'var(--emerald-text)' : 'inherit'};">
-          ${gmvText}
+          ${escapeHTML(gmvText)}
         </td>
         <td>${attrBadge}</td>
         <td class="text-center">
@@ -939,14 +1050,14 @@ function renderRecoveryLedger(ledger, totalCount) {
 }
 
 /**
- * Renders the Stage 8 Counterfactual Attribution financial proof ledger.
+ * Renders the Stage 8 counterfactual attribution ledger (model estimates).
  */
 function renderAttributionLedger(attributions) {
   if (!elements.attributionLedgerBody) return;
   if (!attributions || attributions.length === 0) {
     elements.attributionLedgerBody.innerHTML = `
       <tr>
-        <td colspan="11" class="empty-cell">No Stage 8 counterfactual attribution records found.</td>
+        <td colspan="12" class="empty-cell">No Stage 8 counterfactual attribution records found.</td>
       </tr>
     `;
     return;
@@ -958,13 +1069,19 @@ function renderAttributionLedger(attributions) {
     const p0 = a.counterfactual_failure_probability != null
       ? formatPercentage(a.counterfactual_failure_probability, 1)
       : '—';
-    const gmv = formatINR(a.attributed_protected_gmv_minor_units);
+    const gmv = formatMoney(a.attributed_protected_gmv_minor_units, a.currency);
     const alpha = formatPercentage(a.attribution_confidence, 1);
+    const outcomeClass = a.observed_payment_outcome === 'CAPTURED' ? 'badge-captured'
+      : (a.observed_payment_outcome === 'FAILED' ? 'badge-failed-outcome' : 'badge-not-observed');
 
     const comp = a.confidence_components || {};
     const cPred = comp.c_prediction != null ? formatPercentage(comp.c_prediction, 0) : '—';
     const cDiag = comp.c_diagnosis != null ? formatPercentage(comp.c_diagnosis, 0) : '—';
     const cTime = comp.c_timing != null ? formatPercentage(comp.c_timing, 0) : '—';
+    const provenance = [
+      a.is_simulated_execution ? 'Simulated execution' : 'Non-simulated execution',
+      a.is_synthetic_baseline ? `Unvalidated model (${a.stage5_model_provenance || 'unknown'})` : 'Validated model',
+    ].join(' · ');
 
     return `
       <tr>
@@ -975,16 +1092,17 @@ function renderAttributionLedger(attributions) {
           </a>
         </td>
         <td style="font-family: var(--font-mono); font-size: 0.75rem;">${decShort}</td>
-        <td><span class="badge-captured">${escapeHTML(a.observed_payment_outcome)}</span></td>
+        <td><span class="${outcomeClass}">${escapeHTML(a.observed_payment_outcome)}</span></td>
         <td>
           <span style="font-family: var(--font-mono); font-weight: 700; color: var(--rose-text);">${escapeHTML(a.counterfactual_outcome)}</span>
           <span style="font-size: 0.7rem; color: var(--text-muted); font-family: var(--font-mono);">(${p0})</span>
         </td>
-        <td class="text-right" style="font-weight: 700; font-family: var(--font-mono); color: var(--emerald-text);">${gmv}</td>
+        <td class="text-right" style="font-weight: 700; font-family: var(--font-mono); color: var(--emerald-text);">${escapeHTML(gmv)}</td>
         <td style="font-weight: 700; font-family: var(--font-mono); color: var(--text-primary);">${alpha}</td>
         <td style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);">${cPred}</td>
         <td style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);">${cDiag}</td>
         <td style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);">${cTime}</td>
+        <td style="font-size: 0.75rem; color: var(--amber-text);">${escapeHTML(provenance)}</td>
         <td style="font-size: 0.75rem; color: var(--text-muted);">${formatDateTime(a.attributed_at)}</td>
       </tr>
     `;
@@ -1069,7 +1187,7 @@ function renderPayments(items, totalCount) {
       : '<span style="color: var(--text-muted); font-size: 0.75rem;">—</span>';
 
     const gmvText = p.attributed_protected_gmv_minor_units > 0
-      ? formatINR(p.attributed_protected_gmv_minor_units)
+      ? formatMoney(p.attributed_protected_gmv_minor_units, p.currency)
       : '—';
 
     const methodStr = p.payment_method ? `${p.payment_method}${p.bank ? ' (' + p.bank + ')' : ''}` : '—';
@@ -1082,11 +1200,11 @@ function renderPayments(items, totalCount) {
           </a>
         </td>
         <td style="font-size: 0.75rem; color: var(--text-muted);">${formatDateTime(p.timestamp)}</td>
-        <td class="text-right" style="font-weight: 700; font-family: var(--font-mono);">${formatINR(p.amount_minor_units)}</td>
+        <td class="text-right" style="font-weight: 700; font-family: var(--font-mono);">${escapeHTML(formatMoney(p.amount_minor_units, p.currency))}</td>
         <td style="font-size: 0.75rem;">${escapeHTML(methodStr)}</td>
         <td>${statusBadge}</td>
         <td>${decBadge}</td>
-        <td class="text-right" style="font-weight: 700; font-family: var(--font-mono); color: ${p.attributed_protected_gmv_minor_units > 0 ? 'var(--emerald-text)' : 'inherit'};">${gmvText}</td>
+        <td class="text-right" style="font-weight: 700; font-family: var(--font-mono); color: ${p.attributed_protected_gmv_minor_units > 0 ? 'var(--emerald-text)' : 'inherit'};">${escapeHTML(gmvText)}</td>
         <td>${attrBadge}</td>
         <td class="text-center">
           <button class="btn-inspect-link btn-audit-payment" data-payment-id="${escapeHTML(p.payment_id)}" type="button">Audit Trace</button>
@@ -1158,7 +1276,7 @@ function renderPaymentAudit(timeline) {
   const attr = timeline.attribution;
 
   // Section A: Core Payment Facts
-  if (elements.auditFactAmount) elements.auditFactAmount.textContent = formatINR(info.amount_minor_units);
+  if (elements.auditFactAmount) elements.auditFactAmount.textContent = formatMoney(info.amount_minor_units, info.currency);
   if (elements.auditFactMethod) elements.auditFactMethod.textContent = `${info.payment_method || '—'} / ${info.bank || '—'}`;
   if (elements.auditFactStatus) {
     const st = info.terminal_status || 'UNKNOWN';
@@ -1200,13 +1318,13 @@ function renderPaymentAudit(timeline) {
     }
   }
   if (elements.auditRecDecision) {
-    elements.auditRecDecision.textContent = dec ? `${dec.type} (${dec.gate_verdict || 'PASSED'})` : 'No Decision';
+    elements.auditRecDecision.textContent = dec ? `${dec.type} (${dec.gate_verdict || 'gate verdict unknown'})` : 'No Decision';
   }
   if (elements.auditRecRoute) {
     elements.auditRecRoute.textContent = dec?.route || '—';
   }
   if (elements.auditRecGmv) {
-    elements.auditRecGmv.textContent = attr ? formatINR(attr.protected_gmv) : '₹0.00';
+    elements.auditRecGmv.textContent = attr ? `${formatMoney(attr.protected_gmv, info.currency)} (estimate)` : '—';
   }
   if (elements.auditRecConfidence) {
     elements.auditRecConfidence.textContent = attr?.confidence != null ? formatPercentage(attr.confidence, 1) : '—';
@@ -1222,14 +1340,14 @@ function renderPaymentAudit(timeline) {
     const authEvent = timeline.events[0];
     steps.push({
       num: 1,
-      name: 'Stage 1: Authorization Ingestion',
+      name: 'Stage 1: First Event Ingested',
       status: 'completed',
       badge: 'INGESTED',
       badgeClass: 'badge-succeeded',
       time: authEvent.timestamp,
       details: [
         `Event: ${authEvent.event_type}`,
-        `Amount: ${formatINR(authEvent.amount_minor_units)}`,
+        `Amount: ${formatMoney(authEvent.amount_minor_units, info.currency)}`,
         `Initial Status: ${authEvent.status}`,
       ]
     });
@@ -1249,7 +1367,11 @@ function renderPaymentAudit(timeline) {
         `Prediction ID: ${pred.prediction_id ? pred.prediction_id.slice(0, 8) : '—'}`,
         `Failure Probability: ${formatPercentage(pred.failure_probability, 1)}`,
         `Risk Band: ${pred.risk_band || 'N/A'}`,
-      ]
+        `Model: ${pred.model_name || 'unknown'} ${pred.model_version || ''}`.trim(),
+        pred.model_provenance && pred.model_provenance !== EMPIRICAL_PRODUCTION
+          ? `Model provenance: ${pred.model_provenance} (not empirically validated)`
+          : null,
+      ].filter(Boolean)
     });
   } else {
     steps.push({
@@ -1259,7 +1381,7 @@ function renderPaymentAudit(timeline) {
       badge: 'NOT_EVALUATED',
       badgeClass: 'badge-not-dispatched',
       time: null,
-      details: ['Payment occurred outside of active degradation window.']
+      details: ['No Stage 5 prediction recorded for this payment.']
     });
   }
 
@@ -1294,20 +1416,25 @@ function renderPaymentAudit(timeline) {
 
   // Stage 7: Command & Execution
   if (cmd || exec) {
-    const execStatus = exec?.status || cmd?.status || 'DISPATCHED';
+    const execStatus = exec?.status || cmd?.status || 'UNKNOWN';
     const isSuccess = execStatus === 'SUCCESS' || execStatus === 'SUCCEEDED';
+    const isSimulated = exec?.is_simulation === true;
     steps.push({
       num: 7,
-      name: 'Stage 7: Intervention Execution',
+      name: isSimulated ? 'Stage 7: Intervention Execution (Simulated)' : 'Stage 7: Intervention Execution',
       status: isSuccess ? 'completed' : 'active',
-      badge: execStatus,
+      badge: isSimulated ? `${execStatus} (SIMULATED)` : execStatus,
       badgeClass: isSuccess ? 'badge-succeeded' : 'badge-dispatched',
       time: exec?.executed_at || cmd?.created_at,
       details: [
         `Command ID: ${cmd?.command_id ? cmd.command_id.slice(0, 8) : '—'}`,
         `Attempt ID: ${exec?.attempt_id ? exec.attempt_id.slice(0, 8) : '—'}`,
         `Route Key: ${cmd?.route || '—'}`,
-        exec?.duration_ms != null ? `Execution Latency: ${exec.duration_ms}ms` : null,
+        exec ? `Executor: ${exec.executor_name || 'unknown'}` : null,
+        isSimulated ? 'Simulated: no real gateway or customer action took place.' : null,
+        exec?.duration_ms != null
+          ? `${isSimulated ? 'Simulated duration' : 'Execution latency'}: ${exec.duration_ms}ms`
+          : null,
       ].filter(Boolean)
     });
   } else if (dec && dec.type === 'MONITOR') {
@@ -1363,9 +1490,13 @@ function renderPaymentAudit(timeline) {
       time: attr.attributed_at,
       details: [
         `Attribution ID: ${attr.attribution_id ? attr.attribution_id.slice(0, 8) : '—'}`,
-        `Counterfactual: ${attr.counterfactual_outcome || 'WOULD_HAVE_FAILED'}`,
-        `Protected GMV: ${formatINR(attr.protected_gmv)}`,
+        attr.counterfactual_outcome === 'WOULD_HAVE_FAILED'
+          ? 'Counterfactual: WOULD_HAVE_FAILED (modelled, not observed)'
+          : `Attribution outcome: ${attr.counterfactual_outcome || 'UNKNOWN'}`,
+        `Protected GMV (estimate): ${formatMoney(attr.protected_gmv, info.currency)}`,
         attr.confidence != null ? `Attribution Confidence: ${formatPercentage(attr.confidence, 1)}` : null,
+        `Execution: ${attr.is_simulated_execution ? 'simulated' : 'not simulated'}`,
+        `Prediction baseline: ${attr.stage5_model_provenance || 'unknown'}`,
       ].filter(Boolean)
     });
   } else if (dec && dec.type === 'ACT') {
@@ -1376,7 +1507,7 @@ function renderPaymentAudit(timeline) {
       badge: 'NOT_ATTRIBUTED',
       badgeClass: 'badge-not-attributed',
       time: null,
-      details: ['Intervention did not yield verified counterfactual protected GMV.']
+      details: ['No Stage 8 attribution recorded yet.']
     });
   } else {
     steps.push({

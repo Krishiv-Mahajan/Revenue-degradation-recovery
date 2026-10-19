@@ -601,6 +601,27 @@ body {
   color: #fca5a5;
 }
 
+.provenance-banner {
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1.25rem;
+  margin-bottom: 1rem;
+  color: var(--amber-text);
+}
+
+.provenance-banner-title {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.provenance-banner-list {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
 /* Skeleton Loading Animation */
 .skeleton {
   background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);

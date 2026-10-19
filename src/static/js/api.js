@@ -2,7 +2,7 @@
  * Centralized API Client Module — Phase 7A
  * 
  * Interacts exclusively with read-only inspection endpoints.
- * Handles minor-unit currency conversion and standard formatting.
+ * Handles currency-aware minor-unit formatting and standard formatting.
  */
 
 const BASE_URL = typeof window !== 'undefined' && window.location ? window.location.origin : 'http://127.0.0.1:8000';
@@ -129,22 +129,51 @@ export async function getPaymentTimeline(paymentId) {
   return await fetchJSON(`/api/v1/timeline/${encodeURIComponent(cleanId)}`);
 }
 
+const KNOWN_CURRENCIES = typeof Intl.supportedValuesOf === 'function'
+  ? new Set(Intl.supportedValuesOf('currency'))
+  : null;
+
 /**
- * Formats integer minor units to INR currency string.
- * Example: 1041823 -> "₹10,418.23"
- * @param {number|null|undefined} minorUnits 
+ * Formats integer minor units in the given ISO 4217 currency, using that currency's own
+ * number of decimal places (INR 2, JPY 0, KWD 3).
+ * Example: (1041823, 'INR') -> "₹10,418.23"; (1000, 'JPY') -> "¥1,000"
+ * A missing or unrecognised currency is reported as such, never assumed.
+ * @param {number|null|undefined} minorUnits
+ * @param {string|null|undefined} currency
  */
-export function formatINR(minorUnits) {
-  if (minorUnits === null || minorUnits === undefined || isNaN(minorUnits)) {
-    return '₹0.00';
+export function formatMoney(minorUnits, currency) {
+  if (minorUnits === null || minorUnits === undefined || minorUnits === '' || isNaN(minorUnits)) {
+    return '—';
   }
-  const units = Number(minorUnits) / 100.0;
-  return units.toLocaleString('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  const code = typeof currency === 'string' ? currency.trim().toUpperCase() : '';
+  if (!/^[A-Z]{3}$/.test(code)) {
+    return `${formatCount(minorUnits)} minor units (currency unknown)`;
+  }
+  // Intl formats any well-formed code, inventing two decimals for codes it does not know.
+  if (KNOWN_CURRENCIES && !KNOWN_CURRENCIES.has(code)) {
+    return `${formatCount(minorUnits)} minor units (unsupported currency ${code})`;
+  }
+  let formatter;
+  try {
+    formatter = new Intl.NumberFormat('en-IN', { style: 'currency', currency: code });
+  } catch {
+    return `${formatCount(minorUnits)} minor units (unsupported currency ${code})`;
+  }
+  const exponent = formatter.resolvedOptions().maximumFractionDigits;
+  return formatter.format(Number(minorUnits) / 10 ** exponent);
+}
+
+/**
+ * Formats per-currency totals ([{currency, amount_minor_units}, ...]) side by side.
+ * Amounts in different currencies are never added together.
+ * @param {Array<{currency: string|null, amount_minor_units: number}>|null|undefined} totals
+ * @param {string} emptyLabel
+ */
+export function formatMoneyTotals(totals, emptyLabel = 'None recorded') {
+  if (!Array.isArray(totals) || totals.length === 0) {
+    return emptyLabel;
+  }
+  return totals.map((t) => formatMoney(t.amount_minor_units, t.currency)).join(' · ');
 }
 
 /**
@@ -176,7 +205,7 @@ export function formatCount(count) {
 }
 
 /**
- * Formats an ISO datetime string to a human-readable string.
+ * Formats an ISO datetime string in UTC (labelled as such), whatever the browser's time zone.
  * @param {string|null|undefined} isoString 
  */
 export function formatDateTime(isoString) {
@@ -191,6 +220,7 @@ export function formatDateTime(isoString) {
       minute: '2-digit',
       second: '2-digit',
       hour12: false,
+      timeZone: 'UTC',
     }) + ' UTC';
   } catch {
     return isoString;

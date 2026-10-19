@@ -286,7 +286,7 @@ async def test_dashboard_summary_excludes_paypal_from_both_payment_event_stateme
     executed = await _executed(_dashboard_summary)
     statements = _payment_event_statements(executed)
 
-    assert len(executed) == 5 and len(statements) == 2
+    assert len(executed) == 7 and len(statements) == 2
     auth_sql, count_sql = (_compile(statement)[0] for statement, _ in statements)
     assert "sum(payment_events.amount_minor_units)" in auth_sql
     assert "payment_events.event_type = " in auth_sql
