@@ -3,6 +3,7 @@ import uuid
 
 from src.core.domain.models import PaymentEvent
 from src.core.domain.exceptions import NormalizationError
+from src.core.domain.payment_attempts import paypal_order_id
 from src.core.normalizers.hashing import generate_deterministic_hash  # noqa: F401 (re-exported for existing callers)
 from src.core.parsers.razorpay import RazorpayWebhookEvent
 
@@ -26,6 +27,11 @@ def normalize_razorpay_event(
 
     if not isinstance(payment_entity.amount, int):
         raise NormalizationError(f"Amount must be an integer (minor units), got {type(payment_entity.amount)}")
+
+    # Stage 5-8 records carry no provider column, so a Razorpay payment id inside the PayPal attempt
+    # namespace would be read and written as that PayPal order's attempt by every downstream caller.
+    if paypal_order_id(payment_entity.id) is not None:
+        raise NormalizationError("Razorpay payment id uses the reserved PayPal attempt namespace")
 
     # We do NOT include customer_id per instructions unless Razorpay provides a clean one,
     # which we'll exclude for now to be safe. We only include what is semantically pure.

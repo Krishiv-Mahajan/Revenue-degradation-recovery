@@ -1,14 +1,15 @@
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, or_, and_, case
+from sqlalchemy import select, desc, func, or_, and_, case, literal, union_all
 from datetime import datetime, timedelta
 import uuid
 
 from src.api.dependencies import get_db_session
 from src.api.security import require_dashboard_auth
 from src.core.attribution.attribution_service import classify_model_provenance
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.core.domain.payment_attempts import PAYPAL_ATTEMPT_PREFIX, PAYPAL_TRIGGER_EVENT_TYPE
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.core.intervention.policy import get_default_policy
 from src.infrastructure.models import (
     PaymentEventModel,
@@ -76,22 +77,34 @@ def _latest_decision_ids():
 
 def _payment_currency():
     """
-    Currency of each pipeline payment, from its payment.authorized events (the amount Stage 8 attributes).
-    NULL when the payment has no authorization or its authorizations disagree; never assumed.
+    Currency of each pipeline payment attempt, from the events Stage 8 sizes it by: payment.authorized
+    for Razorpay attempts, order.approved for PayPal attempts (keyed by their PayPal attempt id).
+    NULL when the attempt has no sizing event or its sizing events disagree; never assumed.
     """
+    razorpay_sizing = select(
+        PaymentEventModel.payment_id.label("payment_id"),
+        PaymentEventModel.currency.label("currency"),
+    ).where(
+        PaymentEventModel.event_type == "payment.authorized",
+        PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+    )
+    paypal_sizing = select(
+        (literal(PAYPAL_ATTEMPT_PREFIX) + PaymentEventModel.payment_id).label("payment_id"),
+        PaymentEventModel.currency.label("currency"),
+    ).where(
+        PaymentEventModel.event_type == PAYPAL_TRIGGER_EVENT_TYPE,
+        PaymentEventModel.source_system == PAYPAL_SOURCE_SYSTEM,
+    )
+    sizing = union_all(razorpay_sizing, paypal_sizing).subquery()
     return (
         select(
-            PaymentEventModel.payment_id.label("payment_id"),
+            sizing.c.payment_id,
             case(
-                (func.count(func.distinct(PaymentEventModel.currency)) == 1, func.min(PaymentEventModel.currency)),
+                (func.count(func.distinct(sizing.c.currency)) == 1, func.min(sizing.c.currency)),
                 else_=None,
             ).label("currency"),
         )
-        .where(
-            PaymentEventModel.event_type == "payment.authorized",
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
-        )
-        .group_by(PaymentEventModel.payment_id)
+        .group_by(sizing.c.payment_id)
         .subquery()
     )
 

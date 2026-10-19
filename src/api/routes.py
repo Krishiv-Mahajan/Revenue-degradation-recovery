@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 import logging
 
 from src.api.dependencies import get_ingestion_service, get_paypal_ingestion_service
+from src.core.domain.payment_attempts import resolve_pipeline_attempt
 from src.core.services.ingestion_service import IngestionService
 from src.core.services.paypal_ingestion_service import PayPalIngestionOutcome, PayPalIngestionService
 from src.core.services.live_pipeline import run_live_pipeline
@@ -120,11 +121,13 @@ async def _read_limited_body(request: Request, limit: int) -> bytes:
 @router.post("/webhooks/paypal")
 async def ingest_paypal(
     request: Request,
+    background_tasks: BackgroundTasks,
     paypal_ingestion_service: PayPalIngestionService = Depends(get_paypal_ingestion_service)
 ):
     """
     Receives PayPal webhook events, verifies them with PayPal and persists them.
-    Persistence only: the live recovery pipeline is not triggered for PayPal events.
+    A newly stored event that starts or resolves a PayPal attempt (order approval, capture outcome)
+    is scheduled for pipeline Stages 5-8; duplicates and other event types are persistence only.
     """
     raw_body = await _read_limited_body(request, MAX_PAYPAL_WEBHOOK_BODY_BYTES)
 
@@ -169,6 +172,8 @@ async def ingest_paypal(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
     if result.outcome is PayPalIngestionOutcome.STORED:
+        if resolve_pipeline_attempt(result.payment_event) is not None:
+            background_tasks.add_task(run_live_pipeline, result.payment_event)
         content = {"status": "stored", "event_id": str(result.payment_event.event_id)}
     else:
         content = {"status": result.outcome.value}

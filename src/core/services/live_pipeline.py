@@ -1,9 +1,12 @@
 """
 Stage 1–8 Live Pipeline Adapter.
 
-Connects newly ingested Razorpay PaymentEvents to the existing frozen recovery pipeline.
+Connects newly ingested PaymentEvents to the existing frozen recovery pipeline.
 Reuses canonical services, models, and repositories without altering any validated
 mathematical behavior, thresholds, or domain logic.
+
+Razorpay (and synthetic) events run Stages 2-8 as before. PayPal events run only Stages 5-8, for
+their order-level attempt (see src/core/domain/payment_attempts.py); Stages 2-4 stay Razorpay-only.
 """
 import logging
 from collections import defaultdict
@@ -15,6 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database import AsyncSessionLocal
 from src.core.domain.models import PaymentEvent
+from src.core.domain.payment_attempts import (
+    PipelineRole,
+    in_paypal_attempt_namespace,
+    resolve_pipeline_attempt,
+)
+from src.core.domain.source_systems import PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.models import (
     InterventionCommandModel,
 )
@@ -53,7 +62,7 @@ async def run_live_pipeline(
     session: Optional[AsyncSession] = None,
 ) -> Dict[str, Any]:
     """
-    Executes Stages 2–8 for a newly ingested PaymentEvent.
+    Executes Stages 2–8 for a newly ingested PaymentEvent (Stages 5–8 only for PayPal events).
     If session is not provided, uses an isolated AsyncSessionLocal context.
     Ensures error isolation so pipeline exceptions do not corrupt or rollback
     the already-committed webhook ingestion record.
@@ -71,6 +80,14 @@ async def _execute_live_pipeline(
 ) -> Dict[str, Any]:
     current_stage = "INIT"
     pid = payment_event.payment_id
+    paypal = payment_event.source_system == PAYPAL_SOURCE_SYSTEM
+    attempt = resolve_pipeline_attempt(payment_event)
+    if in_paypal_attempt_namespace(payment_event):
+        logger.warning(
+            f"[LivePipelineAttemptRefused] source_event_id={payment_event.source_event_id} "
+            f"source_system={payment_event.source_system}: payment_id uses the PayPal attempt namespace; "
+            f"Stages 5-8 skipped"
+        )
 
     try:
         # 1. Repositories
@@ -105,88 +122,90 @@ async def _execute_live_pipeline(
         if event_ts.tzinfo is None:
             event_ts = event_ts.replace(tzinfo=timezone.utc)
 
-        # Determine 5-minute tumbling window for Stage 2
-        minute = event_ts.minute
-        window_start_minute = (minute // 5) * 5
-        window_start = event_ts.replace(minute=window_start_minute, second=0, microsecond=0)
-        window_end = window_start + timedelta(minutes=5)
+        # Stages 2-4 are Razorpay-only: PayPal events neither feed nor re-evaluate them.
+        if not paypal:
+            # Determine 5-minute tumbling window for Stage 2
+            minute = event_ts.minute
+            window_start_minute = (minute // 5) * 5
+            window_start = event_ts.replace(minute=window_start_minute, second=0, microsecond=0)
+            window_end = window_start + timedelta(minutes=5)
 
-        # -------------------------------------------------------------------
-        # Stage 2: Payment Health Analytics
-        # -------------------------------------------------------------------
-        current_stage = "STAGE_2_ANALYTICS"
-        await analytics_svc.calculate_and_save_window(window_start, window_end)
+            # -------------------------------------------------------------------
+            # Stage 2: Payment Health Analytics
+            # -------------------------------------------------------------------
+            current_stage = "STAGE_2_ANALYTICS"
+            await analytics_svc.calculate_and_save_window(window_start, window_end)
 
-        # -------------------------------------------------------------------
-        # Stage 3: Degradation Detection
-        # -------------------------------------------------------------------
-        current_stage = "STAGE_3_DEGRADATION"
-        snap_stmt = text(
-            """
-            SELECT snapshot_id, window_start, window_end, segment_dimension, segment_value, 
-                   transaction_count, successful_transaction_count, failed_transaction_count, 
-                   success_rate, failure_rate, total_gmv_minor_units, successful_gmv_minor_units, 
-                   failed_gmv_minor_units, baseline_success_rate, insufficient_volume, calculated_at
-            FROM payment_health_snapshots 
-            WHERE window_start >= :w_start AND window_end <= :w_end
-            """
-        )
-        snap_res = await session.execute(snap_stmt, {"w_start": window_start, "w_end": window_end})
-        snapshots = [
-            PaymentHealthSnapshot(
-                snapshot_id=row.snapshot_id,
-                window_start=row.window_start,
-                window_end=row.window_end,
-                segment_dimension=row.segment_dimension,
-                segment_value=row.segment_value,
-                transaction_count=row.transaction_count,
-                successful_transaction_count=row.successful_transaction_count,
-                failed_transaction_count=row.failed_transaction_count,
-                success_rate=row.success_rate,
-                failure_rate=row.failure_rate,
-                total_gmv_minor_units=row.total_gmv_minor_units,
-                successful_gmv_minor_units=row.successful_gmv_minor_units,
-                failed_gmv_minor_units=row.failed_gmv_minor_units,
-                baseline_success_rate=row.baseline_success_rate,
-                insufficient_volume=row.insufficient_volume,
-                calculated_at=row.calculated_at,
+            # -------------------------------------------------------------------
+            # Stage 3: Degradation Detection
+            # -------------------------------------------------------------------
+            current_stage = "STAGE_3_DEGRADATION"
+            snap_stmt = text(
+                """
+                SELECT snapshot_id, window_start, window_end, segment_dimension, segment_value,
+                       transaction_count, successful_transaction_count, failed_transaction_count,
+                       success_rate, failure_rate, total_gmv_minor_units, successful_gmv_minor_units,
+                       failed_gmv_minor_units, baseline_success_rate, insufficient_volume, calculated_at
+                FROM payment_health_snapshots
+                WHERE window_start >= :w_start AND window_end <= :w_end
+                """
             )
-            for row in snap_res.fetchall()
-        ]
+            snap_res = await session.execute(snap_stmt, {"w_start": window_start, "w_end": window_end})
+            snapshots = [
+                PaymentHealthSnapshot(
+                    snapshot_id=row.snapshot_id,
+                    window_start=row.window_start,
+                    window_end=row.window_end,
+                    segment_dimension=row.segment_dimension,
+                    segment_value=row.segment_value,
+                    transaction_count=row.transaction_count,
+                    successful_transaction_count=row.successful_transaction_count,
+                    failed_transaction_count=row.failed_transaction_count,
+                    success_rate=row.success_rate,
+                    failure_rate=row.failure_rate,
+                    total_gmv_minor_units=row.total_gmv_minor_units,
+                    successful_gmv_minor_units=row.successful_gmv_minor_units,
+                    failed_gmv_minor_units=row.failed_gmv_minor_units,
+                    baseline_success_rate=row.baseline_success_rate,
+                    insufficient_volume=row.insufficient_volume,
+                    calculated_at=row.calculated_at,
+                )
+                for row in snap_res.fetchall()
+            ]
 
-        by_segment: Dict[Tuple[str, str], List[PaymentHealthSnapshot]] = defaultdict(list)
-        for s in snapshots:
-            by_segment[(s.segment_dimension, s.segment_value)].append(s)
-        for seg_snapshots in by_segment.values():
-            await degradation_svc.process_snapshots(seg_snapshots, evaluation_timestamp=event_ts)
+            by_segment: Dict[Tuple[str, str], List[PaymentHealthSnapshot]] = defaultdict(list)
+            for s in snapshots:
+                by_segment[(s.segment_dimension, s.segment_value)].append(s)
+            for seg_snapshots in by_segment.values():
+                await degradation_svc.process_snapshots(seg_snapshots, evaluation_timestamp=event_ts)
 
-        # -------------------------------------------------------------------
-        # Stage 4: Root Cause Analysis (RCA)
-        # -------------------------------------------------------------------
-        current_stage = "STAGE_4_RCA"
-        ep_stmt = text(
-            """
-            SELECT episode_id, segment_dimension, segment_value, started_at_window, ended_at_window, status, peak_absolute_drop, affected_window_count, severity
-            FROM degradation_episodes
-            WHERE status = 'ACTIVE'
-            """
-        )
-        ep_res = await session.execute(ep_stmt)
-        for row in ep_res.fetchall():
-            ep = DegradationEpisode(
-                episode_id=row.episode_id,
-                segment_dimension=row.segment_dimension,
-                segment_value=row.segment_value,
-                started_at_window=row.started_at_window,
-                ended_at_window=row.ended_at_window,
-                status=EpisodeStatus(row.status),
-                peak_absolute_drop=row.peak_absolute_drop,
-                affected_window_count=row.affected_window_count,
-                severity=Severity(row.severity),
+            # -------------------------------------------------------------------
+            # Stage 4: Root Cause Analysis (RCA)
+            # -------------------------------------------------------------------
+            current_stage = "STAGE_4_RCA"
+            ep_stmt = text(
+                """
+                SELECT episode_id, segment_dimension, segment_value, started_at_window, ended_at_window, status, peak_absolute_drop, affected_window_count, severity
+                FROM degradation_episodes
+                WHERE status = 'ACTIVE'
+                """
             )
-            await rca_svc.evaluate_episode(ep)
+            ep_res = await session.execute(ep_stmt)
+            for row in ep_res.fetchall():
+                ep = DegradationEpisode(
+                    episode_id=row.episode_id,
+                    segment_dimension=row.segment_dimension,
+                    segment_value=row.segment_value,
+                    started_at_window=row.started_at_window,
+                    ended_at_window=row.ended_at_window,
+                    status=EpisodeStatus(row.status),
+                    peak_absolute_drop=row.peak_absolute_drop,
+                    affected_window_count=row.affected_window_count,
+                    severity=Severity(row.severity),
+                )
+                await rca_svc.evaluate_episode(ep)
 
-        await session.commit()
+            await session.commit()
 
         # -------------------------------------------------------------------
         # Stages 5–8: Failure Prediction, Decision, Execution, Attribution
@@ -201,15 +220,15 @@ async def _execute_live_pipeline(
         observation = None
         attribution = None
 
-        if payment_event.event_type == "payment.authorized":
+        if attempt is not None and attempt.role is PipelineRole.TRIGGER:
             # Stage 5: Failure Prediction
             current_stage = "STAGE_5_PREDICTION"
-            prediction = await pred_svc.orchestrate_prediction(pid, T=t_eval)
+            prediction = await pred_svc.orchestrate_prediction(attempt.payment_attempt_id, T=t_eval)
 
             # Stage 6: Intervention Decisioning
             current_stage = "STAGE_6_DECISION"
             if prediction.failure_probability is not None and prediction.failure_probability > 0.5:
-                decision = await inter_decision_svc.decide(pid, t_decide=t_eval)
+                decision = await inter_decision_svc.decide(attempt.payment_attempt_id, t_decide=t_eval)
 
                 if decision.decision_type.value == "ACT":
                     # Stage 7A: Execution Command Creation & Dispatch (Claim immediately at t_eval)
@@ -220,10 +239,10 @@ async def _execute_live_pipeline(
                     # Note: Stage 7B observation and Stage 8 attribution are NOT performed here.
                     # An authorized payment is still in flight and must not be prematurely observed/attributed.
 
-        elif payment_event.event_type in ("payment.captured", "payment.failed"):
+        elif attempt is not None and attempt.role is PipelineRole.TERMINAL:
             # Terminal event: observe outcome & attribute using authoritative terminal boundary
             cmd_stmt = select(InterventionCommandModel).where(
-                InterventionCommandModel.payment_attempt_id == pid
+                InterventionCommandModel.payment_attempt_id == attempt.payment_attempt_id
             )
             cmd_res = await session.execute(cmd_stmt)
             existing_commands = cmd_res.scalars().all()
@@ -246,6 +265,7 @@ async def _execute_live_pipeline(
         logger.info(
             f"[LivePipelineSuccess] source_event_id={payment_event.source_event_id} "
             f"payment_id={pid} event_type={payment_event.event_type} "
+            f"attempt={attempt.payment_attempt_id if attempt else None} "
             f"pred={prediction.failure_probability if prediction else None} "
             f"act={decision.decision_type.value if decision else None} "
             f"cmd={command.command_id if command else None}"
@@ -253,6 +273,7 @@ async def _execute_live_pipeline(
         return {
             "status": "success",
             "payment_id": pid,
+            "payment_attempt_id": attempt.payment_attempt_id if attempt else None,
             "prediction": prediction,
             "decision": decision,
             "command": command,

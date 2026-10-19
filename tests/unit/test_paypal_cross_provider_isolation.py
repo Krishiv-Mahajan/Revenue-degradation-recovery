@@ -16,11 +16,14 @@ Fixtures:
     source_system. They are NOT realistic Razorpay events; they isolate the source_system
     predicate from every other column.
 
-Guarantees: Stage 5 eligibility, labels and the live prediction trigger, Stage 6 sizing, the
-Stage 6/7 terminal-event lookups, the Stage 8 amount lookup and the Razorpay-only dashboard
-(summary metrics and payment timeline) do not use PayPal rows, even when payment_id overlaps.
+Guarantees: for Razorpay attempts, Stage 5 eligibility, labels and the live prediction trigger,
+Stage 6 sizing, the Stage 6/7 terminal-event lookups, the Stage 8 amount lookup and the
+Razorpay-only dashboard (summary metrics and payment timeline) do not use PayPal rows, even when
+payment_id overlaps. PayPal attempts (namespaced attempt ids, see payment_attempts.py) start only at
+order.approved, read only their own order's PayPal rows, and never run Stages 2-4.
 """
 import json
+import logging
 import operator
 import re
 from collections import Counter
@@ -35,6 +38,7 @@ from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import BinaryExpression, BindParameter, BooleanClauseList, TextClause
 
 from src.api.inspection_routes import get_executive_summary, get_payment_timeline
+from src.core.domain.payment_attempts import paypal_attempt_id
 from src.core.normalizers.paypal import normalize_paypal_event
 from src.core.normalizers.razorpay import normalize_razorpay_event
 from src.core.parsers.paypal import parse_paypal_event
@@ -45,13 +49,14 @@ from src.infrastructure.attribution_repository import AttributionRepository
 from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
-from src.infrastructure.models import InterventionDecisionModel, PaymentEventModel
+from src.infrastructure.models import InterventionCommandModel, InterventionDecisionModel, PaymentEventModel
 from tests.unit import paypal_event_samples as samples
 
 T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
 BEFORE_T = T - timedelta(minutes=1)
 AFTER_T = T + timedelta(minutes=5)
 RAZORPAY_ATTEMPT_ID = "pay_P1cOverlap00001"
+PAYPAL_ATTEMPT_ID = paypal_attempt_id(samples.ORDER_ID)
 RAZORPAY_CREATED_AT = int((T - timedelta(minutes=2)).timestamp())
 
 # (PayPal sample, matching Razorpay webhook event, Razorpay payment status)
@@ -434,8 +439,11 @@ def _stub_live_pipeline_services(monkeypatch):
     return session, prediction_service
 
 
-@pytest.mark.parametrize("event_type", list(samples.ALL_SUPPORTED))
-async def test_live_prediction_trigger_is_not_entered_by_real_paypal_events(event_type, monkeypatch):
+NON_TRIGGER_PAYPAL_EVENT_TYPES = [t for t in samples.ALL_SUPPORTED if t != "CHECKOUT.ORDER.APPROVED"]
+
+
+@pytest.mark.parametrize("event_type", NON_TRIGGER_PAYPAL_EVENT_TYPES)
+async def test_live_prediction_trigger_is_not_entered_by_other_paypal_events(event_type, monkeypatch):
     session, prediction_service = _stub_live_pipeline_services(monkeypatch)
     event = _paypal_event(samples.ALL_SUPPORTED[event_type])
 
@@ -444,6 +452,71 @@ async def test_live_prediction_trigger_is_not_entered_by_real_paypal_events(even
     assert outcome["status"] == "success"
     assert outcome["prediction"] is None
     prediction_service.orchestrate_prediction.assert_not_awaited()
+
+
+def _assert_stages_2_to_4_skipped():
+    live_pipeline.PaymentHealthAnalyticsService.return_value.calculate_and_save_window.assert_not_awaited()
+    live_pipeline.DegradationService.return_value.process_snapshots.assert_not_awaited()
+    live_pipeline.RCAService.return_value.evaluate_episode.assert_not_awaited()
+
+
+async def test_paypal_order_approval_enters_prediction_as_its_own_paypal_attempt(monkeypatch):
+    session, prediction_service = _stub_live_pipeline_services(monkeypatch)
+    event = _paypal_event(samples.order_approved)
+
+    outcome = await live_pipeline.run_live_pipeline(event, session=session)
+
+    assert outcome["status"] == "success"
+    assert outcome["payment_attempt_id"] == PAYPAL_ATTEMPT_ID
+    prediction_service.orchestrate_prediction.assert_awaited_once()
+    assert prediction_service.orchestrate_prediction.await_args.args == (PAYPAL_ATTEMPT_ID,)
+    _assert_stages_2_to_4_skipped()
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("builder", TERMINAL_BUILDERS)
+async def test_paypal_capture_outcomes_look_up_commands_of_their_order_attempt_only(builder, monkeypatch):
+    session, prediction_service = _stub_live_pipeline_services(monkeypatch)
+
+    outcome = await live_pipeline.run_live_pipeline(_paypal_event(builder), session=session)
+
+    assert outcome["status"] == "success"
+    assert outcome["payment_attempt_id"] == PAYPAL_ATTEMPT_ID
+    prediction_service.orchestrate_prediction.assert_not_awaited()
+    _assert_stages_2_to_4_skipped()
+    [call] = session.execute.await_args_list
+    command_lookup = call.args[0]
+    assert command_lookup.get_final_froms() == [InterventionCommandModel.__table__]
+    assert list(command_lookup.compile().params.values()) == [PAYPAL_ATTEMPT_ID]
+
+
+@pytest.mark.parametrize("event, status", [("payment.authorized", "authorized"), ("payment.captured", "captured")])
+async def test_razorpay_payment_id_in_the_paypal_namespace_runs_no_stage_5_to_8(event, status, monkeypatch, caplog):
+    session, prediction_service = _stub_live_pipeline_services(monkeypatch)
+    # Ingestion rejects such ids; this is a row written directly, bypassing the normalizer.
+    lookalike = _razorpay_event(event, status).model_copy(update={"payment_id": PAYPAL_ATTEMPT_ID})
+    caplog.set_level(logging.WARNING, logger="live_pipeline")
+
+    outcome = await live_pipeline.run_live_pipeline(lookalike, session=session)
+
+    assert (outcome["status"], outcome["payment_attempt_id"]) == ("success", None)
+    prediction_service.orchestrate_prediction.assert_not_awaited()
+    # Stages 2-4 still run for the Razorpay event; no Stage 7 command lookup happens.
+    live_pipeline.PaymentHealthAnalyticsService.return_value.calculate_and_save_window.assert_awaited_once()
+    for call in session.execute.await_args_list:
+        assert InterventionCommandModel.__table__ not in getattr(call.args[0], "get_final_froms", list)()
+    assert any(r.getMessage().startswith("[LivePipelineAttemptRefused]") for r in caplog.records)
+
+
+async def test_paypal_capture_without_a_related_order_runs_no_stage(monkeypatch):
+    session, prediction_service = _stub_live_pipeline_services(monkeypatch)
+    event = _paypal_event(samples.capture_completed).model_copy(update={"order_id": None})
+
+    outcome = await live_pipeline.run_live_pipeline(event, session=session)
+
+    assert (outcome["status"], outcome["payment_attempt_id"]) == ("success", None)
+    prediction_service.orchestrate_prediction.assert_not_awaited()
+    session.execute.assert_not_awaited()
 
 
 async def test_live_prediction_trigger_is_entered_by_a_real_razorpay_authorization(monkeypatch):
@@ -457,18 +530,18 @@ async def test_live_prediction_trigger_is_entered_by_a_real_razorpay_authorizati
     assert prediction_service.orchestrate_prediction.await_args.args == (RAZORPAY_ATTEMPT_ID,)
 
 
-async def test_live_prediction_trigger_checks_event_type_not_provider(monkeypatch):
-    # Characterization: the trigger is `event_type == "payment.authorized"` with no provider check.
-    # PayPal stays out only because its normalizer never emits payment.authorized and the PayPal
-    # webhook route never calls run_live_pipeline. This synthetic row is not a real PayPal event.
+async def test_live_prediction_trigger_checks_the_provider_as_well_as_the_event_type(monkeypatch):
+    # A PayPal row can never take the Razorpay trigger: PayPal attempts start only at order.approved.
+    # This synthetic row is not a real PayPal event; the PayPal normalizer never emits payment.authorized.
     session, prediction_service = _stub_live_pipeline_services(monkeypatch)
     synthetic = _paypal_event(samples.order_approved).model_copy(update={"event_type": "payment.authorized"})
     assert synthetic.source_system == "paypal"
 
     outcome = await live_pipeline.run_live_pipeline(synthetic, session=session)
 
-    assert outcome["status"] == "success"
-    prediction_service.orchestrate_prediction.assert_awaited_once()
+    assert (outcome["status"], outcome["payment_attempt_id"]) == ("success", None)
+    prediction_service.orchestrate_prediction.assert_not_awaited()
+    _assert_stages_2_to_4_skipped()
 
 
 # --- guarantees: Stage 6 sizing and Stage 8 amount lookup ---------------------------------------
@@ -562,6 +635,106 @@ async def test_paypal_terminal_events_do_not_create_razorpay_outcome_conflicts()
 
     assert selected == [razorpay_capture]
     assert {row["event_type"] for row in selected} == {"payment.captured"}
+
+
+# --- guarantees: PayPal attempts read only their own order's PayPal rows --------------------------
+
+PAYPAL_TERMINAL_QUERIES = {
+    "stage5.is_eligible_for_prediction": lambda s: FailurePredictionService(
+        s, MagicMock(), MagicMock(), MagicMock()
+    ).is_eligible_for_prediction(PAYPAL_ATTEMPT_ID, T),
+    "stage6.check_terminal_event_exists": lambda s: InterventionRepository(s).check_terminal_event_exists(
+        PAYPAL_ATTEMPT_ID, T
+    ),
+    "stage7.check_terminal_event_exists_before": lambda s: ExecutionRepository(s).check_terminal_event_exists_before(
+        PAYPAL_ATTEMPT_ID, T
+    ),
+    "stage7.get_canonical_terminal_events": lambda s: ExecutionRepository(s).get_canonical_terminal_events(
+        PAYPAL_ATTEMPT_ID, T
+    ),
+}
+PAYPAL_SIZING_QUERIES = {
+    "stage5_6.get_payment_event_by_id": lambda s: FeatureReconstructionRepository(s).get_payment_event_by_id(
+        PAYPAL_ATTEMPT_ID, T
+    ),
+    "stage8.get_canonical_payment_amount": lambda s: AttributionRepository(s).get_canonical_payment_amount(
+        PAYPAL_ATTEMPT_ID, T
+    ),
+}
+
+
+def _razorpay_row_with_ids(event, status, payment_id, order_id):
+    return {**_razorpay_row(event, status), "payment_id": payment_id, "order_id": order_id}
+
+
+@pytest.mark.parametrize("query", list(PAYPAL_TERMINAL_QUERIES.values()), ids=list(PAYPAL_TERMINAL_QUERIES))
+@pytest.mark.parametrize("builder, razorpay_event, razorpay_status", TERMINAL_PAIRS)
+async def test_paypal_attempt_terminal_lookups_match_only_their_orders_paypal_captures(
+    query, builder, razorpay_event, razorpay_status,
+):
+    executed = await _executed(query)
+    capture = _paypal_row(builder, payment_id=None)
+    assert (capture["payment_id"], capture["order_id"]) == (samples.CAPTURE_ID, samples.ORDER_ID)
+
+    assert _matches(executed, capture)
+    assert not _matches(executed, {**capture, "order_id": "OTHERORDER0000001"})
+    assert not _matches(executed, {**capture, "order_id": None})
+    assert not _matches(executed, _synthetic_source_swap(capture))
+    for payment_id, order_id in (
+        (samples.ORDER_ID, samples.ORDER_ID), (samples.CAPTURE_ID, samples.ORDER_ID),
+        (PAYPAL_ATTEMPT_ID, samples.ORDER_ID), (PAYPAL_ATTEMPT_ID, PAYPAL_ATTEMPT_ID),
+    ):
+        assert not _matches(executed, _razorpay_row_with_ids(razorpay_event, razorpay_status, payment_id, order_id))
+
+
+@pytest.mark.parametrize("query", list(PAYPAL_TERMINAL_QUERIES.values()), ids=list(PAYPAL_TERMINAL_QUERIES))
+@pytest.mark.parametrize("builder", NON_TERMINAL_BUILDERS)
+async def test_paypal_attempt_terminal_lookups_ignore_non_terminal_paypal_events(query, builder):
+    executed = await _executed(query)
+    assert not _matches(executed, {**_paypal_row(builder, payment_id=None), "order_id": samples.ORDER_ID})
+
+
+@pytest.mark.parametrize("query", list(PAYPAL_SIZING_QUERIES.values()), ids=list(PAYPAL_SIZING_QUERIES))
+async def test_paypal_attempt_sizing_uses_only_its_orders_approval(query):
+    executed = await _executed(query)
+    approval = _paypal_row(samples.order_approved, payment_id=None)
+    assert approval["payment_id"] == samples.ORDER_ID
+
+    assert _matches(executed, approval)
+    assert not _matches(executed, {**approval, "payment_id": "OTHERORDER0000001"})
+    assert not _matches(executed, _synthetic_source_swap(approval))
+    for builder in (*TERMINAL_BUILDERS, samples.capture_pending, samples.capture_refunded, samples.order_completed):
+        assert not _matches(executed, _paypal_row(builder, payment_id=samples.ORDER_ID))
+    for payment_id in (samples.ORDER_ID, PAYPAL_ATTEMPT_ID):
+        assert not _matches(
+            executed, _razorpay_row_with_ids("payment.authorized", "authorized", payment_id, samples.ORDER_ID)
+        )
+
+
+async def _executed_failure_rate(dimension, value, **scope):
+    async def query(session):
+        await FeatureReconstructionRepository(session).get_historical_failure_rate(dimension, value, T, 30, **scope)
+    return await _executed(query)
+
+
+@pytest.mark.parametrize("dimension, value", [(PaymentEventModel.source_system, "paypal"), (PaymentEventModel.currency, "USD")])
+async def test_paypal_scoped_failure_rates_count_only_paypal_terminal_events(dimension, value):
+    executed = await _executed_failure_rate(dimension, value, paypal=True)
+    capture = {**_paypal_row(samples.capture_declined, payment_id=None), "timestamp": BEFORE_T}
+
+    assert _matches(executed, capture)
+    assert not _matches(executed, {**_synthetic_source_swap(capture), "source_system": "synthetic"})
+    if dimension is PaymentEventModel.currency:
+        # A Razorpay or synthetic USD payment never feeds a PayPal attempt's currency rate.
+        assert not _matches(executed, _synthetic_source_swap(capture))
+
+
+async def test_default_failure_rates_still_exclude_paypal_terminal_events():
+    executed = await _executed_failure_rate(PaymentEventModel.currency, "USD")
+    capture = {**_paypal_row(samples.capture_declined, payment_id=None), "timestamp": BEFORE_T}
+
+    assert not _matches(executed, capture)
+    assert _matches(executed, _synthetic_source_swap(capture))
 
 
 # --- guarantees: Razorpay-only dashboard ---------------------------------------------------------

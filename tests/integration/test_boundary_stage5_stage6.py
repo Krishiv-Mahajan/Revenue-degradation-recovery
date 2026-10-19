@@ -1,3 +1,4 @@
+import dataclasses
 import pytest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -177,11 +178,12 @@ async def test_stage5_stage6_boundary_currency_episode(session: AsyncSession, fe
         }
     )
     
+    # The payment is USD; the default policy's route costs are INR and are never scored against it.
     intervention_service = InterventionDecisionService(
         session=session,
         intervention_repository=MockInterventionRepository({payment_id: stage5_pred}),
         feature_reconstruction_repository=feature_repo,
-        policy=get_default_policy()
+        policy=dataclasses.replace(get_default_policy(), policy_id="test-usd-cost-policy", cost_currency="USD"),
     )
     
     # 2. Verify Stage 6 resolves exactly the SAME episode (CURRENCY)

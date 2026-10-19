@@ -44,6 +44,27 @@ def evaluate_amount_and_currency(amount_minor_units: int, currency: str) -> Gate
     return GateEvaluationResult(passed=True, verdict=GateVerdict.PASSED, details={})
 
 
+def evaluate_policy_cost_currency(policy: InterventionPolicy, currency: str) -> GateEvaluationResult:
+    """
+    Gate 6: Route costs and the minimum policy utility are minor units of policy.cost_currency, so
+    they can only be weighed against payment amounts in that currency. No exchange rate is assumed:
+    any other currency disables cost-based route scoring.
+    """
+    if currency != policy.cost_currency:
+        return GateEvaluationResult(
+            passed=False,
+            verdict=GateVerdict.FAILED_UNSUPPORTED_COST_CURRENCY,
+            details={
+                "currency": currency,
+                "policy_cost_currency": policy.cost_currency,
+                "reason": f"Policy route costs are defined in {policy.cost_currency}; none exist for {currency}",
+            },
+        )
+    return GateEvaluationResult(
+        passed=True, verdict=GateVerdict.PASSED, details={"policy_cost_currency": policy.cost_currency}
+    )
+
+
 def evaluate_pre_terminal_invariance(terminal_event_exists: bool) -> GateEvaluationResult:
     """
     Gate 3: Pre-terminal state invariance.

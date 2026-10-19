@@ -20,8 +20,10 @@ from src.core.domain.intervention_models import (
     InterventionDecision,
     InterventionRouteKey,
 )
+from src.core.domain.payment_attempts import paypal_order_id
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import InterventionDecisionModel, PaymentEventModel
+from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
 
 # Fixed global lock key pair for atomic Stage 6 ACT admission
 GLOBAL_RATE_LIMIT_LOCK_K1 = 0x54673641  # 'St6A'
@@ -132,7 +134,15 @@ class InterventionRepository:
     async def check_terminal_event_exists(self, payment_id: str, t_decide: datetime) -> bool:
         """
         Checks if a terminal event (payment.captured, payment.failed) was ingested before t_decide.
+        A PayPal attempt's terminal events are its order's PayPal capture outcomes.
         """
+        order_id = paypal_order_id(payment_id)
+        if order_id is not None:
+            paypal_stmt = select(func.count(PaymentEventModel.event_id)).where(
+                *paypal_terminal_events(order_id), PaymentEventModel.ingested_at < t_decide
+            )
+            return bool((await self.session.execute(paypal_stmt)).scalar())
+
         stmt = text("""
             SELECT EXISTS (
                 SELECT 1

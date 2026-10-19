@@ -25,6 +25,7 @@ from src.core.domain.execution_models import (
     PaymentOutcomeObservation,
 )
 from src.core.domain.intervention_models import InterventionRouteKey
+from src.core.domain.payment_attempts import paypal_order_id
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     InterventionCommandModel,
@@ -32,6 +33,7 @@ from src.infrastructure.models import (
     PaymentEventModel,
     PaymentOutcomeObservationModel,
 )
+from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
 
 
 class ExecutionRepository:
@@ -238,7 +240,15 @@ class ExecutionRepository:
         """
         Check if a terminal event (payment.captured or payment.failed)
         was ingested strictly before or at as_of timestamp.
+        A PayPal attempt's terminal events are its order's PayPal capture outcomes.
         """
+        order_id = paypal_order_id(payment_attempt_id)
+        if order_id is not None:
+            paypal_stmt = select(func.count(PaymentEventModel.event_id)).where(
+                *paypal_terminal_events(order_id), PaymentEventModel.ingested_at <= as_of
+            )
+            return bool((await self.session.execute(paypal_stmt)).scalar())
+
         stmt = text("""
             SELECT EXISTS (
                 SELECT 1
@@ -261,16 +271,22 @@ class ExecutionRepository:
     ) -> List[PaymentEventModel]:
         """
         Retrieve all canonical terminal payment events ingested as-of as_of timestamp,
-        ordered by ingested_at ASC.
+        ordered by ingested_at ASC. For a PayPal attempt these are its order's PayPal capture
+        outcomes, correlated by order_id.
         """
-        stmt = (
-            select(PaymentEventModel)
-            .where(
+        order_id = paypal_order_id(payment_attempt_id)
+        if order_id is not None:
+            conditions = (*paypal_terminal_events(order_id), PaymentEventModel.ingested_at <= as_of)
+        else:
+            conditions = (
                 PaymentEventModel.payment_id == payment_attempt_id,
                 PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
                 PaymentEventModel.ingested_at <= as_of,
                 PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
             )
+        stmt = (
+            select(PaymentEventModel)
+            .where(*conditions)
             .order_by(PaymentEventModel.ingested_at.asc())
         )
         result = await self.session.execute(stmt)

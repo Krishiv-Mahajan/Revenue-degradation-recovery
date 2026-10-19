@@ -32,6 +32,8 @@ class RoutePolicyDefinition:
 class InterventionPolicy:
     """
     Versioned decision policy configuration.
+    Route costs and min_policy_utility_threshold are minor units of cost_currency; they are only ever
+    compared with payment amounts in that currency (no exchange rates).
     """
     policy_id: str
     policy_version: str
@@ -41,6 +43,7 @@ class InterventionPolicy:
     min_policy_utility_threshold: Decimal
     global_rate_limit_per_minute: int
     routes: Dict[InterventionRouteKey, RoutePolicyDefinition]
+    cost_currency: str = "INR"
 
 
 def get_default_policy() -> InterventionPolicy:
@@ -49,7 +52,8 @@ def get_default_policy() -> InterventionPolicy:
     Explicit policy assumptions:
     - ACT risk threshold: 0.70
     - MONITOR risk threshold: 0.35
-    - Min policy utility: 50 minor units (0.50 INR equivalent)
+    - Min policy utility: 50 minor units (0.50 INR)
+    - Route costs: INR minor units, so routes are only scored for INR payments
     - Global rate limit: 100 ACT decisions per minute
     """
     routes: Dict[InterventionRouteKey, RoutePolicyDefinition] = {
@@ -114,4 +118,5 @@ def get_default_policy() -> InterventionPolicy:
         min_policy_utility_threshold=Decimal("50"),
         global_rate_limit_per_minute=100,
         routes=routes,
+        cost_currency="INR",
     )

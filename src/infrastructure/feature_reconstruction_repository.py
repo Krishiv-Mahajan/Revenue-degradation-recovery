@@ -4,7 +4,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, and_, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.core.domain.payment_attempts import paypal_order_id
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
+from src.infrastructure.paypal_attempt_queries import paypal_trigger_events
 from src.infrastructure.models import (
     PaymentEventModel, 
     EpisodeStateHistoryModel, 
@@ -21,7 +23,19 @@ class FeatureReconstructionRepository:
         Get the triggering payment.authorized event, ensuring it was ingested before T.
         Actually T IS the ingested_at of the payment.authorized event, so we look for exactly that event.
         But for safety, we just fetch the payment.authorized event for payment_id where ingested_at <= T.
+        For a PayPal attempt id the trigger is instead the order's latest order.approved event <= T.
         """
+        order_id = paypal_order_id(payment_id)
+        if order_id is not None:
+            stmt = (
+                select(PaymentEventModel)
+                .where(*paypal_trigger_events(order_id), PaymentEventModel.ingested_at <= t)
+                .order_by(PaymentEventModel.ingested_at.desc())
+                .limit(1)
+            )
+            result = await self.session.execute(stmt)
+            return result.scalar_one_or_none()
+
         stmt = (
             select(PaymentEventModel)
             .where(
@@ -38,10 +52,18 @@ class FeatureReconstructionRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
         
-    async def get_historical_failure_rate(self, dimension_col, dimension_value: str, t: datetime, window_minutes: int) -> Tuple[int, int]:
+    async def get_historical_failure_rate(
+        self, dimension_col, dimension_value: str, t: datetime, window_minutes: int, paypal: bool = False
+    ) -> Tuple[int, int]:
         """
         Returns (transaction_count, failure_count) for the given dimension and window, strictly before T.
+        With paypal=True only PayPal terminal events count (PayPal attempts); otherwise PayPal is excluded.
         """
+        provider_scope = (
+            PaymentEventModel.source_system == PAYPAL_SOURCE_SYSTEM
+            if paypal
+            else PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
+        )
         window_start = t - timedelta(minutes=window_minutes)
         
         # We need to count the terminal events (captured and failed)
@@ -68,7 +90,7 @@ class FeatureReconstructionRepository:
                     PaymentEventModel.timestamp >= window_start,
                     PaymentEventModel.timestamp < t,
                     PaymentEventModel.event_type.in_(['payment.captured', 'payment.failed']),
-                    PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
+                    provider_scope
                 )
             )
         )
@@ -166,7 +188,11 @@ class FeatureReconstructionRepository:
         """
         Deterministically resolves the most severe active episode applicable to the payment.
         Prioritizes by canonical severity, then older start window, then UUID.
+        PayPal events get none: Stages 2-4 are Razorpay-only, so their episodes say nothing about PayPal.
         """
+        if auth_event.source_system == PAYPAL_SOURCE_SYSTEM:
+            return None
+
         candidates = []
         
         ep_global = await self.get_active_episode_context("GLOBAL", "ALL", t)

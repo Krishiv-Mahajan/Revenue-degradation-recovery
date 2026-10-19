@@ -15,7 +15,9 @@ from src.core.domain.attribution_models import (
     CounterfactualAttribution,
     TreatmentStatus,
 )
+from src.core.domain.payment_attempts import paypal_order_id
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.infrastructure.paypal_attempt_queries import paypal_trigger_events
 from src.infrastructure.models import (
     CounterfactualAttributionModel,
     FailurePredictionModel,
@@ -200,16 +202,22 @@ class AttributionRepository:
         Fetch canonical payment amount in minor units from Stage 1 payment_events table <= as_of_timestamp.
         The amount is taken from the latest payment.authorized event at or before the cutoff,
         matching how Stage 6 sizes interventions, so refund, capture and order amounts can
-        never be attributed.
+        never be attributed. A PayPal attempt is sized, as in Stage 6, by its order's latest
+        order.approved event at or before the cutoff.
         """
-        stmt = (
-            select(PaymentEventModel.amount_minor_units)
-            .where(
+        order_id = paypal_order_id(payment_attempt_id)
+        if order_id is not None:
+            conditions = (*paypal_trigger_events(order_id), PaymentEventModel.ingested_at <= as_of_timestamp)
+        else:
+            conditions = (
                 PaymentEventModel.payment_id == payment_attempt_id,
                 PaymentEventModel.event_type == "payment.authorized",
                 PaymentEventModel.ingested_at <= as_of_timestamp,
                 PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
             )
+        stmt = (
+            select(PaymentEventModel.amount_minor_units)
+            .where(*conditions)
             .order_by(PaymentEventModel.ingested_at.desc())
             .limit(1)
         )

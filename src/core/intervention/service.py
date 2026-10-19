@@ -4,7 +4,7 @@ Stage 6 — Intervention Decisioning Service.
 Orchestrates deterministic decisioning:
 1. Gathers upstream Stage 1, 3, 4, 5 inputs strictly as-of T_decide
 2. Evaluates hard safety gates (kill switch, invariance, prediction validity, etc.)
-3. Generates and filters permitted candidate routes
+3. Generates and filters permitted candidate routes (only for payments in the policy's cost currency)
 4. Computes deterministic policy utility (Decimal/minor units) and ranks candidates
 5. Decides among NO_ACTION, MONITOR, and ACT
 6. Atomically checks global rate limit under a global lock if ACT
@@ -37,6 +37,7 @@ from src.core.intervention.gates import (
     evaluate_amount_and_currency,
     evaluate_episode_and_traffic_shift,
     evaluate_kill_switch,
+    evaluate_policy_cost_currency,
     evaluate_pre_terminal_invariance,
     evaluate_route_eligibility,
     evaluate_stage5_prediction_validity,
@@ -212,7 +213,27 @@ class InterventionDecisionService:
         failure_prob = stage5_pred.failure_probability if (stage5_pred and stage5_pred.failure_probability is not None) else 0.0
         candidate_scores: List[CandidateRouteScore] = []
 
+        # Gate 6: route costs are minor units of the policy's cost currency; never weigh them
+        # against another currency. Risk-only MONITOR / NO_ACTION verdicts need no costs.
+        g6 = evaluate_policy_cost_currency(self.policy, currency)
+        audit_gates["policy_cost_currency"] = {"passed": g6.passed, "details": g6.details}
+
         for route_key, route_def in self.policy.routes.items():
+            if not g6.passed:
+                candidate_scores.append(
+                    CandidateRouteScore(
+                        route_key=route_key,
+                        is_eligible=False,
+                        eligibility_reason=g6.details["reason"],
+                        expected_recovery_benefit=0,
+                        policy_cost_minor_units=route_def.policy_cost_minor_units,
+                        policy_utility=0,
+                        route_alignment_score=0.0,
+                        rank=0,
+                    )
+                )
+                continue
+
             is_on_cooldown = await self.intervention_repo.has_recent_route_decision(
                 payment_attempt_id,
                 route_key.value,
@@ -287,7 +308,7 @@ class InterventionDecisionService:
             # If high risk but no routes eligible
             return await self._persist_no_action(
                 payment_attempt_id, t_decide, stage5_pred, fingerprint,
-                GateVerdict.FAILED_NO_ELIGIBLE_ROUTES, audit_gates,
+                GateVerdict.FAILED_NO_ELIGIBLE_ROUTES if g6.passed else g6.verdict, audit_gates,
                 {"candidates": audit_candidates}, rca_evidence_strength
             )
 
@@ -360,6 +381,7 @@ class InterventionDecisionService:
                 "act_risk_threshold": self.policy.act_risk_threshold,
                 "monitor_risk_threshold": self.policy.monitor_risk_threshold,
                 "min_policy_utility_threshold_minor_units": int(self.policy.min_policy_utility_threshold),
+                "cost_currency": self.policy.cost_currency,
                 "global_rate_limit_per_minute": self.policy.global_rate_limit_per_minute,
             },
         }
@@ -409,6 +431,7 @@ class InterventionDecisionService:
             "policy": {
                 "policy_id": self.policy.policy_id,
                 "policy_version": self.policy.policy_version,
+                "cost_currency": self.policy.cost_currency,
             },
         }
 

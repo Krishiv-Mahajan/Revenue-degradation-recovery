@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Optional
+from src.core.domain.payment_attempts import paypal_order_id
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.core.domain.failure_prediction_features import FeatureSnapshot
 from src.infrastructure.models import PaymentEventModel
@@ -25,22 +26,25 @@ class FeatureReconstructionService:
         auth_event = await self.repository.get_payment_event_by_id(payment_id, t)
         if not auth_event:
             return None
-            
+
+        # PayPal attempts learn only from PayPal history; every other attempt never sees PayPal rows.
+        paypal = paypal_order_id(payment_id) is not None
+
         # 1. Behavioral features
-        global_30m = await self._calculate_rate(PaymentEventModel.source_system, auth_event.source_system, t, 30, 'global')
-        global_24h = await self._calculate_rate(PaymentEventModel.source_system, auth_event.source_system, t, 24 * 60, 'global')
+        global_30m = await self._calculate_rate(PaymentEventModel.source_system, auth_event.source_system, t, 30, 'global', paypal)
+        global_24h = await self._calculate_rate(PaymentEventModel.source_system, auth_event.source_system, t, 24 * 60, 'global', paypal)
         
-        pm_30m = await self._calculate_rate(PaymentEventModel.payment_method, auth_event.payment_method, t, 30, 'payment_method') if auth_event.payment_method else None
-        pm_24h = await self._calculate_rate(PaymentEventModel.payment_method, auth_event.payment_method, t, 24 * 60, 'payment_method') if auth_event.payment_method else None
+        pm_30m = await self._calculate_rate(PaymentEventModel.payment_method, auth_event.payment_method, t, 30, 'payment_method', paypal) if auth_event.payment_method else None
+        pm_24h = await self._calculate_rate(PaymentEventModel.payment_method, auth_event.payment_method, t, 24 * 60, 'payment_method', paypal) if auth_event.payment_method else None
         
-        bank_30m = await self._calculate_rate(PaymentEventModel.bank, auth_event.bank, t, 30, 'bank') if auth_event.bank else None
-        bank_24h = await self._calculate_rate(PaymentEventModel.bank, auth_event.bank, t, 24 * 60, 'bank') if auth_event.bank else None
+        bank_30m = await self._calculate_rate(PaymentEventModel.bank, auth_event.bank, t, 30, 'bank', paypal) if auth_event.bank else None
+        bank_24h = await self._calculate_rate(PaymentEventModel.bank, auth_event.bank, t, 24 * 60, 'bank', paypal) if auth_event.bank else None
         
-        wallet_30m = await self._calculate_rate(PaymentEventModel.wallet, auth_event.wallet, t, 30, 'wallet') if auth_event.wallet else None
-        wallet_24h = await self._calculate_rate(PaymentEventModel.wallet, auth_event.wallet, t, 24 * 60, 'wallet') if auth_event.wallet else None
+        wallet_30m = await self._calculate_rate(PaymentEventModel.wallet, auth_event.wallet, t, 30, 'wallet', paypal) if auth_event.wallet else None
+        wallet_24h = await self._calculate_rate(PaymentEventModel.wallet, auth_event.wallet, t, 24 * 60, 'wallet', paypal) if auth_event.wallet else None
         
-        currency_30m = await self._calculate_rate(PaymentEventModel.currency, auth_event.currency, t, 30, 'currency') if auth_event.currency else None
-        currency_24h = await self._calculate_rate(PaymentEventModel.currency, auth_event.currency, t, 24 * 60, 'currency') if auth_event.currency else None
+        currency_30m = await self._calculate_rate(PaymentEventModel.currency, auth_event.currency, t, 30, 'currency', paypal) if auth_event.currency else None
+        currency_24h = await self._calculate_rate(PaymentEventModel.currency, auth_event.currency, t, 24 * 60, 'currency', paypal) if auth_event.currency else None
         
         # Insufficiency logic: if both global features are None, we lack sufficient volume
         insufficient_global_volume = global_30m is None and global_24h is None
@@ -119,8 +123,16 @@ class FeatureReconstructionService:
             rca_candidate_matches_payment_segment=rca_candidate_matches_payment_segment
         )
 
-    async def _calculate_rate(self, dimension_col, dimension_value: str, t: datetime, window_minutes: int, threshold_key: str) -> Optional[float]:
-        total, failures = await self.repository.get_historical_failure_rate(dimension_col, dimension_value, t, window_minutes)
+    async def _calculate_rate(
+        self, dimension_col, dimension_value: str, t: datetime, window_minutes: int, threshold_key: str,
+        paypal: bool = False,
+    ) -> Optional[float]:
+        if paypal:
+            total, failures = await self.repository.get_historical_failure_rate(
+                dimension_col, dimension_value, t, window_minutes, paypal=True
+            )
+        else:
+            total, failures = await self.repository.get_historical_failure_rate(dimension_col, dimension_value, t, window_minutes)
         if total < self.THRESHOLDS[threshold_key]:
             return None
         return failures / total if total > 0 else 0.0

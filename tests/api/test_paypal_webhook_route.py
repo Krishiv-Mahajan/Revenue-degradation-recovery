@@ -51,12 +51,26 @@ def overrides():
 
 @pytest.fixture
 def pipeline_spies():
-    """Fails loudly if the route schedules the live pipeline or any background task."""
+    """
+    Fails loudly if the route runs the live pipeline inline, or schedules any background task the
+    test did not take with _take_scheduled.
+    """
     with patch("src.api.routes.run_live_pipeline") as run_live_pipeline, \
             patch.object(BackgroundTasks, "add_task") as add_task:
         yield run_live_pipeline, add_task
     run_live_pipeline.assert_not_called()
     add_task.assert_not_called()
+
+
+def _take_scheduled(pipeline_spies):
+    """The events the route scheduled for the pipeline; clears them for the fixture's final check."""
+    run_live_pipeline, add_task = pipeline_spies
+    scheduled = []
+    for call in add_task.call_args_list:
+        assert call.args[0] is run_live_pipeline and len(call.args) == 2 and not call.kwargs
+        scheduled.append(call.args[1])
+    add_task.reset_mock()
+    return scheduled
 
 
 @pytest.fixture
@@ -80,22 +94,31 @@ def _assert_safe(response):
 
 # --- success and idempotency ----------------------------------------------------
 
-def test_verified_event_is_stored_without_triggering_the_pipeline(intake, pipeline_spies):
+@pytest.mark.parametrize("builder", [samples.capture_completed, samples.capture_declined, samples.order_approved])
+def test_verified_attempt_event_is_stored_and_scheduled_once_for_the_pipeline(intake, pipeline_spies, builder):
     client, stub, repository = intake()
 
-    response = client.post(URL, content=body_of(samples.capture_completed()), headers=HEADERS)
+    response = client.post(URL, content=body_of(builder()), headers=HEADERS)
 
     assert response.status_code == 200
     stored = repository.payment_events[("paypal", samples.EVENT_ID)]
     assert response.json() == {"status": "stored", "event_id": str(stored.event_id)}
     assert len(repository.raw_records) == 1
     assert len(stub.verify_requests) == 1
-    run_live_pipeline, add_task = pipeline_spies
-    run_live_pipeline.assert_not_called()
-    add_task.assert_not_called()
+    assert _take_scheduled(pipeline_spies) == [stored]
 
 
-def test_identical_redelivery_is_acknowledged_as_duplicate(intake):
+@pytest.mark.parametrize("builder", [samples.capture_pending, samples.capture_refunded, samples.order_completed])
+def test_verified_events_without_a_pipeline_role_are_stored_but_not_scheduled(intake, builder):
+    client, _, repository = intake()
+
+    response = client.post(URL, content=body_of(builder()), headers=HEADERS)
+
+    assert (response.status_code, response.json()["status"]) == (200, "stored")
+    assert len(repository.payment_events) == 1
+
+
+def test_identical_redelivery_is_acknowledged_as_duplicate_and_not_rescheduled(intake, pipeline_spies):
     client, _, repository = intake()
     raw_body = body_of(samples.capture_completed())
     client.post(URL, content=raw_body, headers=HEADERS)
@@ -105,9 +128,10 @@ def test_identical_redelivery_is_acknowledged_as_duplicate(intake):
     assert response.status_code == 200
     assert response.json() == {"status": "duplicate"}
     assert repository.save_calls == 1
+    assert len(_take_scheduled(pipeline_spies)) == 1
 
 
-def test_conflicting_redelivery_returns_409_and_keeps_original(intake):
+def test_conflicting_redelivery_returns_409_and_keeps_original(intake, pipeline_spies):
     client, _, repository = intake()
     original = samples.capture_completed()
     client.post(URL, content=body_of(original), headers=HEADERS)
@@ -117,6 +141,7 @@ def test_conflicting_redelivery_returns_409_and_keeps_original(intake):
     assert response.status_code == 409
     assert response.json() == {"detail": "Conflicting duplicate event"}
     assert repository.raw_records[("paypal", samples.EVENT_ID)].raw_payload == original
+    assert len(_take_scheduled(pipeline_spies)) == 1
 
 
 def test_verified_unsupported_event_is_acknowledged_but_not_stored(intake):
@@ -214,7 +239,7 @@ def test_streamed_oversized_body_without_content_length_returns_413(intake):
     assert stub.requests == []
 
 
-def test_body_at_the_limit_is_accepted_for_verification(intake):
+def test_body_at_the_limit_is_accepted_for_verification(intake, pipeline_spies):
     client, stub, _ = intake()
     event = samples.capture_completed()
     raw_body = body_of(event)
@@ -225,6 +250,7 @@ def test_body_at_the_limit_is_accepted_for_verification(intake):
 
     assert response.status_code == 200
     assert len(stub.verify_requests) == 1
+    assert len(_take_scheduled(pipeline_spies)) == 1
 
 
 # --- configuration and provider outages ------------------------------------------

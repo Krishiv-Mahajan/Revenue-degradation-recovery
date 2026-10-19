@@ -7,11 +7,13 @@ Does NOT implement feature engineering, modeling, or Stage 6 logic.
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.domain.payment_attempts import paypal_order_id
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import PaymentEventModel
+from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.core.domain.failure_prediction_models import (
     PredictionStatus,
@@ -123,7 +125,15 @@ class FailurePredictionService:
           may have been ingested before T.
           
         Uses the ix_payment_events_eligibility index.
+        A PayPal attempt's terminal events are its order's PayPal capture outcomes.
         """
+        order_id = paypal_order_id(payment_attempt_id)
+        if order_id is not None:
+            stmt = select(func.count(PaymentEventModel.event_id)).where(
+                *paypal_terminal_events(order_id), PaymentEventModel.ingested_at < T
+            )
+            return not (await self.session.execute(stmt)).scalar()
+
         stmt = text("""
             SELECT EXISTS (
                 SELECT 1
