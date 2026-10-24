@@ -6,17 +6,23 @@ Safety model:
   There is no fallback to DATABASE_URL or any development default.
 - When TEST_DATABASE_URL is unset, every database-backed test is skipped and
   offline unit/boundary tests run normally.
-- The URL is validated (name must end in '_test', port must not be 5433, and it
-  must differ from the development DATABASE_URL) before any connection is made.
+- Before any connection the URL must name exactly the disposable test database
+  (localhost, 127.0.0.1 or ::1; explicit port 5434; database payment_recovery_test)
+  and differ from every development URL; otherwise the session aborts.
+- The session aborts at start if ALEMBIC_ALLOW_NON_TEST_DATABASE is set: tests never
+  migrate anything but the disposable test database.
 - The schema is built once per session with `alembic upgrade head`, matching
-  production. Tests never call create_all/drop_all.
-- Before each test the application tables are truncated, but only after the
-  server confirms current_database() matches the validated test database.
+  production. Tests never call create_all/drop_all. Leftover rows from an earlier
+  session are truncated first, so a migration's preflight never sees stale test data.
+- Every truncation runs only after the server confirms, in the same transaction,
+  that current_database() is payment_recovery_test.
 - The application's default session factory (bound to DATABASE_URL, which falls
   back to the development database) is replaced in every test by a guard that
   raises and fails the test. Tests must use these fixtures, an explicit session,
   or a mock instead.
 """
+import asyncio
+import concurrent.futures
 import os
 import subprocess
 import sys
@@ -26,14 +32,20 @@ import pytest
 import pytest_asyncio
 from dotenv import dotenv_values
 from sqlalchemy import text
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.infrastructure.db_safety import (
+    ALEMBIC_ALLOW_NON_TEST_DATABASE_ENV,
+    ALEMBIC_TARGET_DATABASE_ENV,
+    DATABASE_URL_ENV,
+    DISPOSABLE_TEST_DATABASE,
     TEST_DATABASE_URL_ENV,
     UnsafeDatabaseError,
     assert_connected_database,
+    assert_disposable_test_target,
     build_truncate_statement,
-    validate_test_database_url,
+    verify_connected_disposable,
 )
 from src.infrastructure.models import Base
 
@@ -93,10 +105,77 @@ def _protected_database_urls():
     return [os.environ.get("DATABASE_URL"), dotenv_url, app_database_url]
 
 
+def pytest_sessionstart(session):
+    if ALEMBIC_ALLOW_NON_TEST_DATABASE_ENV in os.environ:
+        pytest.exit(
+            f"{ALEMBIC_ALLOW_NON_TEST_DATABASE_ENV} is set. Tests never migrate a non-test "
+            "database; unset it and re-run.",
+            returncode=1,
+        )
+
+
 def pytest_collection_modifyitems(config, items):
     for item in items:
         if DB_FIXTURES.intersection(getattr(item, "fixturenames", ())):
             item.add_marker(pytest.mark.integration)
+
+
+def disposable_test_target(url: str) -> URL:
+    """Checks C2-C6 (URL only, before any connection); any mismatch aborts the session."""
+    try:
+        return assert_disposable_test_target(url, protected_urls=_protected_database_urls())
+    except UnsafeDatabaseError as exc:
+        pytest.exit(f"Refusing to use TEST_DATABASE_URL: {exc}", returncode=1)
+
+
+async def verify_and_truncate(conn, expected: URL, *, existing_tables_only: bool = False) -> None:
+    """Checks C8 then C9: confirm the connected database in this transaction, then truncate."""
+    current = (await conn.execute(text("SELECT current_database()"))).scalar_one()
+    assert_connected_database(current, expected)
+    verify_connected_disposable(current)
+    existing = None
+    if existing_tables_only:
+        existing = set(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+                    )
+                )
+            ).scalars()
+        )
+    statement = build_truncate_statement(Base.metadata, existing_tables=existing)
+    if statement is not None:
+        await conn.execute(text(statement))
+
+
+async def _truncate_leftover_rows(expected: URL) -> None:
+    # C7: the engine is built from the validated URL object, never from the environment.
+    engine = create_async_engine(expected, echo=False)
+    try:
+        async with engine.begin() as conn:
+            await verify_and_truncate(conn, expected, existing_tables_only=True)
+    finally:
+        await engine.dispose()
+
+
+def run_isolated(coroutine) -> None:
+    """Run a coroutine on a private event loop, independent of any loop pytest-asyncio is running."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(asyncio.run, coroutine).result()
+
+
+def alembic_subprocess_env(expected: URL) -> dict:
+    """Explicit environment for Alembic subprocesses: the validated URL and target, never the opt-in."""
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+        if key in os.environ
+    }
+    env[DATABASE_URL_ENV] = expected.render_as_string(hide_password=False)
+    env[ALEMBIC_TARGET_DATABASE_ENV] = DISPOSABLE_TEST_DATABASE
+    return env
 
 
 @pytest.fixture(scope="session")
@@ -105,14 +184,13 @@ def test_database_url() -> str:
     if not url:
         pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set; skipping database-backed test.")
 
-    validate_test_database_url(url, protected_urls=_protected_database_urls())
+    expected = disposable_test_target(url)
+    run_isolated(_truncate_leftover_rows(expected))
 
-    env = dict(os.environ)
-    env["DATABASE_URL"] = url
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=PROJECT_ROOT,
-        env=env,
+        env=alembic_subprocess_env(expected),
         capture_output=True,
         text=True,
     )
@@ -123,15 +201,11 @@ def test_database_url() -> str:
 
 @pytest_asyncio.fixture
 async def db_engine(test_database_url):
-    expected = validate_test_database_url(
-        test_database_url, protected_urls=_protected_database_urls()
-    )
-    engine = create_async_engine(test_database_url, echo=False)
+    expected = disposable_test_target(test_database_url)
+    engine = create_async_engine(expected, echo=False)
     try:
         async with engine.begin() as conn:
-            current = (await conn.execute(text("SELECT current_database()"))).scalar_one()
-            assert_connected_database(current, expected)
-            await conn.execute(text(build_truncate_statement(Base.metadata)))
+            await verify_and_truncate(conn, expected)
         yield engine
     finally:
         await engine.dispose()

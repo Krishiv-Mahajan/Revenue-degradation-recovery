@@ -28,9 +28,22 @@ OFFLINE_DATABASE_URL = "postgresql+asyncpg://offline:offline@offline.invalid:1/o
 
 CREATE_TABLE_RE = re.compile(r"CREATE TABLE (\w+) \((.*?)\n\s*\)", re.DOTALL)
 ADD_COLUMN_RE = re.compile(r"ALTER TABLE (\w+) ADD COLUMN (\w+) ([^;]+);")
+# Constraint and nullability changes, applied in the order the migrations emit them.
+ALTER_TABLE_RE = re.compile(
+    r"ALTER TABLE (\w+) (?:"
+    r"ADD (?P<add>CONSTRAINT \w+ [^;]+)"
+    r"|DROP CONSTRAINT (?P<drop>\w+)"
+    r"|ALTER COLUMN (?P<column>\w+) (?P<nullability>SET|DROP) NOT NULL"
+    r");"
+)
 CREATE_INDEX_RE = re.compile(r"CREATE (UNIQUE )?INDEX (\w+) ON (\w+) \(([^)]*)\)")
+# Transaction-scoped work objects of the Phase 3 provider-identity migrations are not schema.
 UNSUPPORTED_DDL_RE = re.compile(
-    r"^\s*(ALTER TABLE \w+ (?!ADD COLUMN)|DROP |CREATE (?!TABLE|INDEX|UNIQUE INDEX))",
+    r"^\s*("
+    r"ALTER TABLE \w+ (?!ADD COLUMN |ADD CONSTRAINT |DROP CONSTRAINT |ALTER COLUMN \w+ (?:SET|DROP) NOT NULL;)"
+    r"|DROP (?!TABLE p3_\w+(?:, p3_\w+)*;|FUNCTION pg_temp\.)"
+    r"|CREATE (?!TABLE |INDEX |UNIQUE INDEX |TEMP TABLE p3_\w+ ON COMMIT DROP AS|FUNCTION pg_temp\.)"
+    r")",
     re.MULTILINE,
 )
 
@@ -58,6 +71,22 @@ def _parse_schema(ddl: str):
 
     for table, column, definition in ADD_COLUMN_RE.findall(ddl):
         tables[table]["columns"][column] = _normalize(definition)
+
+    for match in ALTER_TABLE_RE.finditer(ddl):
+        table = tables[match.group(1)]
+        if match.group("add"):
+            table["constraints"].add(_normalize(match.group("add")))
+        elif match.group("drop"):
+            name = match.group("drop")
+            dropped = {c for c in table["constraints"] if c.startswith(f"CONSTRAINT {name} ")}
+            assert len(dropped) == 1, f"cannot drop unknown constraint {name}"
+            table["constraints"] -= dropped
+        else:
+            column, definition = match.group("column"), table["columns"][match.group("column")]
+            definition = definition.replace(" NOT NULL", "")
+            if match.group("nullability") == "SET":
+                definition += " NOT NULL"
+            table["columns"][column] = definition
 
     indexes = {
         name: (table, _normalize(cols), bool(unique))
@@ -135,4 +164,5 @@ def test_foreign_keys_declared_on_models(model_ddl):
         "fk_candidate_cause_evaluation",
         "fk_attribution_command",
         "fk_attribution_decision",
+        "fk_payment_attempt_trigger",
     }

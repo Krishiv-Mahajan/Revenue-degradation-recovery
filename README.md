@@ -534,10 +534,15 @@ docker ps
 ```
 
 ### Step 4: Run Database Migrations
-Apply all schema migrations via Alembic:
+Apply all schema migrations via Alembic. Alembic has no default database: it refuses to run unless `DATABASE_URL` is set explicitly, names its host, port and database, and is not on port 5433. Online runs also require `ALEMBIC_TARGET_DATABASE` to equal the URL's database name, and any database other than the disposable test database (`localhost:5434/payment_recovery_test`) additionally requires `ALEMBIC_ALLOW_NON_TEST_DATABASE=yes`. Before running any migration, Alembic verifies that the server's `current_database()` matches.
+
 ```bash
-alembic upgrade head
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5434/payment_recovery_test \
+ALEMBIC_TARGET_DATABASE=payment_recovery_test \
+  alembic upgrade head
 ```
+
+> **Phase 3 notice**: during the Phase 3 provider-identity work, port 5433 is blocked for Alembic, with or without `ALEMBIC_ALLOW_NON_TEST_DATABASE`, so the development database above cannot be migrated until a separately approved change lifts the block. The Phase 3 expand revision (`9d2e4f6a8b1c`) may only remain applied on the disposable test database; other databases must apply it together with its contract revision in a single `alembic upgrade head`.
 
 ### Step 5: Run the End-to-End Demonstration
 Execute the demonstration orchestrator to seed baseline traffic, simulate a severe payment method outage, and run the pipeline through all 8 stages:

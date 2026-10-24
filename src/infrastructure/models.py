@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric, ForeignKey, Index
+from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric, ForeignKey, Index, CheckConstraint, ForeignKeyConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -59,12 +59,54 @@ class PaymentEventModel(Base):
 
     __table_args__ = (
         UniqueConstraint('source_system', 'source_event_id', name='uq_payment_event_source_identity'),
+        # Target for composite foreign keys that pin a row to an event of the same provider.
+        UniqueConstraint('event_id', 'source_system', name='uq_payment_event_provider'),
         Index('idx_payment_events_timestamp_event_type', 'timestamp', 'event_type'),
         Index('ix_payment_events_eligibility', 'payment_id', 'ingested_at'),
         Index('ix_payment_events_hist_pm', 'payment_method', 'ingested_at', 'event_type'),
         Index('ix_payment_events_hist_bank', 'bank', 'ingested_at', 'event_type'),
         Index('ix_payment_events_hist_wallet', 'wallet', 'ingested_at', 'event_type'),
         Index('ix_payment_events_hist_curr', 'currency', 'ingested_at', 'event_type'),
+        Index('ix_payment_events_provider_order', 'source_system', 'order_id', 'ingested_at'),
+    )
+
+
+# Must match the Identifier grammar in src/core/parsers/paypal.py (enforced by a test).
+PAYPAL_IDENTIFIER_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+PAYMENT_ATTEMPT_SOURCE_SYSTEM_CHECK = "source_system IN ('razorpay', 'synthetic', 'paypal')"
+PAYMENT_ATTEMPT_NAMESPACE_CHECK = (
+    "CASE WHEN source_system = 'paypal' "
+    f"THEN provider_reference ~ '{PAYPAL_IDENTIFIER_PATTERN}' "
+    "AND payment_attempt_id = 'paypal-order:' || provider_reference "
+    "ELSE provider_reference <> '' AND payment_attempt_id = provider_reference "
+    "AND left(payment_attempt_id, 13) <> 'paypal-order:' END"
+)
+
+
+class PaymentAttemptModel(Base):
+    """
+    Registry of Stage 5-8 payment attempts and the provider each belongs to.
+    The provider is proven by the attempt's trigger event (same event_id and source_system).
+    """
+    __tablename__ = "payment_attempts"
+
+    payment_attempt_id = Column(String(255), primary_key=True)
+    source_system = Column(String(50), nullable=False)
+    # Razorpay/synthetic payment_id, or PayPal order_id.
+    provider_reference = Column(String(255), nullable=False)
+    trigger_event_id = Column(UUID(as_uuid=True), nullable=False)
+    registered_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('payment_attempt_id', 'source_system', name='uq_payment_attempt_provider'),
+        UniqueConstraint('source_system', 'provider_reference', name='uq_payment_attempt_reference'),
+        CheckConstraint(PAYMENT_ATTEMPT_SOURCE_SYSTEM_CHECK, name='ck_payment_attempt_source_system'),
+        CheckConstraint(PAYMENT_ATTEMPT_NAMESPACE_CHECK, name='ck_payment_attempt_namespace'),
+        ForeignKeyConstraint(
+            ['trigger_event_id', 'source_system'],
+            ['payment_events.event_id', 'payment_events.source_system'],
+            name='fk_payment_attempt_trigger',
+        ),
     )
 
 class PaymentHealthSnapshotModel(Base):
@@ -273,6 +315,9 @@ class FailurePredictionModel(Base):
     
     # The payment_id being predicted on
     payment_attempt_id = Column(String(255), nullable=False)
+
+    # Provider of the attempt (payment_attempts.source_system); NOT NULL once Revision B applies.
+    source_system = Column(String(50), nullable=True)
     
     # Monotonically increasing version per payment_attempt_id
     prediction_version = Column(Integer, nullable=False)
@@ -330,6 +375,9 @@ class InterventionDecisionModel(Base):
 
     # The payment_attempt_id (or payment_id) being decided on
     payment_attempt_id = Column(String(255), nullable=False)
+
+    # Provider of the attempt (payment_attempts.source_system); NOT NULL once Revision B applies.
+    source_system = Column(String(50), nullable=True)
 
     # Monotonically increasing version per payment_attempt_id
     decision_version = Column(Integer, nullable=False)
@@ -399,6 +447,8 @@ class InterventionCommandModel(Base):
     command_id = Column(UUID(as_uuid=True), primary_key=True)
     decision_id = Column(UUID(as_uuid=True), nullable=False)
     payment_attempt_id = Column(String(255), nullable=False)
+    # Provider of the attempt; NOT NULL once Revision B applies.
+    source_system = Column(String(50), nullable=True)
     decision_version = Column(Integer, nullable=False)
     route_key = Column(String(50), nullable=False)
     policy_id = Column(String(50), nullable=False)
@@ -431,6 +481,8 @@ class InterventionExecutionAttemptModel(Base):
 
     attempt_id = Column(UUID(as_uuid=True), primary_key=True)
     command_id = Column(UUID(as_uuid=True), nullable=False)
+    # Provider of the command's attempt; NOT NULL once Revision B applies.
+    source_system = Column(String(50), nullable=True)
     attempt_number = Column(Integer, nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=False)
@@ -464,6 +516,8 @@ class PaymentOutcomeObservationModel(Base):
     observation_id = Column(UUID(as_uuid=True), primary_key=True)
     command_id = Column(UUID(as_uuid=True), nullable=False)
     payment_attempt_id = Column(String(255), nullable=False)
+    # Provider of the attempt; NOT NULL once Revision B applies.
+    source_system = Column(String(50), nullable=True)
     observation_version = Column(Integer, nullable=False)
     observed_at = Column(DateTime(timezone=True), nullable=False)
     as_of_timestamp = Column(DateTime(timezone=True), nullable=False)
@@ -508,6 +562,8 @@ class CounterfactualAttributionModel(Base):
         nullable=False,
     )
     payment_attempt_id = Column(String(255), nullable=False)
+    # Provider of the attempt; NOT NULL once Revision B applies.
+    source_system = Column(String(50), nullable=True)
     decision_id = Column(
         UUID(as_uuid=True),
         ForeignKey("intervention_decisions.decision_id", name="fk_attribution_decision"),

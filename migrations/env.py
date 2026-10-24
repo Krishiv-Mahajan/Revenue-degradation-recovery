@@ -3,24 +3,25 @@ import sys
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 
 # Add src to path so models can be imported
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from src.infrastructure.db_safety import (
+    INTERMEDIATE_REVISION_ASSERTION_SQL,
+    assert_connected_database,
+    final_state_requires_assertion,
+    validate_alembic_target,
+)
 from src.infrastructure.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
-
-config.set_main_option(
-    "sqlalchemy.url",
-    os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:5433/payment_recovery")
-)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -31,54 +32,69 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 target_metadata = Base.metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+OFFLINE = context.is_offline_mode()
+# There is no default URL: DATABASE_URL must be explicit, valid, and never port 5433.
+# Online runs also require ALEMBIC_TARGET_DATABASE (and an opt-in for non-test targets).
+TARGET_URL = validate_alembic_target(os.environ, offline=OFFLINE)
+
+# Heads after each applied step, as reported by Alembic; the last entry is the run's end state.
+_applied_heads = []
+
+
+def _record_heads(ctx, step, heads, run_args) -> None:
+    _applied_heads.append(frozenset(heads))
+
+
+def _final_heads(online_context) -> frozenset:
+    if _applied_heads:
+        return _applied_heads[-1]
+    if online_context is not None:
+        return frozenset(online_context.get_current_heads())
+    return frozenset()
+
+
+def _enforce_final_state(online_context=None) -> None:
+    """Runs inside the migration transaction, before COMMIT."""
+    if final_state_requires_assertion(_final_heads(online_context), TARGET_URL, offline=OFFLINE):
+        context.execute(INTERMEDIATE_REVISION_ASSERTION_SQL)
 
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
+    Renders SQL only; no engine is created and no connection is made.
     """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=TARGET_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        on_version_apply=_record_heads,
     )
 
     with context.begin_transaction():
         context.run_migrations()
+        _enforce_final_state()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        on_version_apply=_record_heads,
+    )
 
     with context.begin_transaction():
+        # Verified inside Alembic's own transaction: a query issued before configure() would leave
+        # the connection in an autobegun transaction that Alembic treats as external and never commits.
+        actual_database = connection.execute(text("SELECT current_database()")).scalar_one()
+        assert_connected_database(actual_database, TARGET_URL)
         context.run_migrations()
+        _enforce_final_state(context.get_context())
 
 
 async def run_async_migrations() -> None:
-    """In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
-
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_async_engine(TARGET_URL, poolclass=pool.NullPool)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

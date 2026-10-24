@@ -109,10 +109,10 @@ jobs:
           poetry run python - <<'PY'
           import os
 
-          from src.infrastructure.db_safety import validate_test_database_url
+          from src.infrastructure.db_safety import assert_disposable_test_target
           from tests.conftest import _protected_database_urls
 
-          parsed = validate_test_database_url(
+          parsed = assert_disposable_test_target(
               os.environ["TEST_DATABASE_URL"], protected_urls=_protected_database_urls()
           )
           print("Validated test database:", parsed.render_as_string(hide_password=True))
@@ -126,6 +126,30 @@ jobs:
       - name: Fail if no tests ran or any test was skipped
         run: |
           python - reports/database.xml <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          if suite is None:
+              sys.exit("No testsuite element in the JUnit report.")
+          counts = {k: int(suite.get(k, 0)) for k in ("tests", "skipped", "failures", "errors")}
+          print(counts)
+          if counts["tests"] == 0:
+              sys.exit("No tests ran.")
+          if counts["skipped"]:
+              sys.exit(f"{counts['skipped']} test(s) were skipped.")
+          PY
+
+      # Downgrades and re-upgrades the same disposable database, so it runs after, never alongside,
+      # the main database suite.
+      - name: Run migration tests
+        run: |
+          RUN_MIGRATION_TESTS=1 poetry run python -m pytest tests/migration -q -rs -p no:cacheprovider --junitxml=reports/migration.xml
+
+      - name: Fail if no migration tests ran or any was skipped
+        run: |
+          python - reports/migration.xml <<'PY'
           import sys
           import xml.etree.ElementTree as ET
 
