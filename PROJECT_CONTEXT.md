@@ -573,12 +573,44 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
      This is a deterministic test scenario with simulated execution and a test model. It is not a production measurement.
 - **Still unverified:** real intervention execution (no non-simulator executor exists), real Razorpay traffic, PayPal pipeline activation, and any empirically validated Stage 5 model.
 
+### Phase 3 Checkpoint 1 — Provider-Identity Expand Migration & Target Guards (2026-10-25, complete)
+
+- **Commit:** `288242f525cef4465b80b6e9cd64f290ac3ade2d` — `feat: add provider-identity expand migration and Alembic target guard`
+- **Scope:**
+  - Migration ancestry: descends from `8b9c0d1e2f3a` (Stage 8 counterfactual attributions) with revision ID `9d2e4f6a8b1c` (`migrations/versions/9d2e4f6a8b1c_stage5_8_provider_identity_expand.py`).
+  - Creates the `payment_attempts` registry table (`payment_attempt_id`, `source_system`, `provider_reference`, `trigger_event_id`, `registered_at`) with strict CHECK constraints on allowed providers (`razorpay`, `synthetic`, `paypal`) and PayPal order reference grammar (`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`).
+  - Adds nullable `source_system` column to all six Stage 5–8 tables: `failure_predictions`, `intervention_decisions`, `intervention_commands`, `intervention_execution_attempts`, `payment_outcome_observations`, and `counterfactual_attributions`.
+  - Transactional, deterministic backfill populating `payment_attempts` and the six Stage 5–8 tables from canonical trigger events (`payment.authorized` or `order.approved`).
+  - Preflight validation suite (PF-01 through PF-15) detects ambiguous, orphaned, or contradictory legacy records and fails closed with diagnostic messages without altering state.
+  - Strict database safety & Alembic target guards (`src/infrastructure/db_safety.py`): Alembic requires explicit `DATABASE_URL`, rejects port 5433 (development DB), verifies `current_database()`, and refuses to leave non-disposable databases at intermediate revision `9d2e4f6a8b1c`. Test fixtures only permit `localhost:5434/payment_recovery_test`.
+- **Test Evidence:**
+  - 66 migration tests in `tests/migration/test_revision_a.py` passed against disposable PostgreSQL 15.
+  - 161 migration SQL unit tests passed offline.
+
+### Phase 3 Checkpoint 2 — Attempt Registration & Provider Write Provenance (2026-10-29, complete)
+
+- **Commit:** `fbf16615bfe571550c604618e474feee1fb53b94` — `feat: register payment attempts and enforce provider write provenance in Stages 5-8`
+- **Scope:**
+  - Domain models: Introduces `AttemptRef` (immutable dataclass validating provider, attempt key, and provider reference consistency), `RegisteredAttempt`, and `PaymentAttemptError` exception hierarchy in `src/core/domain/payment_attempts.py` and `payment_attempt_exceptions.py`.
+  - Repository implementation: Implements `PaymentAttemptRepository` (`src/infrastructure/payment_attempt_repository.py`) to idempotently register attempts from trigger events with atomic deduplication.
+  - Write provenance: Requires and validates non-null `source_system` on every write across all Stage 5–8 tables (`FailurePredictionRepository`, `InterventionRepository`, `ExecutionRepository`, `AttributionRepository`).
+  - Service threading: Threads `AttemptRef` across `live_pipeline.py`, `FailurePredictionService`, `InterventionDecisionService`, `InterventionExecutionService`, `PaymentOutcomeObservationService`, and `AttributionService`.
+  - Deterministic golden identities preserved: `tests/unit/test_stage5_8_identity_golden.py` confirms that prediction IDs, decision IDs, command IDs, observation IDs, attribution IDs, Stage 5 input fingerprints, Stage 6 decision fingerprints, repository advisory locks, and the global ACT rate limit lock `(1416050241, 1380013125)` remain byte-identical to frozen baselines.
+- **Test Evidence (CI Run #9 Green):**
+  - Migration tests: 66 passed.
+  - Offline unit & boundary tests: 1,520 passed, 0 skipped, 4 deprecation warnings.
+  - Integration & API tests: 656 passed, 0 skipped, 2 deprecation warnings against disposable PostgreSQL 15.
+  - Golden identity tests: 10 passed.
+- **Known Remaining Limitations:**
+  - Stage 5–8 read paths still resolve by `payment_attempt_id` key alone rather than provider-exact identity. This is addressed in Checkpoint 3.
+
 ## Current State
 
-The repository is currently **Stage 8 complete and frozen**, with the approved post-Stage 8 extensions recorded above.
+The repository is currently **Phase 3 Checkpoint 2 complete and frozen**, with Checkpoints 1 and 2 committed and pushed.
 
 - **Branch:** `main`
-- **Test Count (GitHub Actions run [39136880225](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/39136880225) on `29c487486b93d0b961b88f2f9fe1d9a02b341a25`, locked dependencies):** 1,180 passed, 0 failed, 0 skipped, 0 errors: offline unit and boundary tests 1,031 passed; PostgreSQL 15 integration and API tests 149 passed. There are six known httpx deprecation warnings across both jobs.
+- **Latest Commit:** `fbf1661` (`feat: register payment attempts and enforce provider write provenance in Stages 5-8`)
+- **CI Status:** CI Run #9 green across all offline, migration, and PostgreSQL suites.
 - **Working Tree:** Clean.
 
 ## Terminal Status
