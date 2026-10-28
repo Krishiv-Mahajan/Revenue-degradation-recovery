@@ -56,6 +56,7 @@ from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 from src.infrastructure.rca_repository import RCARepository
 
 # Core Domain Services
@@ -293,6 +294,7 @@ async def run_pipeline(engine) -> None:
         inter_repo = InterventionRepository(session)
         exec_repo = ExecutionRepository(session)
         attr_repo = AttributionRepository(session)
+        attempt_repo = PaymentAttemptRepository(session)
 
         # Canonical Services
         analytics_svc = PaymentHealthAnalyticsService(analytics_repo)
@@ -384,7 +386,7 @@ async def run_pipeline(engine) -> None:
             # Stages 5–8: Process all authorization events in this window
             auth_stmt = text(
                 """
-                SELECT payment_id, timestamp 
+                SELECT event_id, source_system, event_type, payment_id, timestamp
                 FROM payment_events 
                 WHERE event_type = 'payment.authorized' 
                   AND timestamp >= :w_start 
@@ -395,15 +397,17 @@ async def run_pipeline(engine) -> None:
             auths = res.fetchall()
 
             for auth in auths:
-                pid = auth.payment_id
                 ts = auth.timestamp
 
+                # Every Stage 5-8 write requires the attempt to be registered from its trigger event.
+                attempt = (await attempt_repo.register(auth)).ref
+
                 # Stage 5: Failure Prediction
-                pred = await pred_svc.orchestrate_prediction(pid, T=ts)
+                pred = await pred_svc.orchestrate_prediction(attempt, T=ts)
 
                 # Stage 6: Intervention Decisioning
                 if pred.failure_probability and pred.failure_probability > 0.5:
-                    decision = await inter_decision_svc.decide(pid, t_decide=ts)
+                    decision = await inter_decision_svc.decide(attempt, t_decide=ts)
 
                     if decision.decision_type.value == "ACT":
                         # Stage 7A: Dispatch & Execute Command

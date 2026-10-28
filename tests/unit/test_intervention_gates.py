@@ -86,6 +86,7 @@ def test_gate4_stage5_prediction_validity():
     pred_insufficient = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id="pay_123",
+        source_system="razorpay",
         prediction_version=1,
         predicted_at=datetime.now(timezone.utc),
         prediction_horizon="30m",
@@ -107,6 +108,7 @@ def test_gate4_stage5_prediction_validity():
     pred_ineligible = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id="pay_123",
+        source_system="razorpay",
         prediction_version=1,
         predicted_at=datetime.now(timezone.utc),
         prediction_horizon="30m",
@@ -128,6 +130,7 @@ def test_gate4_stage5_prediction_validity():
     pred_valid = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id="pay_123",
+        source_system="razorpay",
         prediction_version=1,
         predicted_at=datetime.now(timezone.utc),
         prediction_horizon="30m",

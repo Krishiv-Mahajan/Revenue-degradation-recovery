@@ -49,6 +49,7 @@ class CounterfactualAttribution:
     attribution_id: uuid.UUID
     command_id: uuid.UUID
     payment_attempt_id: str
+    source_system: str
     decision_id: uuid.UUID
     attribution_version: int
     attributed_at: datetime

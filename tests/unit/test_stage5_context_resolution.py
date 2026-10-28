@@ -87,7 +87,10 @@ async def test_live_pipeline_stage3_timestamp_is_event_ts():
 
     with patch("src.core.services.live_pipeline.PaymentHealthAnalyticsService") as mock_s2_cls, \
          patch("src.core.services.live_pipeline.DegradationService") as mock_s3_cls, \
-         patch("src.core.services.live_pipeline.FailurePredictionService") as mock_s5_cls:
+         patch("src.core.services.live_pipeline.FailurePredictionService") as mock_s5_cls, \
+         patch("src.core.services.live_pipeline.PaymentAttemptRepository") as mock_attempts_cls:
+
+        mock_attempts_cls.return_value.register = AsyncMock()
 
         mock_s2 = mock_s2_cls.return_value
         mock_s2.calculate_and_save_window = AsyncMock()

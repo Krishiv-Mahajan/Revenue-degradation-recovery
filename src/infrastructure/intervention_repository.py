@@ -20,7 +20,7 @@ from src.core.domain.intervention_models import (
     InterventionDecision,
     InterventionRouteKey,
 )
-from src.core.domain.payment_attempts import paypal_order_id
+from src.core.domain.payment_attempts import paypal_order_id, recorded_provider
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import InterventionDecisionModel, PaymentEventModel
 from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
@@ -186,6 +186,7 @@ class InterventionRepository:
         return FailurePrediction(
             prediction_id=model.prediction_id,
             payment_attempt_id=model.payment_attempt_id,
+            source_system=recorded_provider(model.source_system, f"failure prediction {model.prediction_id}"),
             prediction_version=model.prediction_version,
             predicted_at=model.predicted_at,
             prediction_horizon=model.prediction_horizon,
@@ -207,6 +208,7 @@ class InterventionRepository:
         model = InterventionDecisionModel(
             decision_id=decision.decision_id,
             payment_attempt_id=decision.payment_attempt_id,
+            source_system=decision.source_system,
             decision_version=decision.decision_version,
             decided_at=decision.decided_at,
             decision_type=decision.decision_type.value,
@@ -229,6 +231,7 @@ class InterventionRepository:
         return InterventionDecision(
             decision_id=model.decision_id,
             payment_attempt_id=model.payment_attempt_id,
+            source_system=recorded_provider(model.source_system, f"intervention decision {model.decision_id}"),
             decision_version=model.decision_version,
             decided_at=model.decided_at,
             decision_type=DecisionType(model.decision_type),

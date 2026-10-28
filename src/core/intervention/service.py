@@ -42,9 +42,11 @@ from src.core.intervention.gates import (
     evaluate_route_eligibility,
     evaluate_stage5_prediction_validity,
 )
+from src.core.domain.payment_attempts import AttemptRef
 from src.core.intervention.policy import InterventionPolicy, get_default_policy
 from src.infrastructure.feature_reconstruction_repository import FeatureReconstructionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 
 
 class InterventionDecisionService:
@@ -58,21 +60,27 @@ class InterventionDecisionService:
         intervention_repository: InterventionRepository,
         feature_reconstruction_repository: FeatureReconstructionRepository,
         policy: Optional[InterventionPolicy] = None,
+        attempt_repository: Optional[PaymentAttemptRepository] = None,
     ) -> None:
         self.session = session
         self.intervention_repo = intervention_repository
         self.feature_repo = feature_reconstruction_repository
         self.policy = policy or get_default_policy()
+        self.attempts = attempt_repository or PaymentAttemptRepository(session)
 
     async def decide(
         self,
-        payment_attempt_id: str,
+        attempt: AttemptRef,
         t_decide: datetime,
     ) -> InterventionDecision:
         """
-        Produce a deterministic intervention decision for payment_attempt_id as-of t_decide.
+        Produce a deterministic intervention decision for the attempt as-of t_decide.
         Idempotent: Identical inputs + t_decide + policy produce identical decision.
+        The attempt must be registered under its provider.
         """
+        await self.attempts.require(attempt)
+        payment_attempt_id = attempt.payment_attempt_id
+
         # Ensure timezone-aware UTC datetime
         if t_decide.tzinfo is None:
             t_decide = t_decide.replace(tzinfo=timezone.utc)
@@ -167,7 +175,7 @@ class InterventionDecisionService:
         audit_gates["kill_switch"] = {"passed": g1.passed, "details": g1.details}
         if not g1.passed:
             return await self._persist_no_action(
-                payment_attempt_id, t_decide, stage5_pred, fingerprint,
+                attempt, t_decide, stage5_pred, fingerprint,
                 g1.verdict, audit_gates, {}, rca_evidence_strength
             )
 
@@ -176,7 +184,7 @@ class InterventionDecisionService:
         audit_gates["amount_and_currency"] = {"passed": g2.passed, "details": g2.details}
         if not g2.passed:
             return await self._persist_no_action(
-                payment_attempt_id, t_decide, stage5_pred, fingerprint,
+                attempt, t_decide, stage5_pred, fingerprint,
                 g2.verdict, audit_gates, {}, rca_evidence_strength
             )
 
@@ -185,7 +193,7 @@ class InterventionDecisionService:
         audit_gates["pre_terminal_invariance"] = {"passed": g3.passed, "details": g3.details}
         if not g3.passed:
             return await self._persist_no_action(
-                payment_attempt_id, t_decide, stage5_pred, fingerprint,
+                attempt, t_decide, stage5_pred, fingerprint,
                 g3.verdict, audit_gates, {}, rca_evidence_strength
             )
 
@@ -194,7 +202,7 @@ class InterventionDecisionService:
         audit_gates["stage5_prediction"] = {"passed": g4.passed, "details": g4.details}
         if not g4.passed:
             return await self._persist_no_action(
-                payment_attempt_id, t_decide, stage5_pred, fingerprint,
+                attempt, t_decide, stage5_pred, fingerprint,
                 g4.verdict, audit_gates, {}, rca_evidence_strength
             )
 
@@ -203,7 +211,7 @@ class InterventionDecisionService:
         audit_gates["episode_and_traffic_shift"] = {"passed": g5.passed, "details": g5.details}
         if not g5.passed:
             return await self._persist_no_action(
-                payment_attempt_id, t_decide, stage5_pred, fingerprint,
+                attempt, t_decide, stage5_pred, fingerprint,
                 g5.verdict, audit_gates, {}, rca_evidence_strength
             )
 
@@ -307,7 +315,7 @@ class InterventionDecisionService:
         if not ranked_candidates and failure_prob >= self.policy.act_risk_threshold:
             # If high risk but no routes eligible
             return await self._persist_no_action(
-                payment_attempt_id, t_decide, stage5_pred, fingerprint,
+                attempt, t_decide, stage5_pred, fingerprint,
                 GateVerdict.FAILED_NO_ELIGIBLE_ROUTES if g6.passed else g6.verdict, audit_gates,
                 {"candidates": audit_candidates}, rca_evidence_strength
             )
@@ -389,6 +397,7 @@ class InterventionDecisionService:
         decision = InterventionDecision(
             decision_id=make_decision_id(payment_attempt_id, new_version),
             payment_attempt_id=payment_attempt_id,
+            source_system=attempt.source_system,
             decision_version=new_version,
             decided_at=t_decide,
             decision_type=tentative_verdict,
@@ -410,7 +419,7 @@ class InterventionDecisionService:
 
     async def _persist_no_action(
         self,
-        payment_attempt_id: str,
+        attempt: AttemptRef,
         t_decide: datetime,
         stage5_pred: Optional[FailurePrediction],
         fingerprint: str,
@@ -422,6 +431,7 @@ class InterventionDecisionService:
         """
         Helper to construct and persist a NO_ACTION decision when a hard gate triggers.
         """
+        payment_attempt_id = attempt.payment_attempt_id
         max_version = await self.intervention_repo.get_max_decision_version(payment_attempt_id)
         new_version = max_version + 1
 
@@ -438,6 +448,7 @@ class InterventionDecisionService:
         decision = InterventionDecision(
             decision_id=make_decision_id(payment_attempt_id, new_version),
             payment_attempt_id=payment_attempt_id,
+            source_system=attempt.source_system,
             decision_version=new_version,
             decided_at=t_decide,
             decision_type=DecisionType.NO_ACTION,

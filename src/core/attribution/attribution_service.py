@@ -19,7 +19,10 @@ from src.core.domain.attribution_models import (
     TreatmentStatus,
     make_attribution_id,
 )
+from src.core.domain.payment_attempt_exceptions import AttemptProviderConflictError
+from src.core.domain.payment_attempts import AttemptRef, recorded_provider
 from src.infrastructure.attribution_repository import AttributionRepository
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 
 # Stage 5 development models; their predictions are never empirical evidence.
 DEVELOPMENT_MODEL_NAMES = frozenset({"DeterministicBaselineModel"})
@@ -42,8 +45,13 @@ def classify_model_provenance(model_name: Optional[str], model_version: Optional
 class CounterfactualAttributionService:
     """Service orchestrating counterfactual attribution and protected GMV derivation."""
 
-    def __init__(self, attribution_repo: AttributionRepository):
+    def __init__(
+        self,
+        attribution_repo: AttributionRepository,
+        attempt_repository: Optional[PaymentAttemptRepository] = None,
+    ):
         self.repo = attribution_repo
+        self.attempts = attempt_repository or PaymentAttemptRepository(attribution_repo.session)
 
     async def attribute_payment_intervention(
         self,
@@ -84,6 +92,18 @@ class CounterfactualAttributionService:
         prediction = None
         if decision.stage5_prediction_id:
             prediction = await self.repo.get_prediction(decision.stage5_prediction_id)
+
+        source_system = recorded_provider(command.source_system, f"intervention command {command.command_id}")
+        await self.attempts.require(AttemptRef.for_key(source_system, command.payment_attempt_id))
+        upstream = [("intervention decision", decision.decision_id, decision.source_system)]
+        if prediction is not None:
+            upstream.append(("failure prediction", prediction.prediction_id, prediction.source_system))
+        for record, record_id, provider in upstream:
+            if recorded_provider(provider, f"{record} {record_id}") != source_system:
+                raise AttemptProviderConflictError(
+                    f"{record} {record_id} belongs to {provider}, but command {command.command_id} "
+                    f"belongs to {source_system}"
+                )
 
         # Same authorization Stage 6 sized the decision from, never read beyond as_of.
         payment_amount = await self.repo.get_canonical_payment_amount(
@@ -202,6 +222,7 @@ class CounterfactualAttributionService:
             attribution_id=attribution_id,
             command_id=command.command_id,
             payment_attempt_id=command.payment_attempt_id,
+            source_system=source_system,
             decision_id=decision.decision_id,
             attribution_version=next_version,
             attributed_at=now,

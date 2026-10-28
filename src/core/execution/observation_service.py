@@ -22,7 +22,9 @@ from src.core.domain.execution_models import (
     PaymentOutcomeObservation,
     make_observation_id,
 )
+from src.core.domain.payment_attempts import AttemptRef
 from src.infrastructure.execution_repository import ExecutionRepository
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 
 
 class PaymentOutcomeObservationService:
@@ -35,9 +37,11 @@ class PaymentOutcomeObservationService:
         self,
         session: AsyncSession,
         execution_repo: ExecutionRepository,
+        attempt_repository: Optional[PaymentAttemptRepository] = None,
     ) -> None:
         self.session = session
         self.execution_repo = execution_repo
+        self.attempts = attempt_repository or PaymentAttemptRepository(session)
 
     async def observe(
         self,
@@ -56,6 +60,8 @@ class PaymentOutcomeObservationService:
         cmd = await self.execution_repo.get_command_by_id(command_id)
         if cmd is None:
             raise CommandNotFoundError(f"InterventionCommand with id={command_id} not found.")
+
+        await self.attempts.require(AttemptRef.for_key(cmd.source_system, cmd.payment_attempt_id))
 
         # 2. Query canonical terminal events strictly <= as_of
         terminal_events = await self.execution_repo.get_canonical_terminal_events(
@@ -125,6 +131,7 @@ class PaymentOutcomeObservationService:
             observation_id=observation_id,
             command_id=command_id,
             payment_attempt_id=cmd.payment_attempt_id,
+            source_system=cmd.source_system,
             observation_version=new_version,
             observed_at=now,
             as_of_timestamp=as_of,

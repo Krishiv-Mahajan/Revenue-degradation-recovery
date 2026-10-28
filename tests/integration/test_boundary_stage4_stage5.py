@@ -26,7 +26,7 @@ T0 = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
 def make_event(payment_id, bank=None, wallet=None, currency=None, pm=None, ingested_at=T0):
     return PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="TEST",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=ingested_at,

@@ -39,6 +39,7 @@ def _treated_capture_repo(model_name, model_version):
         command_id=uuid.uuid4(),
         decision_id=uuid.uuid4(),
         payment_attempt_id="pay_1",
+        source_system="razorpay",
         route_key="RETRY_SECONDARY_GATEWAY",
         command_status="SUCCEEDED",
         created_at=T0,
@@ -60,12 +61,14 @@ def _treated_capture_repo(model_name, model_version):
     )
     decision = MagicMock(
         decision_id=command.decision_id,
+        source_system="razorpay",
         decision_type="ACT",
         stage5_prediction_id=uuid.uuid4(),
         diagnosis_confidence="STRONG",
         decided_at=T0,
     )
     prediction = MagicMock(
+        source_system="razorpay",
         model_name=model_name,
         model_version=model_version,
         failure_probability=0.85,
@@ -86,7 +89,7 @@ def _treated_capture_repo(model_name, model_version):
 
 async def _attribute(model_name, model_version):
     command, repo = _treated_capture_repo(model_name, model_version)
-    return await CounterfactualAttributionService(repo).attribute_payment_intervention(
+    return await CounterfactualAttributionService(repo, attempt_repository=AsyncMock()).attribute_payment_intervention(
         command.command_id, as_of_timestamp=AS_OF
     )
 

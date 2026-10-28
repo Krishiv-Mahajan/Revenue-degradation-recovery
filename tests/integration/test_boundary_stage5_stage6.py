@@ -13,6 +13,7 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
 from src.core.intervention.service import InterventionDecisionService
 from src.core.intervention.policy import get_default_policy
+from tests.integration.attempt_registry import register_attempt
 
 @pytest.fixture
 async def session(db_engine):
@@ -64,7 +65,7 @@ T0 = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 def make_event(payment_id, bank=None, wallet=None, currency="INR", pm=None, ingested_at=T0):
     return PaymentEventModel(
-        event_id=uuid.uuid4(), source_system="TEST", source_event_id=str(uuid.uuid4()),
+        event_id=uuid.uuid4(), source_system="synthetic", source_event_id=str(uuid.uuid4()),
         payment_id=payment_id, timestamp=ingested_at, event_type="payment.authorized",
         bank=bank, wallet=wallet, currency=currency, payment_method=pm,
         amount_minor_units=1000, payment_status="AUTHORIZED", ingested_at=ingested_at
@@ -136,7 +137,7 @@ async def test_stage5_stage6_boundary_episode_resolution(session: AsyncSession, 
     )
     
     decision = await intervention_service.decide(
-        payment_attempt_id=payment_id, t_decide=T0
+        attempt=await register_attempt(session, payment_id), t_decide=T0
     )
     
     # Decision should fail due to FAILED_UNRELIABLE_DIAGNOSIS (traffic_mix_shift=True) 
@@ -188,7 +189,7 @@ async def test_stage5_stage6_boundary_currency_episode(session: AsyncSession, fe
     
     # 2. Verify Stage 6 resolves exactly the SAME episode (CURRENCY)
     decision = await intervention_service.decide(
-        payment_attempt_id=payment_id, t_decide=T0
+        attempt=await register_attempt(session, payment_id), t_decide=T0
     )
     
     # Verify fingerprint contains CURRENCY

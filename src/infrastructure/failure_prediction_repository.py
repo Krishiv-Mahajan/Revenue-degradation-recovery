@@ -12,6 +12,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.failure_prediction_models import FailurePrediction
+from src.core.domain.payment_attempts import recorded_provider
 from src.infrastructure.models import FailurePredictionModel
 
 
@@ -83,6 +84,7 @@ class FailurePredictionRepository:
         model = FailurePredictionModel(
             prediction_id=prediction.prediction_id,
             payment_attempt_id=prediction.payment_attempt_id,
+            source_system=prediction.source_system,
             prediction_version=prediction.prediction_version,
             predicted_at=prediction.predicted_at,
             prediction_horizon=prediction.prediction_horizon,
@@ -103,6 +105,7 @@ class FailurePredictionRepository:
         return FailurePrediction(
             prediction_id=model.prediction_id,
             payment_attempt_id=model.payment_attempt_id,
+            source_system=recorded_provider(model.source_system, f"failure prediction {model.prediction_id}"),
             prediction_version=model.prediction_version,
             predicted_at=model.predicted_at,
             prediction_horizon=model.prediction_horizon,

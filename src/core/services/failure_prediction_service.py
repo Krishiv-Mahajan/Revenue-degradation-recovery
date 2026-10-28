@@ -10,7 +10,7 @@ from typing import Optional
 from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.domain.payment_attempts import paypal_order_id
+from src.core.domain.payment_attempts import AttemptRef, paypal_order_id
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import PaymentEventModel
 from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
@@ -23,6 +23,7 @@ from src.core.domain.failure_prediction_models import (
 )
 from src.core.ml.model import FailurePredictionModel
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 import dataclasses
 
 
@@ -33,17 +34,22 @@ class FailurePredictionService:
         feature_reconstruction_service: FeatureReconstructionService,
         prediction_repository: FailurePredictionRepository,
         model: FailurePredictionModel,
+        attempt_repository: Optional[PaymentAttemptRepository] = None,
     ) -> None:
         self.session = session
         self.feature_service = feature_reconstruction_service
         self.repository = prediction_repository
         self.model = model
+        self.attempts = attempt_repository or PaymentAttemptRepository(session)
 
-    async def orchestrate_prediction(self, payment_attempt_id: str, T: datetime) -> FailurePrediction:
+    async def orchestrate_prediction(self, attempt: AttemptRef, T: datetime) -> FailurePrediction:
         """
         Phase 3 implementation: Extract features, determine prediction status, and persist prediction.
-        Idempotent based on identical input context.
+        Idempotent based on identical input context. The attempt must be registered under its provider.
         """
+        await self.attempts.require(attempt)
+        payment_attempt_id = attempt.payment_attempt_id
+
         # 1. Check eligibility
         is_eligible = await self.is_eligible_for_prediction(payment_attempt_id, T)
         
@@ -98,6 +104,7 @@ class FailurePredictionService:
         prediction = FailurePrediction(
             prediction_id=make_prediction_id(payment_attempt_id, new_version),
             payment_attempt_id=payment_attempt_id,
+            source_system=attempt.source_system,
             prediction_version=new_version,
             predicted_at=T,
             prediction_horizon="30m",

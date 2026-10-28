@@ -26,7 +26,7 @@ async def test_reconstruct_features_strict_temporal(db_session: AsyncSession):
     # 1. Insert authorized event ingested exactly at T
     auth_event = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test",
+        source_system="synthetic",
         source_event_id="ev_auth_1",
         payment_id=payment_id,
         timestamp=T,
@@ -43,7 +43,7 @@ async def test_reconstruct_features_strict_temporal(db_session: AsyncSession):
     for i in range(50):
         db_session.add(PaymentEventModel(
             event_id=uuid.uuid4(),
-            source_system="test",
+            source_system="synthetic",
             source_event_id=f"ev_fail_{i}",
             payment_id=f"pay_fail_{i}",
             timestamp=T - timedelta(minutes=5),
@@ -58,7 +58,7 @@ async def test_reconstruct_features_strict_temporal(db_session: AsyncSession):
     # 3. Insert future failure (SHOULD NOT BE INCLUDED)
     db_session.add(PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test",
+        source_system="synthetic",
         source_event_id="ev_future_fail",
         payment_id="pay_future",
         timestamp=T + timedelta(minutes=5),

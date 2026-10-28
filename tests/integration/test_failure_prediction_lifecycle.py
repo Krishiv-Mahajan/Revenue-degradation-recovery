@@ -14,7 +14,7 @@ from src.core.ml.model import DeterministicBaselineModel
 def create_payment_event(session: AsyncSession, payment_id: str, event_type: str, ingested_at: datetime):
     model = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=ingested_at,

@@ -30,6 +30,7 @@ from src.infrastructure.models import (
     InterventionExecutionAttemptModel,
     PaymentEventModel,
 )
+from tests.integration.attempt_registry import register_attempt
 
 
 def add_payment_event(
@@ -40,7 +41,7 @@ def add_payment_event(
 ):
     model = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=ingested_at,
@@ -60,9 +61,11 @@ async def create_act_decision(
     payment_id: str,
     decided_at: datetime,
 ) -> InterventionDecision:
+    attempt = await register_attempt(inter_repo.session, payment_id)
     decision = InterventionDecision(
         decision_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system=attempt.source_system,
         decision_version=1,
         decided_at=decided_at,
         decision_type=DecisionType.ACT,

@@ -30,6 +30,7 @@ class FailurePrediction:
     """
     prediction_id: uuid.UUID
     payment_attempt_id: str
+    source_system: str
     prediction_version: int
     predicted_at: datetime
     prediction_horizon: str

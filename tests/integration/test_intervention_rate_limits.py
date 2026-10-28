@@ -17,12 +17,13 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, PaymentEventModel
+from tests.integration.attempt_registry import register_attempt
 
 
 def add_payment_event(session: AsyncSession, payment_id: str, T: datetime):
     model = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T,
@@ -41,6 +42,7 @@ async def add_prediction(pred_repo: FailurePredictionRepository, payment_id: str
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=T,
         prediction_horizon="30m",
@@ -86,21 +88,21 @@ async def test_global_rate_limit_circuit_breaker(db_session: AsyncSession):
     add_payment_event(db_session, "pay_1", T)
     await db_session.flush()
     await add_prediction(pred_repo, "pay_1", T)
-    d1 = await service.decide("pay_1", T)
+    d1 = await service.decide(await register_attempt(db_session, "pay_1"), T)
     assert d1.decision_type == DecisionType.ACT
 
     # Attempt 2 -> Passes (total = 2)
     add_payment_event(db_session, "pay_2", T)
     await db_session.flush()
     await add_prediction(pred_repo, "pay_2", T)
-    d2 = await service.decide("pay_2", T)
+    d2 = await service.decide(await register_attempt(db_session, "pay_2"), T)
     assert d2.decision_type == DecisionType.ACT
 
     # Attempt 3 -> Exceeds limit (2 >= 2) -> Forced to NO_ACTION
     add_payment_event(db_session, "pay_3", T)
     await db_session.flush()
     await add_prediction(pred_repo, "pay_3", T)
-    d3 = await service.decide("pay_3", T)
+    d3 = await service.decide(await register_attempt(db_session, "pay_3"), T)
     assert d3.decision_type == DecisionType.NO_ACTION
     assert d3.selected_route_id is None
     assert d3.gate_verdict == GateVerdict.FAILED_GLOBAL_RATE_LIMIT
@@ -150,12 +152,12 @@ async def test_route_cooldown_enforcement(db_session: AsyncSession):
     await add_prediction(pred_repo, payment_id, T1)
 
     # First decision at T1 -> ACT with the route
-    d1 = await service.decide(payment_id, T1)
+    d1 = await service.decide(await register_attempt(db_session, payment_id), T1)
     assert d1.decision_type == DecisionType.ACT
     assert d1.selected_route_id == InterventionRouteKey.RETRY_SECONDARY_GATEWAY
 
     # Second decision at T2 (1 min later) -> Route is on cooldown. Since no other routes exist, NO_ACTION.
-    d2 = await service.decide(payment_id, T2)
+    d2 = await service.decide(await register_attempt(db_session, payment_id), T2)
     assert d2.decision_type == DecisionType.NO_ACTION
     assert d2.selected_route_id is None
     assert d2.gate_verdict == GateVerdict.FAILED_NO_ELIGIBLE_ROUTES

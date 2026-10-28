@@ -21,6 +21,7 @@ def test_observation_model_creation():
         observation_id=obs_id,
         command_id=cmd_id,
         payment_attempt_id="pay_123",
+        source_system="razorpay",
         observation_version=1,
         observed_at=now,
         as_of_timestamp=now,

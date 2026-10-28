@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.domain.intervention_models import DecisionType, GateVerdict, InterventionRouteKey
+from src.core.domain.payment_attempts import AttemptRef
 from src.core.intervention.gates import evaluate_policy_cost_currency
 from src.core.intervention.policy import get_default_policy
 from src.core.intervention.service import InterventionDecisionService
@@ -68,14 +69,20 @@ def _service(currency, probability, policy=None):
     intervention_repo.has_recent_route_decision.return_value = False
     intervention_repo.count_recent_act_decisions.return_value = 0
     intervention_repo.get_max_decision_version.return_value = 0
-    service = InterventionDecisionService(AsyncMock(), intervention_repo, feature_repo, policy)
+    service = InterventionDecisionService(
+        AsyncMock(), intervention_repo, feature_repo, policy, attempt_repository=AsyncMock()
+    )
     return service, intervention_repo
+
+
+def _ref(payment_attempt_id):
+    return AttemptRef.for_key("razorpay", payment_attempt_id)
 
 
 async def test_inr_payment_is_still_scored_and_acted_on():
     service, repo = _service("INR", 0.9)
 
-    decision = await service.decide("pay_cost_inr", t_decide=T)
+    decision = await service.decide(_ref("pay_cost_inr"), t_decide=T)
 
     assert (decision.decision_type, decision.gate_verdict) == (DecisionType.ACT, GateVerdict.PASSED)
     assert InterventionRouteKey(decision.selected_route_id) in NO_DIAGNOSIS_ROUTES
@@ -91,7 +98,7 @@ async def test_inr_payment_is_still_scored_and_acted_on():
 async def test_high_risk_payment_in_another_currency_is_not_acted_on(currency):
     service, repo = _service(currency, 0.9)
 
-    decision = await service.decide("pay_cost_foreign", t_decide=T)
+    decision = await service.decide(_ref("pay_cost_foreign"), t_decide=T)
 
     assert (decision.decision_type, decision.gate_verdict) == (
         DecisionType.NO_ACTION, GateVerdict.FAILED_UNSUPPORTED_COST_CURRENCY,
@@ -107,7 +114,7 @@ async def test_high_risk_payment_in_another_currency_is_not_acted_on(currency):
 async def test_unsupported_cost_currency_audit_explains_why_no_route_was_selected():
     service, repo = _service("USD", 0.9)
 
-    decision = await service.decide("pay_cost_audit", t_decide=T)
+    decision = await service.decide(_ref("pay_cost_audit"), t_decide=T)
 
     audit = decision.evaluation_audit_payload
     assert set(audit) == {"gates", "extra", "policy"}
@@ -129,7 +136,7 @@ async def test_unsupported_cost_currency_audit_explains_why_no_route_was_selecte
 async def test_moderate_risk_payment_in_another_currency_keeps_its_risk_only_monitor_verdict():
     service, repo = _service("USD", 0.6)
 
-    decision = await service.decide("pay_cost_monitor", t_decide=T)
+    decision = await service.decide(_ref("pay_cost_monitor"), t_decide=T)
 
     assert (decision.decision_type, decision.gate_verdict) == (DecisionType.MONITOR, GateVerdict.PASSED)
     assert decision.evaluation_audit_payload["gates"]["policy_cost_currency"]["passed"] is False
@@ -142,8 +149,8 @@ async def test_below_act_risk_verdicts_do_not_depend_on_route_costs(probability)
     inr, _ = _service("INR", probability)
     usd, _ = _service("USD", probability)
 
-    inr_decision = await inr.decide("pay_cost_low_inr", t_decide=T)
-    usd_decision = await usd.decide("pay_cost_low_usd", t_decide=T)
+    inr_decision = await inr.decide(_ref("pay_cost_low_inr"), t_decide=T)
+    usd_decision = await usd.decide(_ref("pay_cost_low_usd"), t_decide=T)
 
     def verdict(d):
         return d.decision_type, d.gate_verdict, d.selected_route_id, d.decision_confidence
@@ -157,8 +164,8 @@ async def test_a_policy_with_costs_in_the_payment_currency_scores_it():
     usd, _ = _service("USD", 0.9, usd_policy)
     inr, _ = _service("INR", 0.9, usd_policy)
 
-    usd_decision = await usd.decide("pay_cost_usd_policy", t_decide=T)
-    inr_decision = await inr.decide("pay_cost_inr_under_usd", t_decide=T)
+    usd_decision = await usd.decide(_ref("pay_cost_usd_policy"), t_decide=T)
+    inr_decision = await inr.decide(_ref("pay_cost_inr_under_usd"), t_decide=T)
 
     assert (usd_decision.decision_type, usd_decision.gate_verdict) == (DecisionType.ACT, GateVerdict.PASSED)
     assert (inr_decision.decision_type, inr_decision.gate_verdict) == (

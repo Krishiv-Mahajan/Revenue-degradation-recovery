@@ -88,6 +88,7 @@ class InterventionDecision:
     """
     decision_id: uuid.UUID
     payment_attempt_id: str
+    source_system: str
     decision_version: int
     decided_at: datetime
     decision_type: DecisionType

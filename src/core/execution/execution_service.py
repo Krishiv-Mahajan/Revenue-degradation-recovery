@@ -29,10 +29,12 @@ from src.core.domain.execution_models import (
     make_command_id,
 )
 from src.core.domain.intervention_models import DecisionType, GateVerdict, InterventionDecision
+from src.core.domain.payment_attempts import AttemptRef
 from src.core.execution.executor import InterventionExecutor
 from src.core.execution.simulator import SimulatorInterventionExecutor
 from src.core.execution.state_machine import validate_transition
 from src.infrastructure.execution_repository import ExecutionRepository
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 
 
 class InterventionExecutionService:
@@ -45,10 +47,12 @@ class InterventionExecutionService:
         session: AsyncSession,
         execution_repo: ExecutionRepository,
         executor: Optional[InterventionExecutor] = None,
+        attempt_repository: Optional[PaymentAttemptRepository] = None,
     ) -> None:
         self.session = session
         self.execution_repo = execution_repo
         self.executor = executor or SimulatorInterventionExecutor()
+        self.attempts = attempt_repository or PaymentAttemptRepository(session)
 
     async def create_command(
         self,
@@ -77,6 +81,8 @@ class InterventionExecutionService:
                 f"Cannot create execution command: gate_verdict={decision.gate_verdict.value} (must be PASSED)."
             )
 
+        await self.attempts.require(AttemptRef.for_key(decision.source_system, decision.payment_attempt_id))
+
         # 2. Check Idempotency by decision_id
         existing = await self.execution_repo.get_command_by_decision_id(decision.decision_id)
         if existing is not None:
@@ -101,6 +107,7 @@ class InterventionExecutionService:
             command_id=command_id,
             decision_id=decision.decision_id,
             payment_attempt_id=decision.payment_attempt_id,
+            source_system=decision.source_system,
             decision_version=decision.decision_version,
             route_key=decision.selected_route_id,
             policy_id=decision.policy_id,
@@ -137,6 +144,8 @@ class InterventionExecutionService:
         cmd = await self.execution_repo.get_command_by_id(command_id)
         if cmd is None:
             raise CommandNotFoundError(f"InterventionCommand with id={command_id} not found.")
+
+        await self.attempts.require(AttemptRef.for_key(cmd.source_system, cmd.payment_attempt_id))
 
         # If command is already in a non-PENDING state, return existing authoritative state
         if cmd.command_status != CommandStatus.PENDING:
@@ -200,6 +209,7 @@ class InterventionExecutionService:
         attempt = ExecutionAttempt(
             attempt_id=uuid.uuid4(),
             command_id=command_id,
+            source_system=cmd.source_system,
             attempt_number=attempt_num,
             started_at=attempt_start,
             completed_at=attempt_end,

@@ -67,7 +67,7 @@ async def test_temporal_label_lookup_excludes_future_horizon():
     mock_result_60 = MagicMock()
     failed_event = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T_failed,

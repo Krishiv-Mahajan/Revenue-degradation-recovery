@@ -66,6 +66,7 @@ class InterventionCommand:
     command_id: uuid.UUID
     decision_id: uuid.UUID
     payment_attempt_id: str
+    source_system: str
     decision_version: int
     route_key: InterventionRouteKey
     policy_id: str
@@ -85,6 +86,7 @@ class ExecutionAttempt:
     """
     attempt_id: uuid.UUID
     command_id: uuid.UUID
+    source_system: str
     attempt_number: int
     started_at: datetime
     completed_at: datetime
@@ -108,6 +110,7 @@ class PaymentOutcomeObservation:
     observation_id: uuid.UUID
     command_id: uuid.UUID
     payment_attempt_id: str
+    source_system: str
     observation_version: int
     observed_at: datetime
     as_of_timestamp: datetime

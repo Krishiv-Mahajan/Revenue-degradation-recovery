@@ -12,6 +12,7 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.core.ml.model import DeterministicBaselineModel
 from src.core.domain.failure_prediction_models import PredictionStatus
+from tests.integration.attempt_registry import register_attempt
 
 @pytest.mark.asyncio
 async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
@@ -27,7 +28,7 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
     # 1. Insert trigger event
     auth_event = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test",
+        source_system="synthetic",
         source_event_id="ev_auth_1",
         payment_id=payment_id,
         timestamp=T,
@@ -44,7 +45,7 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
     for i in range(60):
         db_session.add(PaymentEventModel(
             event_id=uuid.uuid4(),
-            source_system="test",
+            source_system="synthetic",
             source_event_id=f"ev_fail_{i}",
             payment_id=f"pay_fail_{i}",
             timestamp=T - timedelta(minutes=5),
@@ -57,9 +58,10 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
         ))
     
     await db_session.commit()
+    attempt = await register_attempt(db_session, payment_id)
     
     # 2. First prediction orchestration
-    pred1 = await svc.orchestrate_prediction(payment_id, T)
+    pred1 = await svc.orchestrate_prediction(attempt, T)
     
     assert pred1.prediction_status == PredictionStatus.PREDICTED.value
     assert pred1.prediction_version == 1
@@ -67,7 +69,7 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
     assert pred1.risk_band is not None
     
     # 3. Second prediction orchestration (exactly the same inputs -> Idempotent)
-    pred2 = await svc.orchestrate_prediction(payment_id, T)
+    pred2 = await svc.orchestrate_prediction(attempt, T)
     
     # It should return the exact same object/version without appending
     assert pred2.prediction_version == 1
@@ -82,7 +84,7 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
     # 4. Modify context (new capture event ingested before T) to trigger a new version
     db_session.add(PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test",
+        source_system="synthetic",
         source_event_id="ev_cap_new",
         payment_id="pay_cap_new",
         timestamp=T - timedelta(minutes=2),
@@ -96,7 +98,7 @@ async def test_prediction_persistence_and_idempotency(db_session: AsyncSession):
     await db_session.commit()
     
     # 5. Third prediction orchestration (context changed -> new version)
-    pred3 = await svc.orchestrate_prediction(payment_id, T)
+    pred3 = await svc.orchestrate_prediction(attempt, T)
     
     assert pred3.prediction_version == 2
     assert pred3.input_fingerprint != pred1.input_fingerprint

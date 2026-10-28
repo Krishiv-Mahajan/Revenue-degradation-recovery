@@ -38,7 +38,7 @@ from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import BinaryExpression, BindParameter, BooleanClauseList, TextClause
 
 from src.api.inspection_routes import get_executive_summary, get_payment_timeline
-from src.core.domain.payment_attempts import paypal_attempt_id
+from src.core.domain.payment_attempts import AttemptRef, paypal_attempt_id
 from src.core.normalizers.paypal import normalize_paypal_event
 from src.core.normalizers.razorpay import normalize_razorpay_event
 from src.core.parsers.paypal import parse_paypal_event
@@ -430,6 +430,7 @@ def _stub_live_pipeline_services(monkeypatch):
     monkeypatch.setattr(live_pipeline, "get_development_model", MagicMock())
     monkeypatch.setattr(live_pipeline, "get_default_policy", MagicMock())
     monkeypatch.setattr(live_pipeline, "SimulatorInterventionExecutor", MagicMock())
+    monkeypatch.setattr(live_pipeline, "PaymentAttemptRepository", MagicMock(return_value=AsyncMock()))
 
     session = AsyncMock()
     result = MagicMock()
@@ -469,7 +470,10 @@ async def test_paypal_order_approval_enters_prediction_as_its_own_paypal_attempt
     assert outcome["status"] == "success"
     assert outcome["payment_attempt_id"] == PAYPAL_ATTEMPT_ID
     prediction_service.orchestrate_prediction.assert_awaited_once()
-    assert prediction_service.orchestrate_prediction.await_args.args == (PAYPAL_ATTEMPT_ID,)
+    assert prediction_service.orchestrate_prediction.await_args.args == (
+        AttemptRef("paypal", PAYPAL_ATTEMPT_ID, samples.ORDER_ID),
+    )
+    live_pipeline.PaymentAttemptRepository.return_value.register.assert_awaited_once_with(event)
     _assert_stages_2_to_4_skipped()
     session.execute.assert_not_awaited()
 
@@ -527,7 +531,10 @@ async def test_live_prediction_trigger_is_entered_by_a_real_razorpay_authorizati
 
     assert outcome["status"] == "success"
     prediction_service.orchestrate_prediction.assert_awaited_once()
-    assert prediction_service.orchestrate_prediction.await_args.args == (RAZORPAY_ATTEMPT_ID,)
+    assert prediction_service.orchestrate_prediction.await_args.args == (
+        AttemptRef("razorpay", RAZORPAY_ATTEMPT_ID, RAZORPAY_ATTEMPT_ID),
+    )
+    live_pipeline.PaymentAttemptRepository.return_value.register.assert_awaited_once_with(event)
 
 
 async def test_live_prediction_trigger_checks_the_provider_as_well_as_the_event_type(monkeypatch):

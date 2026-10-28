@@ -15,6 +15,7 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, InterventionDecisionModel, PaymentEventModel
+from tests.integration.attempt_registry import register_attempt
 
 
 @pytest.mark.asyncio
@@ -33,7 +34,7 @@ async def test_idempotency_identical_inputs(db_session: AsyncSession):
     # Ingest auth event
     auth = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T,
@@ -45,11 +46,13 @@ async def test_idempotency_identical_inputs(db_session: AsyncSession):
     )
     db_session.add(auth)
     await db_session.flush()
+    attempt = await register_attempt(db_session, payment_id)
 
     # Ingest Stage 5 prediction
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=T,
         prediction_horizon="30m",
@@ -66,11 +69,11 @@ async def test_idempotency_identical_inputs(db_session: AsyncSession):
     await pred_repo.append_prediction(pred)
 
     # First call -> creates version 1
-    d1 = await service.decide(payment_id, T)
+    d1 = await service.decide(attempt, T)
     assert d1.decision_version == 1
 
     # Second call at same T_decide -> idempotent, returns version 1
-    d2 = await service.decide(payment_id, T)
+    d2 = await service.decide(attempt, T)
     assert d2.decision_version == 1
     assert d2.decision_id == d1.decision_id
     assert d2.input_fingerprint == d1.input_fingerprint
@@ -97,7 +100,7 @@ async def test_version_increment_on_later_re_evaluation(db_session: AsyncSession
 
     auth = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T1,
@@ -109,10 +112,12 @@ async def test_version_increment_on_later_re_evaluation(db_session: AsyncSession
     )
     db_session.add(auth)
     await db_session.flush()
+    attempt = await register_attempt(db_session, payment_id)
 
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=T1,
         prediction_horizon="30m",
@@ -128,11 +133,11 @@ async def test_version_increment_on_later_re_evaluation(db_session: AsyncSession
     )
     await pred_repo.append_prediction(pred)
 
-    d1 = await service.decide(payment_id, T1)
+    d1 = await service.decide(attempt, T1)
     assert d1.decision_version == 1
 
     # Re-evaluate at T2
-    d2 = await service.decide(payment_id, T2)
+    d2 = await service.decide(attempt, T2)
     assert d2.decision_version == 2
     assert d2.decision_id != d1.decision_id
 

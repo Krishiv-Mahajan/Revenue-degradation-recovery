@@ -26,6 +26,7 @@ from src.core.execution.simulator import SimulatorInterventionExecutor, Simulato
 from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, PaymentEventModel
+from tests.integration.attempt_registry import register_attempt
 
 
 def add_payment_event(
@@ -37,7 +38,7 @@ def add_payment_event(
 ):
     model = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=ingested_at,
@@ -61,9 +62,11 @@ async def create_stage6_decision(
     decided_at: datetime = None,
 ) -> InterventionDecision:
     now = decided_at or datetime.now(timezone.utc)
+    attempt = await register_attempt(inter_repo.session, payment_id)
     decision = InterventionDecision(
         decision_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system=attempt.source_system,
         decision_version=1,
         decided_at=now,
         decision_type=decision_type,
@@ -237,6 +240,8 @@ async def test_rejection_of_non_act_decisions(db_session: AsyncSession):
     exec_service = InterventionExecutionService(db_session, exec_repo)
 
     T0 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
+    add_payment_event(db_session, "pay_rej_1", "payment.authorized", T0)
+    add_payment_event(db_session, "pay_rej_2", "payment.authorized", T0)
 
     # NO_ACTION
     dec_no_action = await create_stage6_decision(

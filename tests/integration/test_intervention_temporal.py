@@ -15,6 +15,7 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, PaymentEventModel
+from tests.integration.attempt_registry import register_attempt
 
 
 @pytest.mark.asyncio
@@ -35,7 +36,7 @@ async def test_future_terminal_event_does_not_leak_into_earlier_decision(db_sess
     # Ingest auth at T_decide
     auth = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T_decide,
@@ -50,7 +51,7 @@ async def test_future_terminal_event_does_not_leak_into_earlier_decision(db_sess
     # Ingest future failure event that exists in DB (e.g. during replay)
     future_fail = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T_future_failed,
@@ -70,6 +71,7 @@ async def test_future_terminal_event_does_not_leak_into_earlier_decision(db_sess
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=T_decide,
         prediction_horizon="30m",
@@ -86,13 +88,13 @@ async def test_future_terminal_event_does_not_leak_into_earlier_decision(db_sess
     await pred_repo.append_prediction(pred)
 
     # Evaluating as-of T_decide must NOT trigger FAILED_TERMINAL_OUTCOME_INGESTED
-    decision = await service.decide(payment_id, T_decide)
+    decision = await service.decide(await register_attempt(db_session, payment_id), T_decide)
     assert decision.decision_type == DecisionType.ACT
     assert decision.gate_verdict == GateVerdict.PASSED
 
     # Evaluating as-of T_future_failed + 1min MUST see the terminal event and force NO_ACTION
     T_after = T_future_failed + timedelta(minutes=1)
-    decision_after = await service.decide(payment_id, T_after)
+    decision_after = await service.decide(await register_attempt(db_session, payment_id), T_after)
     assert decision_after.decision_type == DecisionType.NO_ACTION
     assert decision_after.gate_verdict == GateVerdict.FAILED_TERMINAL_OUTCOME_INGESTED
 
@@ -114,7 +116,7 @@ async def test_future_stage5_prediction_does_not_leak_into_earlier_decision(db_s
 
     auth = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=T_decide,
@@ -133,6 +135,7 @@ async def test_future_stage5_prediction_does_not_leak_into_earlier_decision(db_s
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=T_future_pred,
         prediction_horizon="30m",
@@ -149,6 +152,6 @@ async def test_future_stage5_prediction_does_not_leak_into_earlier_decision(db_s
     await pred_repo.append_prediction(pred)
 
     # Decision at T_decide must not see future prediction
-    decision = await service.decide(payment_id, T_decide)
+    decision = await service.decide(await register_attempt(db_session, payment_id), T_decide)
     assert decision.decision_type == DecisionType.NO_ACTION
     assert decision.gate_verdict == GateVerdict.FAILED_STAGE5_UNAVAILABLE

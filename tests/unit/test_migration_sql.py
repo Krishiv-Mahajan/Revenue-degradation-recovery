@@ -23,6 +23,8 @@ import sqlalchemy as sa
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.dialects.postgresql import asyncpg as pg_asyncpg
 
+from src.core.domain import payment_attempts
+from src.core.domain.source_systems import PIPELINE_PROVIDERS
 from src.core.parsers.paypal import Identifier
 from src.infrastructure import models
 from src.infrastructure.db_safety import INTERMEDIATE_REVISION_ASSERTION_SQL
@@ -168,7 +170,12 @@ def _parser_pattern() -> str:
 class TestPayPalGrammarAgreement:
     def test_registry_check_uses_the_parser_grammar(self):
         assert _parser_pattern() == models.PAYPAL_IDENTIFIER_PATTERN == REVISION_A.PAYPAL_IDENTIFIER_PATTERN
+        assert _parser_pattern() == payment_attempts.PAYPAL_IDENTIFIER_PATTERN
         assert f"provider_reference ~ '{_parser_pattern()}'" in models.PAYMENT_ATTEMPT_NAMESPACE_CHECK
+
+    def test_pipeline_providers_are_exactly_the_registry_providers(self):
+        quoted = ", ".join(f"'{provider}'" for provider in PIPELINE_PROVIDERS)
+        assert models.PAYMENT_ATTEMPT_SOURCE_SYSTEM_CHECK == f"source_system IN ({quoted})"
 
     def test_models_and_migration_constraints_are_identical(self):
         assert models.PAYMENT_ATTEMPT_NAMESPACE_CHECK == REVISION_A.NAMESPACE_CHECK

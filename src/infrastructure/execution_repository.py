@@ -25,7 +25,7 @@ from src.core.domain.execution_models import (
     PaymentOutcomeObservation,
 )
 from src.core.domain.intervention_models import InterventionRouteKey
-from src.core.domain.payment_attempts import paypal_order_id
+from src.core.domain.payment_attempts import paypal_order_id, recorded_provider
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.models import (
     InterventionCommandModel,
@@ -104,6 +104,7 @@ class ExecutionRepository:
             command_id=command.command_id,
             decision_id=command.decision_id,
             payment_attempt_id=command.payment_attempt_id,
+            source_system=command.source_system,
             decision_version=command.decision_version,
             route_key=command.route_key.value,
             policy_id=command.policy_id,
@@ -187,6 +188,7 @@ class ExecutionRepository:
         model = InterventionExecutionAttemptModel(
             attempt_id=attempt.attempt_id,
             command_id=attempt.command_id,
+            source_system=attempt.source_system,
             attempt_number=attempt.attempt_number,
             started_at=attempt.started_at,
             completed_at=attempt.completed_at,
@@ -218,6 +220,7 @@ class ExecutionRepository:
             ExecutionAttempt(
                 attempt_id=m.attempt_id,
                 command_id=m.command_id,
+                source_system=recorded_provider(m.source_system, f"execution attempt {m.attempt_id}"),
                 attempt_number=m.attempt_number,
                 started_at=m.started_at,
                 completed_at=m.completed_at,
@@ -312,6 +315,7 @@ class ExecutionRepository:
             observation_id=observation.observation_id,
             command_id=observation.command_id,
             payment_attempt_id=observation.payment_attempt_id,
+            source_system=observation.source_system,
             observation_version=observation.observation_version,
             observed_at=observation.observed_at,
             as_of_timestamp=observation.as_of_timestamp,
@@ -363,6 +367,7 @@ class ExecutionRepository:
             command_id=model.command_id,
             decision_id=model.decision_id,
             payment_attempt_id=model.payment_attempt_id,
+            source_system=recorded_provider(model.source_system, f"intervention command {model.command_id}"),
             decision_version=model.decision_version,
             route_key=InterventionRouteKey(model.route_key),
             policy_id=model.policy_id,
@@ -380,6 +385,7 @@ class ExecutionRepository:
             observation_id=model.observation_id,
             command_id=model.command_id,
             payment_attempt_id=model.payment_attempt_id,
+            source_system=recorded_provider(model.source_system, f"outcome observation {model.observation_id}"),
             observation_version=model.observation_version,
             observed_at=model.observed_at,
             as_of_timestamp=model.as_of_timestamp,

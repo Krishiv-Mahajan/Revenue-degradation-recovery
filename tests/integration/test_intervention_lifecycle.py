@@ -15,6 +15,7 @@ from src.infrastructure.feature_reconstruction_repository import FeatureReconstr
 from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, PaymentEventModel
+from tests.integration.attempt_registry import register_attempt
 
 
 def add_payment_event(
@@ -28,7 +29,7 @@ def add_payment_event(
 ):
     model = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=ingested_at,
@@ -53,6 +54,7 @@ async def add_stage5_prediction(
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=predicted_at,
         prediction_horizon="30m",
@@ -90,7 +92,7 @@ async def test_lifecycle_act_verdict(db_session: AsyncSession):
     # Stage 5 prediction with high failure risk
     await add_stage5_prediction(pred_repo, payment_id, T, failure_probability=0.85)
 
-    decision = await service.decide(payment_id, T)
+    decision = await service.decide(await register_attempt(db_session, payment_id), T)
 
     assert decision.decision_type == DecisionType.ACT
     assert decision.selected_route_id is not None
@@ -124,7 +126,7 @@ async def test_lifecycle_monitor_verdict(db_session: AsyncSession):
     # Stage 5 prediction with moderate risk
     await add_stage5_prediction(pred_repo, payment_id, T, failure_probability=0.50)
 
-    decision = await service.decide(payment_id, T)
+    decision = await service.decide(await register_attempt(db_session, payment_id), T)
 
     assert decision.decision_type == DecisionType.MONITOR
     assert decision.selected_route_id is None
@@ -152,7 +154,7 @@ async def test_lifecycle_no_action_verdict(db_session: AsyncSession):
     # Stage 5 prediction with low risk
     await add_stage5_prediction(pred_repo, payment_id, T, failure_probability=0.15)
 
-    decision = await service.decide(payment_id, T)
+    decision = await service.decide(await register_attempt(db_session, payment_id), T)
 
     assert decision.decision_type == DecisionType.NO_ACTION
     assert decision.selected_route_id is None
@@ -181,7 +183,7 @@ async def test_lifecycle_pre_terminal_invariance_gate(db_session: AsyncSession):
 
     await add_stage5_prediction(pred_repo, payment_id, T_auth, failure_probability=0.90)
 
-    decision = await service.decide(payment_id, T_decide)
+    decision = await service.decide(await register_attempt(db_session, payment_id), T_decide)
 
     assert decision.decision_type == DecisionType.NO_ACTION
     assert decision.selected_route_id is None

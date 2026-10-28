@@ -18,15 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database import AsyncSessionLocal
 from src.core.domain.models import PaymentEvent
+from src.core.domain.payment_attempt_exceptions import AttemptProviderConflictError
 from src.core.domain.payment_attempts import (
     PipelineRole,
-    in_paypal_attempt_namespace,
+    pipeline_attempt_refusal,
     resolve_pipeline_attempt,
 )
 from src.core.domain.source_systems import PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.models import (
     InterventionCommandModel,
 )
+from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 
 # Repositories
 from src.infrastructure.analytics_repository import AnalyticsRepository
@@ -82,12 +84,9 @@ async def _execute_live_pipeline(
     pid = payment_event.payment_id
     paypal = payment_event.source_system == PAYPAL_SOURCE_SYSTEM
     attempt = resolve_pipeline_attempt(payment_event)
-    if in_paypal_attempt_namespace(payment_event):
-        logger.warning(
-            f"[LivePipelineAttemptRefused] source_event_id={payment_event.source_event_id} "
-            f"source_system={payment_event.source_system}: payment_id uses the PayPal attempt namespace; "
-            f"Stages 5-8 skipped"
-        )
+    refusal = pipeline_attempt_refusal(payment_event)
+    if refusal is not None:
+        _log_attempt_refused(payment_event, refusal)
 
     try:
         # 1. Repositories
@@ -99,6 +98,7 @@ async def _execute_live_pipeline(
         inter_repo = InterventionRepository(session)
         exec_repo = ExecutionRepository(session)
         attr_repo = AttributionRepository(session)
+        attempt_repo = PaymentAttemptRepository(session)
 
         # 2. Canonical Services
         analytics_svc = PaymentHealthAnalyticsService(analytics_repo)
@@ -221,14 +221,23 @@ async def _execute_live_pipeline(
         attribution = None
 
         if attempt is not None and attempt.role is PipelineRole.TRIGGER:
+            # Registration commits or rolls back together with the Stage 5-8 records below.
+            current_stage = "STAGE_5_REGISTRATION"
+            try:
+                await attempt_repo.register(payment_event)
+            except AttemptProviderConflictError as conflict:
+                _log_attempt_refused(payment_event, str(conflict))
+                attempt = None
+
+        if attempt is not None and attempt.role is PipelineRole.TRIGGER:
             # Stage 5: Failure Prediction
             current_stage = "STAGE_5_PREDICTION"
-            prediction = await pred_svc.orchestrate_prediction(attempt.payment_attempt_id, T=t_eval)
+            prediction = await pred_svc.orchestrate_prediction(attempt.ref, T=t_eval)
 
             # Stage 6: Intervention Decisioning
             current_stage = "STAGE_6_DECISION"
             if prediction.failure_probability is not None and prediction.failure_probability > 0.5:
-                decision = await inter_decision_svc.decide(attempt.payment_attempt_id, t_decide=t_eval)
+                decision = await inter_decision_svc.decide(attempt.ref, t_decide=t_eval)
 
                 if decision.decision_type.value == "ACT":
                     # Stage 7A: Execution Command Creation & Dispatch (Claim immediately at t_eval)
@@ -295,3 +304,10 @@ async def _execute_live_pipeline(
             "failed_stage": current_stage,
             "error": str(e),
         }
+
+
+def _log_attempt_refused(payment_event: PaymentEvent, reason: str) -> None:
+    logger.warning(
+        f"[LivePipelineAttemptRefused] source_event_id={payment_event.source_event_id} "
+        f"source_system={payment_event.source_system}: {reason}; Stages 5-8 skipped"
+    )

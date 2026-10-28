@@ -24,6 +24,7 @@ from src.infrastructure.models import (
     InterventionExecutionAttemptModel,
     PaymentEventModel,
 )
+from tests.integration.attempt_registry import register_attempt
 
 
 @pytest.mark.asyncio
@@ -44,7 +45,7 @@ async def test_duplicate_command_creation_idempotent(db_engine):
         # Ingest auth event
         auth = PaymentEventModel(
             event_id=uuid.uuid4(),
-            source_system="test_system",
+            source_system="synthetic",
             source_event_id=str(uuid.uuid4()),
             payment_id=payment_id,
             timestamp=now,
@@ -56,10 +57,12 @@ async def test_duplicate_command_creation_idempotent(db_engine):
         )
         session.add(auth)
         await session.flush()
+        attempt = await register_attempt(session, payment_id)
 
         decision = InterventionDecision(
             decision_id=uuid.uuid4(),
             payment_attempt_id=payment_id,
+            source_system=attempt.source_system,
             decision_version=1,
             decided_at=now,
             decision_type=DecisionType.ACT,
@@ -111,7 +114,7 @@ async def test_concurrent_execution_race_condition_safe(db_engine):
 
         auth = PaymentEventModel(
             event_id=uuid.uuid4(),
-            source_system="test_system",
+            source_system="synthetic",
             source_event_id=str(uuid.uuid4()),
             payment_id=payment_id,
             timestamp=now,
@@ -123,10 +126,12 @@ async def test_concurrent_execution_race_condition_safe(db_engine):
         )
         session.add(auth)
         await session.flush()
+        attempt = await register_attempt(session, payment_id)
 
         decision = InterventionDecision(
             decision_id=decision_id,
             payment_attempt_id=payment_id,
+            source_system=attempt.source_system,
             decision_version=1,
             decided_at=now,
             decision_type=DecisionType.ACT,

@@ -126,12 +126,14 @@ def _service_repo(decided_at, amount=None):
         command_id=uuid.uuid4(),
         decision_id=uuid.uuid4(),
         payment_attempt_id="pay_1",
+        source_system="razorpay",
         route_key="RETRY_ALTERNATE_GATEWAY",
         command_status="NOT_NEEDED",
         created_at=decided_at,
     )
     decision = MagicMock(
         decision_id=command.decision_id,
+        source_system="razorpay",
         decision_type="NO_ACTION",
         stage5_prediction_id=None,
         diagnosis_confidence=None,
@@ -150,7 +152,7 @@ def _service_repo(decided_at, amount=None):
 
 
 async def _attribute(repo, command, as_of):
-    return await CounterfactualAttributionService(repo).attribute_payment_intervention(
+    return await CounterfactualAttributionService(repo, attempt_repository=AsyncMock()).attribute_payment_intervention(
         command.command_id, as_of_timestamp=as_of
     )
 

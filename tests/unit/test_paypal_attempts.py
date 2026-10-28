@@ -12,6 +12,7 @@ import pytest
 from src.core.domain.exceptions import NormalizationError
 from src.core.domain.payment_attempts import (
     PAYPAL_ATTEMPT_PREFIX,
+    AttemptRef,
     PipelineAttempt,
     PipelineRole,
     in_paypal_attempt_namespace,
@@ -31,6 +32,7 @@ from tests.unit import paypal_event_samples as samples
 
 T = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
 PAYPAL_ATTEMPT_ID = f"{PAYPAL_ATTEMPT_PREFIX}{samples.ORDER_ID}"
+PAYPAL_ATTEMPT = AttemptRef("paypal", PAYPAL_ATTEMPT_ID, samples.ORDER_ID)
 
 
 def _paypal(builder):
@@ -68,14 +70,14 @@ def test_non_paypal_attempt_ids_have_no_paypal_order(attempt_id):
 def test_paypal_order_approval_starts_the_order_attempt():
     event = _paypal(samples.order_approved)
     assert event.payment_id == samples.ORDER_ID
-    assert resolve_pipeline_attempt(event) == PipelineAttempt(PipelineRole.TRIGGER, PAYPAL_ATTEMPT_ID)
+    assert resolve_pipeline_attempt(event) == PipelineAttempt(PipelineRole.TRIGGER, PAYPAL_ATTEMPT)
 
 
 @pytest.mark.parametrize("builder", [samples.capture_completed, samples.capture_declined])
 def test_paypal_capture_outcomes_resolve_their_order_attempt_by_order_id(builder):
     event = _paypal(builder)
     assert (event.payment_id, event.order_id) == (samples.CAPTURE_ID, samples.ORDER_ID)
-    assert resolve_pipeline_attempt(event) == PipelineAttempt(PipelineRole.TERMINAL, PAYPAL_ATTEMPT_ID)
+    assert resolve_pipeline_attempt(event) == PipelineAttempt(PipelineRole.TERMINAL, PAYPAL_ATTEMPT)
 
 
 @pytest.mark.parametrize("builder", [samples.capture_pending, samples.capture_refunded, samples.order_completed])
@@ -131,9 +133,10 @@ def test_razorpay_and_synthetic_roles_are_unchanged(source_system):
     authorized = _razorpay("payment.authorized", "authorized", source_system=source_system)
     captured = _razorpay("payment.captured", "captured", source_system=source_system)
     failed = _razorpay("payment.failed", "failed", source_system=source_system)
-    assert resolve_pipeline_attempt(authorized) == PipelineAttempt(PipelineRole.TRIGGER, "pay_AttemptTest0001")
-    assert resolve_pipeline_attempt(captured) == PipelineAttempt(PipelineRole.TERMINAL, "pay_AttemptTest0001")
-    assert resolve_pipeline_attempt(failed) == PipelineAttempt(PipelineRole.TERMINAL, "pay_AttemptTest0001")
+    ref = AttemptRef(source_system or "razorpay", "pay_AttemptTest0001", "pay_AttemptTest0001")
+    assert resolve_pipeline_attempt(authorized) == PipelineAttempt(PipelineRole.TRIGGER, ref)
+    assert resolve_pipeline_attempt(captured) == PipelineAttempt(PipelineRole.TERMINAL, ref)
+    assert resolve_pipeline_attempt(failed) == PipelineAttempt(PipelineRole.TERMINAL, ref)
     assert resolve_pipeline_attempt(authorized.model_copy(update={"event_type": "payment.refunded"})) is None
 
 

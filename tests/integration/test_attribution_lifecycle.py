@@ -31,6 +31,7 @@ from src.infrastructure.models import (
     FailurePredictionModel,
     PaymentEventModel,
 )
+from tests.integration.attempt_registry import register_attempt
 
 
 def add_payment_event(
@@ -42,7 +43,7 @@ def add_payment_event(
 ):
     model = PaymentEventModel(
         event_id=uuid.uuid4(),
-        source_system="test_system",
+        source_system="synthetic",
         source_event_id=str(uuid.uuid4()),
         payment_id=payment_id,
         timestamp=ingested_at,
@@ -68,6 +69,7 @@ def add_stage5_prediction(
     model = FailurePredictionModel(
         prediction_id=pred_id,
         payment_attempt_id=payment_id,
+        source_system="synthetic",
         prediction_version=1,
         predicted_at=predicted_at,
         prediction_horizon="IMMEDIATE_ATTEMPT",
@@ -93,9 +95,11 @@ async def create_stage6_decision(
     decision_type: DecisionType = DecisionType.ACT,
     route: InterventionRouteKey = InterventionRouteKey.RETRY_SECONDARY_GATEWAY,
 ) -> InterventionDecision:
+    attempt = await register_attempt(inter_repo.session, payment_id)
     decision = InterventionDecision(
         decision_id=uuid.uuid4(),
         payment_attempt_id=payment_id,
+        source_system=attempt.source_system,
         decision_version=1,
         decided_at=decided_at,
         decision_type=decision_type,

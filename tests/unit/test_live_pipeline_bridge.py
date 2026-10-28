@@ -265,6 +265,7 @@ async def test_stage7_executor_is_simulator():
         command_id=uuid.uuid4(),
         decision_id=uuid.uuid4(),
         payment_attempt_id="pay_test_sim",
+        source_system="razorpay",
         decision_version=1,
         route_key=InterventionRouteKey.FALLBACK_PAYMENT_LINK,
         policy_id="policy_v1",
@@ -285,6 +286,7 @@ async def test_stage7_executor_is_simulator():
 # Test 6: TEST A — Immediate Claim (t_claim == t_eval, NOT t_eval + 1s)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
+@patch("src.core.services.live_pipeline.PaymentAttemptRepository")
 @patch("src.core.services.live_pipeline.PaymentHealthAnalyticsService")
 @patch("src.core.services.live_pipeline.DegradationService")
 @patch("src.core.services.live_pipeline.RCAService")
@@ -302,11 +304,13 @@ async def test_live_stage7_immediate_claim(
     mock_rca_cls,
     mock_deg_cls,
     mock_analytics_cls,
+    mock_attempts_cls,
 ):
     """Prove that live Stage 7 invokes execution with t_claim == t_eval and NOT t_eval + 1 second."""
     from src.core.domain.intervention_models import DecisionType, GateVerdict, InterventionDecision, InterventionRouteKey
     from src.core.domain.execution_models import InterventionCommand, CommandStatus
 
+    mock_attempts_cls.return_value.register = AsyncMock()
     mock_analytics_cls.return_value.calculate_and_save_window = AsyncMock()
     mock_deg_cls.return_value.process_snapshots = AsyncMock()
     mock_rca_cls.return_value.evaluate_episode = AsyncMock()
@@ -376,6 +380,7 @@ async def test_live_stage7_immediate_claim(
 # Test 7: TEST B — No Premature Attribution During payment.authorized
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
+@patch("src.core.services.live_pipeline.PaymentAttemptRepository")
 @patch("src.core.services.live_pipeline.PaymentHealthAnalyticsService")
 @patch("src.core.services.live_pipeline.DegradationService")
 @patch("src.core.services.live_pipeline.RCAService")
@@ -393,11 +398,13 @@ async def test_no_premature_attribution_on_authorized(
     mock_rca_cls,
     mock_deg_cls,
     mock_analytics_cls,
+    mock_attempts_cls,
 ):
     """For payment.authorized: prove Stage 7B / Stage 8 final attribution is NOT invoked prematurely."""
     from src.core.domain.intervention_models import DecisionType, GateVerdict, InterventionDecision, InterventionRouteKey
     from src.core.domain.execution_models import InterventionCommand, CommandStatus
 
+    mock_attempts_cls.return_value.register = AsyncMock()
     mock_analytics_cls.return_value.calculate_and_save_window = AsyncMock()
     mock_deg_cls.return_value.process_snapshots = AsyncMock()
     mock_rca_cls.return_value.evaluate_episode = AsyncMock()

@@ -15,7 +15,7 @@ from src.core.domain.attribution_models import (
     CounterfactualAttribution,
     TreatmentStatus,
 )
-from src.core.domain.payment_attempts import paypal_order_id
+from src.core.domain.payment_attempts import paypal_order_id, recorded_provider
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
 from src.infrastructure.paypal_attempt_queries import paypal_trigger_events
 from src.infrastructure.models import (
@@ -54,6 +54,7 @@ class AttributionRepository:
             attribution_id=m.attribution_id,
             command_id=m.command_id,
             payment_attempt_id=m.payment_attempt_id,
+            source_system=recorded_provider(m.source_system, f"counterfactual attribution {m.attribution_id}"),
             decision_id=m.decision_id,
             attribution_version=m.attribution_version,
             attributed_at=m.attributed_at,
@@ -119,6 +120,7 @@ class AttributionRepository:
             attribution_id=attr.attribution_id,
             command_id=attr.command_id,
             payment_attempt_id=attr.payment_attempt_id,
+            source_system=attr.source_system,
             decision_id=attr.decision_id,
             attribution_version=attr.attribution_version,
             attributed_at=attr.attributed_at,

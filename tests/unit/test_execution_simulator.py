@@ -20,6 +20,7 @@ def _dummy_command(route_key: InterventionRouteKey = InterventionRouteKey.RETRY_
         command_id=uuid.uuid4(),
         decision_id=uuid.uuid4(),
         payment_attempt_id="pay_sim_test",
+        source_system="razorpay",
         decision_version=1,
         route_key=route_key,
         policy_id="test_policy",
