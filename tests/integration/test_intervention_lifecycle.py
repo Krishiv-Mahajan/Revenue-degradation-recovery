@@ -51,6 +51,7 @@ async def add_stage5_prediction(
     failure_probability: float,
     status: str = "PREDICTED",
 ) -> FailurePrediction:
+    await register_attempt(pred_repo.session, payment_id)
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,

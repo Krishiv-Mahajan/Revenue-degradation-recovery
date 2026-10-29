@@ -11,7 +11,15 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.core.domain.payment_attempt_exceptions import (
+    AttemptProviderConflictError,
+    ProviderIdentityMissingError,
+)
+from src.infrastructure.execution_repository import ExecutionRepository
+from src.infrastructure.failure_prediction_repository import FailurePredictionRepository
+from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import PAYPAL_IDENTIFIER_PATTERN
 from tests.migration.conftest import BASE_REVISION, REVISION_A
 from tests.unit.test_migration_sql import PAYPAL_ID_CORPUS, REVISION_A as MIGRATION
@@ -212,7 +220,7 @@ async def test_upgrade_registers_each_provider_from_its_trigger_and_backfills_ev
     base_columns = columns_by_table(await schema_snapshot(engine))
     before_hashes = await data_hashes(engine, base_columns)
 
-    result = await alembic.ok("upgrade", "head")
+    result = await alembic.ok("upgrade", REVISION_A)
 
     assert await version(engine) == REVISION_A
     assert "PT-01" not in result.stderr
@@ -369,7 +377,7 @@ async def test_each_preflight_failure_aborts_and_changes_nothing(migration_db, c
     before_schema = await schema_snapshot(engine)
     before_hashes = await data_hashes(engine, columns_by_table(before_schema))
 
-    result = await alembic.run("upgrade", "head")
+    result = await alembic.run("upgrade", REVISION_A)
 
     code = case[:5]
     assert result.returncode != 0
@@ -384,7 +392,7 @@ async def test_pt01_reports_suspicious_trigger_timing_without_aborting(migration
         await authorized(conn, "pay_backdated0001", at=T0 + timedelta(hours=1))
         await prediction(conn, "pay_backdated0001", at=T0)
 
-    result = await alembic.ok("upgrade", "head")
+    result = await alembic.ok("upgrade", REVISION_A)
 
     assert "PT-01 (warning only): 1 attempt(s)" in result.stderr
     assert "pay_backdated0001" in result.stderr
@@ -427,7 +435,7 @@ async def test_every_preflight_query_and_the_helper_execute_on_postgresql(migrat
 
 async def test_registry_postconditions_execute_on_postgresql(migration_db):
     engine, alembic = migration_db
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     async with engine.connect() as conn:
         transaction = await conn.begin()
         for statement in (MIGRATION.CREATE_REQUIRE_NONE, MIGRATION.CREATE_KEYS):
@@ -500,7 +508,7 @@ async def _registry_insert(conn, source, key, reference, trigger_event_id):
 @pytest.mark.parametrize("case", sorted(INVALID_REGISTRY_ROWS))
 async def test_registry_rejects_invalid_rows_at_the_statement(migration_db, case):
     engine, alembic = migration_db
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     source, key, reference, constraint = INVALID_REGISTRY_ROWS[case]
     async with engine.begin() as conn:
         trigger = await event(conn, source="razorpay", payment_id="pay_trigger0001", event_type="payment.authorized")
@@ -522,7 +530,7 @@ async def test_registry_rejects_invalid_rows_at_the_statement(migration_db, case
 )
 async def test_registry_accepts_valid_rows(migration_db, source, key, reference):
     engine, alembic = migration_db
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     async with engine.begin() as conn:
         trigger = await event(conn, source=source, payment_id=reference, event_type="payment.authorized")
         await _registry_insert(conn, source, key, reference, trigger)
@@ -531,7 +539,7 @@ async def test_registry_accepts_valid_rows(migration_db, source, key, reference)
 
 async def test_registry_trigger_must_belong_to_the_same_provider(migration_db):
     engine, alembic = migration_db
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     async with engine.begin() as conn:
         trigger = await event(conn, source="synthetic", payment_id="pay_cross000001", event_type="payment.authorized")
     with pytest.raises(IntegrityError, match="fk_payment_attempt_trigger"):
@@ -541,7 +549,7 @@ async def test_registry_trigger_must_belong_to_the_same_provider(migration_db):
 
 async def test_new_constraints_are_validated_and_not_deferrable(migration_db):
     engine, alembic = migration_db
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     async with engine.connect() as conn:
         rows = (await conn.execute(text(
             "SELECT conname, convalidated, condeferrable FROM pg_constraint WHERE conname = ANY(:names)"
@@ -568,12 +576,12 @@ async def test_downgrade_restores_the_prior_schema_and_data_exactly(migration_db
     base_schema = await schema_snapshot(engine)
     base_hashes = await data_hashes(engine, columns_by_table(base_schema))
 
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     head_schema = await schema_snapshot(engine)
     await alembic.ok("downgrade", BASE_REVISION)
     await assert_unchanged_at_base(engine, base_schema, base_hashes)
 
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_A)
     assert await schema_snapshot(engine) == head_schema
     fk = {r[1]: r[3] for r in base_schema["constraints"] if r[1] in ("fk_attribution_command", "fk_attribution_decision")}
     assert fk == {
@@ -603,7 +611,7 @@ async def test_a_failure_after_the_migrations_ran_rolls_back_the_whole_run(migra
     before_schema = await schema_snapshot(engine)
     before_hashes = await data_hashes(engine, columns_by_table(before_schema))
 
-    result = await alembic.run("upgrade", "head", bootstrap=ALEMBIC_WITH_PATCH.format(
+    result = await alembic.run("upgrade", REVISION_A, bootstrap=ALEMBIC_WITH_PATCH.format(
         where="failure after run_migrations", name="final_state_requires_assertion"))
 
     assert result.returncode != 0
@@ -645,7 +653,7 @@ async def test_an_intermediate_end_state_is_refused_online_for_a_non_test_target
     before_schema = await schema_snapshot(engine)
     before_hashes = await data_hashes(engine, columns_by_table(before_schema))
 
-    result = await alembic.run("upgrade", "head", bootstrap=AS_IF_NON_TEST_TARGET)
+    result = await alembic.run("upgrade", REVISION_A, bootstrap=AS_IF_NON_TEST_TARGET)
 
     assert result.returncode != 0
     assert f"Running upgrade {BASE_REVISION} -> {REVISION_A}" in result.stderr
@@ -658,7 +666,7 @@ async def test_the_intermediate_state_assertion_aborts_the_run_on_any_other_data
     before_schema = await schema_snapshot(engine)
     before_hashes = await data_hashes(engine, columns_by_table(before_schema))
 
-    result = await alembic.run("upgrade", "head", bootstrap=ASSERTION_EXPECTING_ANOTHER_DATABASE)
+    result = await alembic.run("upgrade", REVISION_A, bootstrap=ASSERTION_EXPECTING_ANOTHER_DATABASE)
 
     assert result.returncode != 0
     assert f"Running upgrade {BASE_REVISION} -> {REVISION_A}" in result.stderr
@@ -671,10 +679,178 @@ async def test_the_connected_database_is_verified_before_any_migration_runs(migr
     before_schema = await schema_snapshot(engine)
     before_hashes = await data_hashes(engine, columns_by_table(before_schema))
 
-    result = await alembic.run("upgrade", "head", bootstrap=ALEMBIC_WITH_PATCH.format(
+    result = await alembic.run("upgrade", REVISION_A, bootstrap=ALEMBIC_WITH_PATCH.format(
         where="connected-database mismatch", name="assert_connected_database"))
 
     assert result.returncode != 0
     assert "injected connected-database mismatch" in result.stderr
     assert "Running upgrade" not in result.stderr
     await assert_unchanged_at_base(engine, before_schema, before_hashes)
+
+
+async def test_legacy_null_row_without_provider_fails_closed_on_read(migration_db):
+    """
+    Under Revision A, source_system was nullable on Stage 5-8 tables.
+    A legacy stored row without a provider must fail-closed with ProviderIdentityMissingError
+    when read back through the repository layer, rather than having a provider guessed from the key.
+    """
+    engine, alembic = migration_db
+    await alembic.ok("upgrade", REVISION_A)
+    pred_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        trigger = await event(conn, source="razorpay", payment_id="pay_legacy_null_01", event_type="payment.authorized")
+        await _registry_insert(conn, "razorpay", "pay_legacy_null_01", "pay_legacy_null_01", trigger)
+        await insert(
+            conn, "failure_predictions",
+            prediction_id=pred_id, payment_attempt_id="pay_legacy_null_01", source_system=None,
+            prediction_version=1, predicted_at=T0, prediction_horizon="30m",
+            failure_probability=0.5, risk_band="ELEVATED", prediction_status="PREDICTED",
+            model_name="m", model_version="1", feature_schema_version="1",
+            feature_snapshot=json.dumps({}), input_fingerprint="sha256:legacy", created_at=T0,
+        )
+    async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with async_session() as session:
+        with pytest.raises(ProviderIdentityMissingError, match="has no source_system"):
+            await FailurePredictionRepository(session).get_latest_prediction("pay_legacy_null_01")
+
+
+async def test_unregistered_attempt_records_return_none_on_read(migration_db):
+    """
+    Under Revision A, unregistered attempts could exist in Stage 5-8 tables.
+    Provider-exact reads join on payment_attempts, so unregistered attempts return None.
+    """
+    engine, alembic = migration_db
+    await alembic.ok("upgrade", REVISION_A)
+    unreg_key = "pay_unreg_read_01"
+    pred_id = uuid.uuid4()
+    dec_id = uuid.uuid4()
+    cmd_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await insert(
+            conn, "failure_predictions",
+            prediction_id=pred_id, payment_attempt_id=unreg_key, source_system="razorpay",
+            prediction_version=1, predicted_at=T0, prediction_horizon="30m",
+            failure_probability=0.8, risk_band="HIGH", prediction_status="PREDICTED",
+            model_name="m", model_version="1", feature_schema_version="1",
+            feature_snapshot=json.dumps({}), input_fingerprint="sha256:0", created_at=T0,
+        )
+        await insert(
+            conn, "intervention_decisions",
+            decision_id=dec_id, payment_attempt_id=unreg_key, source_system="razorpay",
+            decision_version=1, decided_at=T0, decision_type="ACT",
+            selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=pred_id,
+            diagnosis_confidence="STRONG", decision_confidence=0.9, gate_verdict="PASSED",
+            policy_id="P1", policy_version="1.0", input_fingerprint="sha256:0",
+            evaluation_audit_payload=json.dumps({}), created_at=T0,
+        )
+        await insert(
+            conn, "intervention_commands",
+            command_id=cmd_id, decision_id=dec_id, payment_attempt_id=unreg_key, source_system="razorpay",
+            decision_version=1, route_key="ROUTE_A", policy_id="P1", policy_version="1.0",
+            command_status="SUCCEEDED", idempotency_key="cmd_unreg_read", created_at=T0,
+            expires_at=T0 + timedelta(minutes=5), updated_at=T0,
+        )
+
+    async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with async_session() as session:
+        pred_repo = FailurePredictionRepository(session)
+        int_repo = InterventionRepository(session)
+        exec_repo = ExecutionRepository(session)
+        assert await pred_repo.get_latest_prediction(unreg_key, source_system="razorpay") is None
+        assert await pred_repo.get_max_prediction_version(unreg_key, source_system="razorpay") == 0
+        assert await int_repo.get_latest_decision(unreg_key, source_system="razorpay") is None
+        assert await int_repo.get_max_decision_version(unreg_key, source_system="razorpay") == 0
+        assert await exec_repo.get_command_by_attempt_and_version(unreg_key, 1, source_system="razorpay") is None
+
+
+async def test_mismatched_execution_attempt_in_db_raises_conflict(migration_db):
+    """
+    Under Revision A, an execution attempt could be inserted with a conflicting provider.
+    The repository layer detects this conflict on read and raises AttemptProviderConflictError.
+    """
+    engine, alembic = migration_db
+    await alembic.ok("upgrade", REVISION_A)
+    key = "pay_exec_mismatch_a"
+    dec_id = uuid.uuid4()
+    cmd_id = uuid.uuid4()
+    attempt_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        trigger = await event(conn, source="razorpay", payment_id=key, event_type="payment.authorized")
+        await _registry_insert(conn, "razorpay", key, key, trigger)
+        await insert(
+            conn, "intervention_decisions",
+            decision_id=dec_id, payment_attempt_id=key, source_system="razorpay",
+            decision_version=1, decided_at=T0, decision_type="ACT",
+            selected_route_id="ROUTE_A", failure_probability=0.8,
+            diagnosis_confidence="STRONG", decision_confidence=0.9, gate_verdict="PASSED",
+            policy_id="P1", policy_version="1.0", input_fingerprint="sha256:0",
+            evaluation_audit_payload=json.dumps({}), created_at=T0,
+        )
+        await insert(
+            conn, "intervention_commands",
+            command_id=cmd_id, decision_id=dec_id, payment_attempt_id=key, source_system="razorpay",
+            decision_version=1, route_key="DYNAMIC_RETRY_BACKOFF", policy_id="P1", policy_version="1.0",
+            command_status="SUCCEEDED", idempotency_key="cmd_exec_mismatch", created_at=T0,
+            expires_at=T0 + timedelta(minutes=5), updated_at=T0,
+        )
+        # Directly insert execution attempt with conflicting provider "synthetic"
+        await insert(
+            conn, "intervention_execution_attempts",
+            attempt_id=attempt_id, command_id=cmd_id, source_system="synthetic",
+            attempt_number=1, started_at=T0, completed_at=T0, duration_ms=100,
+            execution_status="SUCCESS", executor_name="sim", is_simulation=True,
+            provider_action_type="RETRY", provider_response_payload=json.dumps({}), created_at=T0,
+        )
+
+    async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with async_session() as session:
+        exec_repo = ExecutionRepository(session)
+        with pytest.raises(AttemptProviderConflictError, match="conflicts with command"):
+            await exec_repo.get_execution_attempts(cmd_id)
+
+
+async def test_mismatched_observation_in_db_raises_conflict(migration_db):
+    """
+    Under Revision A, an observation could be inserted with a conflicting provider.
+    The repository layer detects this conflict on read and raises AttemptProviderConflictError.
+    """
+    engine, alembic = migration_db
+    await alembic.ok("upgrade", REVISION_A)
+    key = "pay_obs_mismatch_a"
+    dec_id = uuid.uuid4()
+    cmd_id = uuid.uuid4()
+    obs_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        trigger = await event(conn, source="razorpay", payment_id=key, event_type="payment.authorized")
+        await _registry_insert(conn, "razorpay", key, key, trigger)
+        await insert(
+            conn, "intervention_decisions",
+            decision_id=dec_id, payment_attempt_id=key, source_system="razorpay",
+            decision_version=1, decided_at=T0, decision_type="ACT",
+            selected_route_id="ROUTE_A", failure_probability=0.8,
+            diagnosis_confidence="STRONG", decision_confidence=0.9, gate_verdict="PASSED",
+            policy_id="P1", policy_version="1.0", input_fingerprint="sha256:0",
+            evaluation_audit_payload=json.dumps({}), created_at=T0,
+        )
+        await insert(
+            conn, "intervention_commands",
+            command_id=cmd_id, decision_id=dec_id, payment_attempt_id=key, source_system="razorpay",
+            decision_version=1, route_key="DYNAMIC_RETRY_BACKOFF", policy_id="P1", policy_version="1.0",
+            command_status="SUCCEEDED", idempotency_key="cmd_obs_mismatch", created_at=T0,
+            expires_at=T0 + timedelta(minutes=5), updated_at=T0,
+        )
+        # Directly insert observation with conflicting provider "synthetic"
+        await insert(
+            conn, "payment_outcome_observations",
+            observation_id=obs_id, command_id=cmd_id, payment_attempt_id=key, source_system="synthetic",
+            observation_version=1, observed_at=T0, as_of_timestamp=T0,
+            payment_outcome="CAPTURED", observation_audit_payload=json.dumps({}), created_at=T0,
+        )
+
+    async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with async_session() as session:
+        exec_repo = ExecutionRepository(session)
+        with pytest.raises(AttemptProviderConflictError, match="conflicts with command"):
+            await exec_repo.get_latest_observation(cmd_id)
+        with pytest.raises(AttemptProviderConflictError, match="conflicts with command"):
+            await exec_repo.get_all_observations(cmd_id)

@@ -85,6 +85,7 @@ async def test_future_terminal_event_does_not_leak_into_earlier_decision(db_sess
         input_fingerprint="fp1",
         created_at=T_decide,
     )
+    await register_attempt(db_session, payment_id)
     await pred_repo.append_prediction(pred)
 
     # Evaluating as-of T_decide must NOT trigger FAILED_TERMINAL_OUTCOME_INGESTED
@@ -149,6 +150,7 @@ async def test_future_stage5_prediction_does_not_leak_into_earlier_decision(db_s
         input_fingerprint="fp2",
         created_at=T_future_pred,
     )
+    await register_attempt(db_session, payment_id)
     await pred_repo.append_prediction(pred)
 
     # Decision at T_decide must not see future prediction

@@ -316,8 +316,8 @@ class FailurePredictionModel(Base):
     # The payment_id being predicted on
     payment_attempt_id = Column(String(255), nullable=False)
 
-    # Provider of the attempt (payment_attempts.source_system); NOT NULL once Revision B applies.
-    source_system = Column(String(50), nullable=True)
+    # Provider of the attempt (payment_attempts.source_system); NOT NULL under Revision B.
+    source_system = Column(String(50), nullable=False)
     
     # Monotonically increasing version per payment_attempt_id
     prediction_version = Column(Integer, nullable=False)
@@ -353,8 +353,15 @@ class FailurePredictionModel(Base):
     __table_args__ = (
         UniqueConstraint(
             "payment_attempt_id",
+            "source_system",
             "prediction_version",
             name="uq_failure_prediction_version",
+        ),
+        UniqueConstraint("prediction_id", "source_system", name="uq_failure_prediction_provider"),
+        ForeignKeyConstraint(
+            ["payment_attempt_id", "source_system"],
+            ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
+            name="fk_failure_predictions_payment_attempt",
         ),
     )
 
@@ -376,8 +383,8 @@ class InterventionDecisionModel(Base):
     # The payment_attempt_id (or payment_id) being decided on
     payment_attempt_id = Column(String(255), nullable=False)
 
-    # Provider of the attempt (payment_attempts.source_system); NOT NULL once Revision B applies.
-    source_system = Column(String(50), nullable=True)
+    # Provider of the attempt (payment_attempts.source_system); NOT NULL under Revision B.
+    source_system = Column(String(50), nullable=False)
 
     # Monotonically increasing version per payment_attempt_id
     decision_version = Column(Integer, nullable=False)
@@ -422,8 +429,15 @@ class InterventionDecisionModel(Base):
     __table_args__ = (
         UniqueConstraint(
             "payment_attempt_id",
+            "source_system",
             "decision_version",
             name="uq_intervention_decision_version",
+        ),
+        UniqueConstraint("decision_id", "source_system", name="uq_intervention_decision_provider"),
+        ForeignKeyConstraint(
+            ["payment_attempt_id", "source_system"],
+            ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
+            name="fk_intervention_decisions_payment_attempt",
         ),
         Index("ix_intervention_decisions_attempt_lookup", "payment_attempt_id", "decision_version"),
         Index("ix_intervention_decisions_fingerprint", "input_fingerprint"),
@@ -447,8 +461,8 @@ class InterventionCommandModel(Base):
     command_id = Column(UUID(as_uuid=True), primary_key=True)
     decision_id = Column(UUID(as_uuid=True), nullable=False)
     payment_attempt_id = Column(String(255), nullable=False)
-    # Provider of the attempt; NOT NULL once Revision B applies.
-    source_system = Column(String(50), nullable=True)
+    # Provider of the attempt; NOT NULL under Revision B.
+    source_system = Column(String(50), nullable=False)
     decision_version = Column(Integer, nullable=False)
     route_key = Column(String(50), nullable=False)
     policy_id = Column(String(50), nullable=False)
@@ -465,8 +479,20 @@ class InterventionCommandModel(Base):
         UniqueConstraint("idempotency_key", name="uq_cmd_idempotency_key"),
         UniqueConstraint(
             "payment_attempt_id",
+            "source_system",
             "decision_version",
             name="uq_cmd_attempt_version",
+        ),
+        UniqueConstraint("command_id", "source_system", name="uq_cmd_provider"),
+        ForeignKeyConstraint(
+            ["payment_attempt_id", "source_system"],
+            ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
+            name="fk_intervention_commands_payment_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "source_system"],
+            ["intervention_decisions.decision_id", "intervention_decisions.source_system"],
+            name="fk_command_decision",
         ),
         Index("ix_cmd_status_expiry", "command_status", "expires_at"),
         Index("ix_cmd_attempt_lookup", "payment_attempt_id", "created_at"),
@@ -481,8 +507,8 @@ class InterventionExecutionAttemptModel(Base):
 
     attempt_id = Column(UUID(as_uuid=True), primary_key=True)
     command_id = Column(UUID(as_uuid=True), nullable=False)
-    # Provider of the command's attempt; NOT NULL once Revision B applies.
-    source_system = Column(String(50), nullable=True)
+    # Provider of the command's attempt; NOT NULL under Revision B.
+    source_system = Column(String(50), nullable=False)
     attempt_number = Column(Integer, nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=False)
@@ -502,6 +528,11 @@ class InterventionExecutionAttemptModel(Base):
             "attempt_number",
             name="uq_exec_attempt_number",
         ),
+        ForeignKeyConstraint(
+            ["command_id", "source_system"],
+            ["intervention_commands.command_id", "intervention_commands.source_system"],
+            name="fk_exec_attempt_command",
+        ),
         Index("ix_exec_attempt_cmd", "command_id"),
     )
 
@@ -516,8 +547,8 @@ class PaymentOutcomeObservationModel(Base):
     observation_id = Column(UUID(as_uuid=True), primary_key=True)
     command_id = Column(UUID(as_uuid=True), nullable=False)
     payment_attempt_id = Column(String(255), nullable=False)
-    # Provider of the attempt; NOT NULL once Revision B applies.
-    source_system = Column(String(50), nullable=True)
+    # Provider of the attempt; NOT NULL under Revision B.
+    source_system = Column(String(50), nullable=False)
     observation_version = Column(Integer, nullable=False)
     observed_at = Column(DateTime(timezone=True), nullable=False)
     as_of_timestamp = Column(DateTime(timezone=True), nullable=False)
@@ -540,6 +571,16 @@ class PaymentOutcomeObservationModel(Base):
             "as_of_timestamp",
             name="uq_outcome_observation_temporal",
         ),
+        ForeignKeyConstraint(
+            ["payment_attempt_id", "source_system"],
+            ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
+            name="fk_payment_outcome_observations_payment_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["command_id", "source_system"],
+            ["intervention_commands.command_id", "intervention_commands.source_system"],
+            name="fk_observation_command",
+        ),
         Index("ix_obs_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
     )
 
@@ -556,19 +597,11 @@ class CounterfactualAttributionModel(Base):
     __tablename__ = "counterfactual_attributions"
 
     attribution_id = Column(UUID(as_uuid=True), primary_key=True)
-    command_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("intervention_commands.command_id", name="fk_attribution_command"),
-        nullable=False,
-    )
+    command_id = Column(UUID(as_uuid=True), nullable=False)
     payment_attempt_id = Column(String(255), nullable=False)
-    # Provider of the attempt; NOT NULL once Revision B applies.
-    source_system = Column(String(50), nullable=True)
-    decision_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("intervention_decisions.decision_id", name="fk_attribution_decision"),
-        nullable=False,
-    )
+    # Provider of the attempt; NOT NULL under Revision B.
+    source_system = Column(String(50), nullable=False)
+    decision_id = Column(UUID(as_uuid=True), nullable=False)
     attribution_version = Column(Integer, nullable=False)
     attributed_at = Column(DateTime(timezone=True), nullable=False)
     as_of_timestamp = Column(DateTime(timezone=True), nullable=False)
@@ -598,6 +631,21 @@ class CounterfactualAttributionModel(Base):
             "command_id",
             "as_of_timestamp",
             name="uq_attribution_temporal",
+        ),
+        ForeignKeyConstraint(
+            ["payment_attempt_id", "source_system"],
+            ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
+            name="fk_counterfactual_attributions_payment_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["command_id", "source_system"],
+            ["intervention_commands.command_id", "intervention_commands.source_system"],
+            name="fk_attribution_command",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "source_system"],
+            ["intervention_decisions.decision_id", "intervention_decisions.source_system"],
+            name="fk_attribution_decision",
         ),
         Index("ix_attr_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
         Index("ix_attr_status", "attribution_status", "attributed_at"),

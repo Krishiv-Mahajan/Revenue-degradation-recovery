@@ -24,6 +24,7 @@ RUN_MIGRATION_TESTS_ENV = "RUN_MIGRATION_TESTS"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_REVISION = "8b9c0d1e2f3a"
 REVISION_A = "9d2e4f6a8b1c"
+REVISION_B = "e2d3c4b5a6f7"
 
 if os.environ.get(RUN_MIGRATION_TESTS_ENV) != "1":
     collect_ignore_glob = ["test_*.py"]

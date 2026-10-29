@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OFFLINE_URL = "postgresql+asyncpg://offline:offline@offline.invalid:1/offline_parity_test"
 BASE_REVISION = "8b9c0d1e2f3a"
 REVISION_A = "9d2e4f6a8b1c"
+REVISION_B = "e2d3c4b5a6f7"
 
 
 def render(*args, config_path=PROJECT_ROOT / "alembic.ini"):
@@ -51,9 +52,10 @@ class TestDestinationArgumentIsNotReliable:
         return ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
 
     def test_symbolic_and_full_ids_resolve(self, script):
-        assert script.as_revision_number("head") == REVISION_A
-        assert script.as_revision_number("heads") == (REVISION_A,)
+        assert script.as_revision_number("head") == REVISION_B
+        assert script.as_revision_number("heads") == (REVISION_B,)
         assert script.as_revision_number(REVISION_A) == REVISION_A
+        assert script.as_revision_number(REVISION_B) == REVISION_B
         assert script.as_revision_number("base") is None
 
     @pytest.mark.parametrize("target", ["9d2e", "+1", "-1", "head-1", f"{BASE_REVISION}+1"])
@@ -62,22 +64,50 @@ class TestDestinationArgumentIsNotReliable:
 
 
 class TestFinalStateGuardOnRealMigrations:
-    """DF-2 on the real chain, where Revision A is currently the head."""
+    """DF-2 on the real chain, where Revision B is currently the head and Revision A is intermediate."""
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("upgrade", REVISION_A),
+            ("upgrade", "9d2e"),
+            ("upgrade", f"{BASE_REVISION}:{REVISION_A}"),
+            ("upgrade", f"{BASE_REVISION}:+1"),
+            ("upgrade", "8b9c:9d2e"),
+            ("upgrade", f"{BASE_REVISION}:head-1"),
+        ],
+        ids=["full", "partial", "range", "relative", "partial-range", "relative-head"],
+    )
+    def test_upgrades_ending_at_revision_a_emit_the_assertion(self, args):
+        assert ends_with_assertion(render(*args))
 
     @pytest.mark.parametrize(
         "args",
         [
             ("upgrade", "head"),
             ("upgrade", "heads"),
-            ("upgrade", REVISION_A),
-            ("upgrade", "9d2e"),
-            ("upgrade", f"{BASE_REVISION}:{REVISION_A}"),
-            ("upgrade", f"{BASE_REVISION}:+1"),
-            ("upgrade", "8b9c:9d2e"),
+            ("upgrade", REVISION_B),
+            ("upgrade", "e2d3"),
+            ("upgrade", f"{BASE_REVISION}:{REVISION_B}"),
+            ("upgrade", f"{BASE_REVISION}:+2"),
+            ("upgrade", f"{REVISION_A}:{REVISION_B}"),
         ],
-        ids=["head", "heads", "full", "partial", "range", "relative", "partial-range"],
+        ids=["head", "heads", "full", "partial", "full-range", "relative-2", "a-to-b"],
     )
-    def test_upgrades_ending_at_revision_a_emit_the_assertion(self, args):
+    def test_upgrades_ending_at_revision_b_emit_no_assertion(self, args):
+        assert not ends_with_assertion(render(*args))
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("downgrade", f"{REVISION_B}:{REVISION_A}"),
+            ("downgrade", f"{REVISION_B}:-1"),
+            ("downgrade", "e2d3:9d2e"),
+            ("downgrade", f"head:{REVISION_A}"),
+        ],
+        ids=["full", "relative", "partial", "symbolic"],
+    )
+    def test_downgrades_back_to_revision_a_emit_the_assertion(self, args):
         assert ends_with_assertion(render(*args))
 
     @pytest.mark.parametrize(
@@ -86,9 +116,10 @@ class TestFinalStateGuardOnRealMigrations:
             ("downgrade", f"{REVISION_A}:{BASE_REVISION}"),
             ("downgrade", f"{REVISION_A}:-1"),
             ("downgrade", "9d2e:8b9c"),
+            ("downgrade", f"{REVISION_B}:{BASE_REVISION}"),
             ("downgrade", f"head:{BASE_REVISION}"),
         ],
-        ids=["full", "relative", "partial", "symbolic"],
+        ids=["full-a", "relative-a", "partial-a", "b-to-base", "head-to-base"],
     )
     def test_downgrades_back_to_the_prior_revision_emit_no_assertion(self, args):
         sql = render(*args)

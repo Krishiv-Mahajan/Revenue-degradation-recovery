@@ -39,6 +39,7 @@ def add_payment_event(session: AsyncSession, payment_id: str, T: datetime):
 
 
 async def add_prediction(pred_repo: FailurePredictionRepository, payment_id: str, T: datetime):
+    await register_attempt(pred_repo.session, payment_id)
     pred = FailurePrediction(
         prediction_id=uuid.uuid4(),
         payment_attempt_id=payment_id,

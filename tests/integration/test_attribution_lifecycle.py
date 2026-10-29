@@ -58,18 +58,19 @@ def add_payment_event(
     session.add(model)
 
 
-def add_stage5_prediction(
+async def add_stage5_prediction(
     session: AsyncSession,
     payment_id: str,
     predicted_at: datetime,
     failure_prob: float = 0.85,
     model_name: str = "synthetic-development-v1",
 ) -> uuid.UUID:
+    attempt = await register_attempt(session, payment_id)
     pred_id = uuid.uuid4()
     model = FailurePredictionModel(
         prediction_id=pred_id,
         payment_attempt_id=payment_id,
-        source_system="synthetic",
+        source_system=attempt.source_system,
         prediction_version=1,
         predicted_at=predicted_at,
         prediction_horizon="IMMEDIATE_ATTEMPT",
@@ -140,7 +141,7 @@ async def test_full_stage8_lifecycle_captured_and_attributed(db_session: AsyncSe
 
     # 1. Ingest payment authorized
     add_payment_event(db_session, payment_id, "payment.authorized", T0, amount_minor_units=amount)
-    pred_id = add_stage5_prediction(db_session, payment_id, T0, failure_prob=0.85)
+    pred_id = await add_stage5_prediction(db_session, payment_id, T0, failure_prob=0.85)
     await db_session.flush()
 
     # 2. Stage 6 Decision
@@ -210,7 +211,7 @@ async def test_lifecycle_captured_but_execution_failed_zero_protected(db_session
     T0 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0)
-    pred_id = add_stage5_prediction(db_session, payment_id, T0)
+    pred_id = await add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 
     decision = await create_stage6_decision(inter_repo, payment_id, pred_id, T0)
@@ -248,7 +249,7 @@ async def test_lifecycle_execution_success_but_payment_failed_zero_protected(db_
     T0 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0)
-    pred_id = add_stage5_prediction(db_session, payment_id, T0)
+    pred_id = await add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 
     decision = await create_stage6_decision(inter_repo, payment_id, pred_id, T0)
@@ -285,7 +286,7 @@ async def test_lifecycle_payment_in_flight_unresolved_zero_protected(db_session:
     T0 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0)
-    pred_id = add_stage5_prediction(db_session, payment_id, T0)
+    pred_id = await add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 
     decision = await create_stage6_decision(inter_repo, payment_id, pred_id, T0)
@@ -320,7 +321,7 @@ async def test_attribution_idempotency_same_as_of(db_session: AsyncSession):
     T0 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0)
-    pred_id = add_stage5_prediction(db_session, payment_id, T0)
+    pred_id = await add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 
     decision = await create_stage6_decision(inter_repo, payment_id, pred_id, T0)

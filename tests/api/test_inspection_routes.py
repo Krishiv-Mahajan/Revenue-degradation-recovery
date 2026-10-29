@@ -17,6 +17,7 @@ from src.infrastructure.models import (
     InterventionCommandModel,
     InterventionDecisionModel,
     InterventionExecutionAttemptModel,
+    PaymentAttemptModel,
     PaymentEventModel,
     PaymentOutcomeObservationModel,
     RCAEvaluationModel,
@@ -283,9 +284,50 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
             excess_segment_failures=8.0,
             rank=1,
         )
+        evt1 = PaymentEventModel(
+            event_id=uuid.uuid4(),
+            source_system="razorpay",
+            source_event_id=f"evt_{uuid.uuid4().hex}",
+            payment_id=pay1,
+            timestamp=now,
+            event_type="payment.authorized",
+            currency="INR",
+            amount_minor_units=10000,
+            payment_status="authorized",
+            payment_method="card",
+            ingested_at=now,
+        )
+        evt2 = PaymentEventModel(
+            event_id=uuid.uuid4(),
+            source_system="razorpay",
+            source_event_id=f"evt_{uuid.uuid4().hex}",
+            payment_id=pay2,
+            timestamp=now,
+            event_type="payment.authorized",
+            currency="INR",
+            amount_minor_units=25000,
+            payment_status="authorized",
+            payment_method="card",
+            ingested_at=now,
+        )
+        pa1 = PaymentAttemptModel(
+            payment_attempt_id=pay1,
+            source_system="razorpay",
+            provider_reference=pay1,
+            trigger_event_id=evt1.event_id,
+            registered_at=now,
+        )
+        pa2 = PaymentAttemptModel(
+            payment_attempt_id=pay2,
+            source_system="razorpay",
+            provider_reference=pay2,
+            trigger_event_id=evt2.event_id,
+            registered_at=now,
+        )
         pred1 = FailurePredictionModel(
             prediction_id=pred1_id,
             payment_attempt_id=pay1,
+            source_system="razorpay",
             prediction_version=1,
             predicted_at=now,
             prediction_horizon="30m",
@@ -302,6 +344,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
         dec1 = InterventionDecisionModel(
             decision_id=dec1_id,
             payment_attempt_id=pay1,
+            source_system="razorpay",
             decision_version=1,
             decided_at=now,
             decision_type="ACT",
@@ -321,6 +364,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
             command_id=cmd1_id,
             decision_id=dec1_id,
             payment_attempt_id=pay1,
+            source_system="razorpay",
             decision_version=1,
             route_key="FALLBACK_PAYMENT_LINK",
             policy_id="test_policy",
@@ -336,6 +380,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
             command_id=cmd1_id,
             payment_attempt_id=pay1,
             decision_id=dec1_id,
+            source_system="razorpay",
             attribution_version=1,
             attributed_at=now,
             as_of_timestamp=now,
@@ -392,6 +437,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
         pred2 = FailurePredictionModel(
             prediction_id=pred2_id,
             payment_attempt_id=pay2,
+            source_system="razorpay",
             prediction_version=1,
             predicted_at=now,
             prediction_horizon="30m",
@@ -408,6 +454,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
         dec2 = InterventionDecisionModel(
             decision_id=dec2_id,
             payment_attempt_id=pay2,
+            source_system="razorpay",
             decision_version=1,
             decided_at=now,
             decision_type="MONITOR",
@@ -427,6 +474,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
             command_id=cmd2_id,
             decision_id=dec2_id,
             payment_attempt_id=pay2,
+            source_system="razorpay",
             decision_version=1,
             route_key="FALLBACK_PAYMENT_LINK",
             policy_id="test_policy",
@@ -442,6 +490,7 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
             command_id=cmd2_id,
             payment_attempt_id=pay2,
             decision_id=dec2_id,
+            source_system="razorpay",
             attribution_version=1,
             attributed_at=now,
             as_of_timestamp=now,
@@ -461,7 +510,13 @@ async def test_rca_episode_scoping_no_cross_episode_leakage(client, db_engine):
             created_at=now,
         )
 
-        session.add_all([ep1, eval1, pred1, dec1, cmd1, ep2, eval2, pred2, dec2, cmd2])
+        session.add_all([evt1, evt2])
+        await session.flush()
+        session.add_all([pa1, pa2])
+        await session.flush()
+        session.add_all([ep1, eval1, pred1, dec1, ep2, eval2, pred2, dec2])
+        await session.flush()
+        session.add_all([cmd1, cmd2])
         await session.flush()
         session.add_all([cand1, attr1, cand2, attr2])
         await session.commit()
@@ -747,25 +802,33 @@ async def test_payments_list_canonical_events(client, db_engine):
     Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         # Case 1: payment.authorized -> payment.captured with recovery info
-        session.add_all([
-            PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
-                payment_id=pid_success, timestamp=now - timedelta(minutes=5), event_type="payment.authorized",
-                currency="INR", amount_minor_units=1000, payment_status="authorized",
-                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=5)
-            ),
-            PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
-                payment_id=pid_success, timestamp=now - timedelta(minutes=4), event_type="payment.captured",
-                currency="INR", amount_minor_units=1000, payment_status="captured",
-                payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=4)
-            )
-        ])
+        evt_succ_auth = PaymentEventModel(
+            event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
+            payment_id=pid_success, timestamp=now - timedelta(minutes=5), event_type="payment.authorized",
+            currency="INR", amount_minor_units=1000, payment_status="authorized",
+            payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=5)
+        )
+        evt_succ_cap = PaymentEventModel(
+            event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
+            payment_id=pid_success, timestamp=now - timedelta(minutes=4), event_type="payment.captured",
+            currency="INR", amount_minor_units=1000, payment_status="captured",
+            payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=4)
+        )
+        session.add_all([evt_succ_auth, evt_succ_cap])
+        await session.flush()
+        session.add(PaymentAttemptModel(
+            payment_attempt_id=pid_success,
+            source_system="razorpay",
+            provider_reference=pid_success,
+            trigger_event_id=evt_succ_auth.event_id,
+            registered_at=now - timedelta(minutes=5),
+        ))
+        await session.flush()
         
         # Add decision for success payment
         dec_id = uuid.uuid4()
         session.add(InterventionDecisionModel(
-            decision_id=dec_id, payment_attempt_id=pid_success, decision_version=1,
+            decision_id=dec_id, payment_attempt_id=pid_success, source_system="razorpay", decision_version=1,
             decided_at=now - timedelta(minutes=4, seconds=30), decision_type="ACT",
             selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=uuid.uuid4(),
             diagnosis_confidence="HIGH", decision_confidence=0.9,
@@ -776,13 +839,13 @@ async def test_payments_list_canonical_events(client, db_engine):
         # Case 2: payment.authorized -> payment.failed
         session.add_all([
             PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
                 payment_id=pid_auth_fail, timestamp=now - timedelta(minutes=3), event_type="payment.authorized",
                 currency="INR", amount_minor_units=2000, payment_status="authorized",
                 payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=3)
             ),
             PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
                 payment_id=pid_auth_fail, timestamp=now - timedelta(minutes=2), event_type="payment.failed",
                 currency="INR", amount_minor_units=2000, payment_status="failed",
                 payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=2)
@@ -792,7 +855,7 @@ async def test_payments_list_canonical_events(client, db_engine):
         # Case 3: payment.failed alone
         session.add(
             PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="test", source_event_id=uuid.uuid4().hex,
+                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
                 payment_id=pid_fail_only, timestamp=now - timedelta(minutes=1), event_type="payment.failed",
                 currency="INR", amount_minor_units=3000, payment_status="failed",
                 payment_method="UPI", bank="HDFC", ingested_at=now - timedelta(minutes=1)
@@ -890,6 +953,7 @@ async def test_payments_list_excludes_paypal_events(client, db_engine):
 
 @pytest.mark.asyncio
 async def test_timeline_excludes_paypal_events(client, db_engine):
+    from sqlalchemy import select
     from src.infrastructure.models import InterventionDecisionModel
 
     razorpay_pid, paypal_pid = await _seed_razorpay_payment_with_paypal_events(db_engine)
@@ -897,8 +961,23 @@ async def test_timeline_excludes_paypal_events(client, db_engine):
     dec_id = uuid.uuid4()
     Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
+        auth_evt = (await session.execute(
+            select(PaymentEventModel).where(
+                PaymentEventModel.payment_id == razorpay_pid,
+                PaymentEventModel.source_system == "razorpay",
+                PaymentEventModel.event_type == "payment.authorized",
+            )
+        )).scalar_one()
+        session.add(PaymentAttemptModel(
+            payment_attempt_id=razorpay_pid,
+            source_system="razorpay",
+            provider_reference=razorpay_pid,
+            trigger_event_id=auth_evt.event_id,
+            registered_at=now - timedelta(minutes=5),
+        ))
+        await session.flush()
         session.add(InterventionDecisionModel(
-            decision_id=dec_id, payment_attempt_id=razorpay_pid, decision_version=1,
+            decision_id=dec_id, payment_attempt_id=razorpay_pid, source_system="razorpay", decision_version=1,
             decided_at=now - timedelta(minutes=4, seconds=30), decision_type="ACT",
             selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=uuid.uuid4(),
             diagnosis_confidence="HIGH", decision_confidence=0.9,
@@ -950,29 +1029,42 @@ async def _seed_attributed_payment(
     prediction_id, decision_id, command_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
+        auth_evt = None
         if authorized:
-            session.add(PaymentEventModel(
+            auth_evt = PaymentEventModel(
                 event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
                 payment_id=pid, timestamp=now - timedelta(minutes=10), event_type="payment.authorized",
                 currency=currency, amount_minor_units=amount, payment_status="authorized",
                 payment_method="UPI", ingested_at=now - timedelta(minutes=10),
-            ))
+            )
+            session.add(auth_evt)
+        cap_evt = PaymentEventModel(
+            event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
+            payment_id=pid, timestamp=now - timedelta(minutes=5), event_type="payment.captured",
+            currency=currency, amount_minor_units=amount, payment_status="captured",
+            payment_method="UPI", ingested_at=now - timedelta(minutes=5),
+        )
+        session.add(cap_evt)
+        trigger_evt = auth_evt if authorized else cap_evt
+        await session.flush()
+        session.add(PaymentAttemptModel(
+            payment_attempt_id=pid,
+            source_system="razorpay",
+            provider_reference=pid,
+            trigger_event_id=trigger_evt.event_id,
+            registered_at=now - timedelta(minutes=10 if authorized else 5),
+        ))
+        await session.flush()
         session.add_all([
-            PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
-                payment_id=pid, timestamp=now - timedelta(minutes=5), event_type="payment.captured",
-                currency=currency, amount_minor_units=amount, payment_status="captured",
-                payment_method="UPI", ingested_at=now - timedelta(minutes=5),
-            ),
             FailurePredictionModel(
-                prediction_id=prediction_id, payment_attempt_id=pid, prediction_version=1,
+                prediction_id=prediction_id, payment_attempt_id=pid, source_system="razorpay", prediction_version=1,
                 predicted_at=now - timedelta(minutes=10), prediction_horizon="30m", failure_probability=0.8,
                 risk_band="HIGH", prediction_status="PREDICTED", model_name=model[0], model_version=model[1],
                 feature_schema_version="v1.0.0", feature_snapshot={}, input_fingerprint="sha256:" + "a" * 64,
                 created_at=now,
             ),
             InterventionDecisionModel(
-                decision_id=decision_id, payment_attempt_id=pid, decision_version=1,
+                decision_id=decision_id, payment_attempt_id=pid, source_system="razorpay", decision_version=1,
                 decided_at=now - timedelta(minutes=9), decision_type="ACT", selected_route_id="FALLBACK_PAYMENT_LINK",
                 failure_probability=0.8, stage5_prediction_id=prediction_id, diagnosis_confidence="STRONG",
                 decision_confidence=0.9, gate_verdict="PASSED", policy_id="default-recovery-v1",
@@ -980,24 +1072,26 @@ async def _seed_attributed_payment(
                 evaluation_audit_payload={"upstream_context": {"episode_id": str(episode_id) if episode_id else None}},
                 created_at=now,
             ),
-            InterventionCommandModel(
-                command_id=command_id, decision_id=decision_id, payment_attempt_id=pid, decision_version=1,
-                route_key="FALLBACK_PAYMENT_LINK", policy_id="default-recovery-v1", policy_version="1.0.0",
-                command_status="SUCCEEDED", idempotency_key=f"cmd_{decision_id}",
-                created_at=now - timedelta(minutes=9), expires_at=now, updated_at=now - timedelta(minutes=9),
-            ),
-            InterventionExecutionAttemptModel(
-                attempt_id=uuid.uuid4(), command_id=command_id, attempt_number=1,
-                started_at=now - timedelta(minutes=9), completed_at=now - timedelta(minutes=9), duration_ms=15,
-                execution_status="SUCCESS", executor_name=executor_name, is_simulation=simulated,
-                provider_action_type="PAYMENT_LINK_DISPATCH", provider_response_payload={},
-                created_at=now - timedelta(minutes=9),
-            ),
         ])
+        await session.flush()
+        session.add(InterventionCommandModel(
+            command_id=command_id, decision_id=decision_id, payment_attempt_id=pid, source_system="razorpay", decision_version=1,
+            route_key="FALLBACK_PAYMENT_LINK", policy_id="default-recovery-v1", policy_version="1.0.0",
+            command_status="SUCCEEDED", idempotency_key=f"cmd_{decision_id}",
+            created_at=now - timedelta(minutes=9), expires_at=now, updated_at=now - timedelta(minutes=9),
+        ))
+        await session.flush()
+        session.add(InterventionExecutionAttemptModel(
+            attempt_id=uuid.uuid4(), command_id=command_id, source_system="razorpay", attempt_number=1,
+            started_at=now - timedelta(minutes=9), completed_at=now - timedelta(minutes=9), duration_ms=15,
+            execution_status="SUCCESS", executor_name=executor_name, is_simulation=simulated,
+            provider_action_type="PAYMENT_LINK_DISPATCH", provider_response_payload={},
+            created_at=now - timedelta(minutes=9),
+        ))
         for version in range(1, observation_versions + 1):
             observed = now - timedelta(minutes=5) + timedelta(seconds=version)
             session.add(PaymentOutcomeObservationModel(
-                observation_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid,
+                observation_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid, source_system="razorpay",
                 observation_version=version, observed_at=observed, as_of_timestamp=observed,
                 payment_outcome="CAPTURED", observation_audit_payload={}, created_at=observed,
             ))
@@ -1005,7 +1099,7 @@ async def _seed_attributed_payment(
         for version, protected in enumerate(protected_versions, start=1):
             attributed = now - timedelta(minutes=4) + timedelta(seconds=version)
             session.add(CounterfactualAttributionModel(
-                attribution_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid,
+                attribution_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid, source_system="razorpay",
                 decision_id=decision_id, attribution_version=version, attributed_at=attributed,
                 as_of_timestamp=attributed, attribution_status="ATTRIBUTED",
                 methodology_name="COUNTERFACTUAL_RISK_WEIGHTED_V1", methodology_version="1.0.0",
@@ -1184,14 +1278,24 @@ async def test_payments_list_uses_only_the_latest_decision_version(client, db_en
     now = datetime.now(timezone.utc)
     Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
-        session.add(PaymentEventModel(
+        evt = PaymentEventModel(
             event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex, payment_id=pid,
             timestamp=now, event_type="payment.authorized", currency="INR", amount_minor_units=1000,
             payment_status="authorized", payment_method="UPI", ingested_at=now,
+        )
+        session.add(evt)
+        await session.flush()
+        session.add(PaymentAttemptModel(
+            payment_attempt_id=pid,
+            source_system="razorpay",
+            provider_reference=pid,
+            trigger_event_id=evt.event_id,
+            registered_at=now,
         ))
+        await session.flush()
         for version, decision_type in ((1, "MONITOR"), (2, "ACT")):
             session.add(InterventionDecisionModel(
-                decision_id=uuid.uuid4(), payment_attempt_id=pid, decision_version=version,
+                decision_id=uuid.uuid4(), payment_attempt_id=pid, source_system="razorpay", decision_version=version,
                 decided_at=now + timedelta(seconds=version), decision_type=decision_type,
                 selected_route_id="FALLBACK_PAYMENT_LINK" if decision_type == "ACT" else None,
                 failure_probability=0.8, stage5_prediction_id=uuid.uuid4(), diagnosis_confidence="STRONG",

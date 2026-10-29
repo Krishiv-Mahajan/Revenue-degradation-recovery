@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.execution_models import (
@@ -206,10 +207,11 @@ async def test_reading_under_wrong_provider_returns_none(db_session: AsyncSessio
 
 
 # ============================================================================
-# 3. Missing registry entries return None on provider-exact reads
+# 3. Missing registry entries rejected by database FK constraints under Revision B
+# (Preserved fail-closed repository read assertions run under Revision A in test_revision_a.py)
 # ============================================================================
 
-async def test_unregistered_attempt_records_return_none_on_read(db_session: AsyncSession):
+async def test_unregistered_attempt_records_rejected_at_the_database(db_session: AsyncSession):
     unreg_key = "pay_UNREG_READ_001"
     pred_model = FailurePredictionModel(
         prediction_id=uuid.uuid4(),
@@ -262,26 +264,29 @@ async def test_unregistered_attempt_records_return_none_on_read(db_session: Asyn
         expires_at=T,
         updated_at=T,
     )
-    db_session.add_all([pred_model, dec_model, cmd_model])
-    await db_session.flush()
+    # Verify each Stage 5-7 model is rejected by its specific composite foreign key
+    with pytest.raises(IntegrityError, match="fk_failure_predictions_payment_attempt"):
+        async with db_session.begin_nested():
+            db_session.add(pred_model)
+            await db_session.flush()
 
-    pred_repo = FailurePredictionRepository(db_session)
-    int_repo = InterventionRepository(db_session)
-    exec_repo = ExecutionRepository(db_session)
+    with pytest.raises(IntegrityError, match="fk_intervention_decisions_payment_attempt"):
+        async with db_session.begin_nested():
+            db_session.add(dec_model)
+            await db_session.flush()
 
-    # Provider-exact reads join on payment_attempts, so unregistered attempts return None
-    assert await pred_repo.get_latest_prediction(unreg_key, source_system="razorpay") is None
-    assert await pred_repo.get_max_prediction_version(unreg_key, source_system="razorpay") == 0
-    assert await int_repo.get_latest_decision(unreg_key, source_system="razorpay") is None
-    assert await int_repo.get_max_decision_version(unreg_key, source_system="razorpay") == 0
-    assert await exec_repo.get_command_by_attempt_and_version(unreg_key, 1, source_system="razorpay") is None
+    with pytest.raises(IntegrityError, match="fk_intervention_commands_payment_attempt"):
+        async with db_session.begin_nested():
+            db_session.add(cmd_model)
+            await db_session.flush()
 
 
 # ============================================================================
-# 4. Execution attempts with mismatched provider in DB raise conflict error
+# 4. Execution attempts with mismatched provider rejected by database FK constraints
+# (Preserved repository conflict detection runs under Revision A in test_revision_a.py)
 # ============================================================================
 
-async def test_mismatched_execution_attempt_in_db_raises_conflict(db_session: AsyncSession):
+async def test_mismatched_execution_attempt_rejected_at_the_database(db_session: AsyncSession):
     key = "pay_EXEC_MISMATCH_001"
     _seed_attempt(db_session, "razorpay", key)
     ref = await register_attempt(db_session, key)
@@ -322,18 +327,18 @@ async def test_mismatched_execution_attempt_in_db_raises_conflict(db_session: As
         error_message=None,
         created_at=T,
     )
-    db_session.add(mismatched_attempt)
-    await db_session.flush()
-
-    with pytest.raises(AttemptProviderConflictError, match="conflicts with command"):
-        await exec_repo.get_execution_attempts(cmd.command_id)
+    with pytest.raises(IntegrityError, match="fk_exec_attempt_command"):
+        async with db_session.begin_nested():
+            db_session.add(mismatched_attempt)
+            await db_session.flush()
 
 
 # ============================================================================
-# 5. Outcome observations with mismatched provider in DB raise conflict error
+# 5. Outcome observations with mismatched provider rejected by database FK constraints
+# (Preserved repository conflict detection runs under Revision A in test_revision_a.py)
 # ============================================================================
 
-async def test_mismatched_observation_in_db_raises_conflict(db_session: AsyncSession):
+async def test_mismatched_observation_rejected_at_the_database(db_session: AsyncSession):
     key = "pay_OBS_MISMATCH_001"
     _seed_attempt(db_session, "razorpay", key)
     ref = await register_attempt(db_session, key)
@@ -373,14 +378,10 @@ async def test_mismatched_observation_in_db_raises_conflict(db_session: AsyncSes
         observation_audit_payload={},
         created_at=T,
     )
-    db_session.add(mismatched_obs)
-    await db_session.flush()
-
-    with pytest.raises(AttemptProviderConflictError, match="conflicts with command"):
-        await exec_repo.get_latest_observation(cmd.command_id)
-
-    with pytest.raises(AttemptProviderConflictError, match="conflicts with command"):
-        await exec_repo.get_all_observations(cmd.command_id)
+    with pytest.raises(IntegrityError, match="fk_payment_outcome_observations_payment_attempt"):
+        async with db_session.begin_nested():
+            db_session.add(mismatched_obs)
+            await db_session.flush()
 
 
 # ============================================================================

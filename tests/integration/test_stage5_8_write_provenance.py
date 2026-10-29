@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.attribution.attribution_service import CounterfactualAttributionService
@@ -156,14 +157,12 @@ async def test_writes_for_an_unregistered_attempt_leave_no_rows(db_session: Asyn
         assert (await db_session.execute(select(func.count()).select_from(model))).scalar_one() == 0
 
 
-async def test_a_stored_row_without_a_provider_is_never_read_back(db_session: AsyncSession):
+async def test_a_row_without_a_provider_is_rejected_at_the_database(db_session: AsyncSession):
     db_session.add(FailurePredictionModel(
         prediction_id=uuid.uuid4(), payment_attempt_id="pay_Prov00000004", source_system=None,
         prediction_version=1, predicted_at=T, prediction_horizon="30m", failure_probability=0.5,
         risk_band="ELEVATED", prediction_status="PREDICTED", model_name="m", model_version="1",
         feature_schema_version="1", feature_snapshot={}, input_fingerprint="sha256:x", created_at=T,
     ))
-    await db_session.flush()
-
-    with pytest.raises(ProviderIdentityMissingError, match="has no source_system"):
-        await FailurePredictionRepository(db_session).get_latest_prediction("pay_Prov00000004")
+    with pytest.raises(IntegrityError):
+        await db_session.flush()

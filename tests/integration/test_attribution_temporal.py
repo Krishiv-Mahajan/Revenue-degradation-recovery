@@ -136,6 +136,7 @@ async def test_late_arriving_event_appends_new_version_immutably(db_session: Asy
     T4_attr = T0 + timedelta(seconds=30)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0, amount_minor_units=50000)
+    await register_attempt(db_session, payment_id)
     pred_id = add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 
@@ -195,6 +196,7 @@ async def test_temporal_information_barrier_hides_future_events(db_session: Asyn
     T2_future_event = T0 + timedelta(seconds=50)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0)
+    await register_attempt(db_session, payment_id)
     pred_id = add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 
@@ -235,6 +237,7 @@ async def test_execution_completed_after_terminal_event_not_attributed(db_sessio
     T0 = datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc)
 
     add_payment_event(db_session, payment_id, "payment.authorized", T0)
+    await register_attempt(db_session, payment_id)
     pred_id = add_stage5_prediction(db_session, payment_id, T0)
     await db_session.flush()
 

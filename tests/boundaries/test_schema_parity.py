@@ -165,4 +165,12 @@ def test_foreign_keys_declared_on_models(model_ddl):
         "fk_attribution_command",
         "fk_attribution_decision",
         "fk_payment_attempt_trigger",
+        "fk_failure_predictions_payment_attempt",
+        "fk_intervention_decisions_payment_attempt",
+        "fk_intervention_commands_payment_attempt",
+        "fk_payment_outcome_observations_payment_attempt",
+        "fk_counterfactual_attributions_payment_attempt",
+        "fk_command_decision",
+        "fk_exec_attempt_command",
+        "fk_observation_command",
     }
