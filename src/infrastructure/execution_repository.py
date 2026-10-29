@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import bindparam, func, select, text, update
+from sqlalchemy import and_, bindparam, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.execution_models import (
@@ -25,11 +25,17 @@ from src.core.domain.execution_models import (
     PaymentOutcomeObservation,
 )
 from src.core.domain.intervention_models import InterventionRouteKey
-from src.core.domain.payment_attempts import paypal_order_id, recorded_provider
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.core.domain.payment_attempts import (
+    AttemptProviderConflictError,
+    paypal_order_id,
+    recorded_provider,
+    validate_provider,
+)
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.models import (
     InterventionCommandModel,
     InterventionExecutionAttemptModel,
+    PaymentAttemptModel,
     PaymentEventModel,
     PaymentOutcomeObservationModel,
 )
@@ -81,15 +87,37 @@ class ExecutionRepository:
         return self._map_command(model)
 
     async def get_command_by_attempt_and_version(
-        self, payment_attempt_id: str, decision_version: int
+        self,
+        payment_attempt_id: str,
+        decision_version: int,
+        source_system: Optional[str] = None,
     ) -> Optional[InterventionCommand]:
         """
         Retrieve command by (payment_attempt_id, decision_version).
+        When source_system is provided, enforces provider-exact lookup joined with payment_attempts.
         """
-        stmt = select(InterventionCommandModel).where(
-            InterventionCommandModel.payment_attempt_id == payment_attempt_id,
-            InterventionCommandModel.decision_version == decision_version,
-        )
+        if source_system is not None:
+            validate_provider(source_system)
+            stmt = (
+                select(InterventionCommandModel)
+                .join(
+                    PaymentAttemptModel,
+                    and_(
+                        PaymentAttemptModel.payment_attempt_id == InterventionCommandModel.payment_attempt_id,
+                        PaymentAttemptModel.source_system == InterventionCommandModel.source_system,
+                    ),
+                )
+                .where(
+                    InterventionCommandModel.payment_attempt_id == payment_attempt_id,
+                    InterventionCommandModel.decision_version == decision_version,
+                    InterventionCommandModel.source_system == source_system,
+                )
+            )
+        else:
+            stmt = select(InterventionCommandModel).where(
+                InterventionCommandModel.payment_attempt_id == payment_attempt_id,
+                InterventionCommandModel.decision_version == decision_version,
+            )
         result = await self.session.execute(stmt)
         model = result.scalar_one_or_none()
         if model is None:
@@ -208,6 +236,7 @@ class ExecutionRepository:
     async def get_execution_attempts(self, command_id: uuid.UUID) -> List[ExecutionAttempt]:
         """
         Retrieve all execution attempts for a command ordered by attempt_number.
+        Validates that attempts match the command's provider identity.
         """
         stmt = (
             select(InterventionExecutionAttemptModel)
@@ -216,35 +245,66 @@ class ExecutionRepository:
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()
-        return [
-            ExecutionAttempt(
-                attempt_id=m.attempt_id,
-                command_id=m.command_id,
-                source_system=recorded_provider(m.source_system, f"execution attempt {m.attempt_id}"),
-                attempt_number=m.attempt_number,
-                started_at=m.started_at,
-                completed_at=m.completed_at,
-                duration_ms=m.duration_ms,
-                execution_status=ExecutionResultStatus(m.execution_status),
-                executor_name=m.executor_name,
-                is_simulation=m.is_simulation,
-                provider_action_type=m.provider_action_type,
-                provider_response_code=m.provider_response_code,
-                provider_response_payload=m.provider_response_payload,
-                error_message=m.error_message,
-                created_at=m.created_at,
+        if not models:
+            return []
+
+        cmd = await self.get_command_by_id(command_id)
+        attempts = []
+        for m in models:
+            provider = recorded_provider(m.source_system, f"execution attempt {m.attempt_id}")
+            if cmd is not None and provider != cmd.source_system:
+                raise AttemptProviderConflictError(
+                    f"Execution attempt {m.attempt_id} has provider {provider} which conflicts with "
+                    f"command {command_id} provider {cmd.source_system}"
+                )
+            attempts.append(
+                ExecutionAttempt(
+                    attempt_id=m.attempt_id,
+                    command_id=m.command_id,
+                    source_system=provider,
+                    attempt_number=m.attempt_number,
+                    started_at=m.started_at,
+                    completed_at=m.completed_at,
+                    duration_ms=m.duration_ms,
+                    execution_status=ExecutionResultStatus(m.execution_status),
+                    executor_name=m.executor_name,
+                    is_simulation=m.is_simulation,
+                    provider_action_type=m.provider_action_type,
+                    provider_response_code=m.provider_response_code,
+                    provider_response_payload=m.provider_response_payload,
+                    error_message=m.error_message,
+                    created_at=m.created_at,
+                )
             )
-            for m in models
-        ]
+        return attempts
 
     async def check_terminal_event_exists_before(
-        self, payment_attempt_id: str, as_of: datetime
+        self, payment_attempt_id: str, as_of: datetime, source_system: Optional[str] = None
     ) -> bool:
         """
         Check if a terminal event (payment.captured or payment.failed)
         was ingested strictly before or at as_of timestamp.
-        A PayPal attempt's terminal events are its order's PayPal capture outcomes.
+        When source_system is provided, filters strictly by provider.
         """
+        if source_system is not None:
+            validate_provider(source_system)
+            if source_system == PAYPAL_SOURCE_SYSTEM:
+                order_id = paypal_order_id(payment_attempt_id)
+                if order_id is None:
+                    return False
+                paypal_stmt = select(func.count(PaymentEventModel.event_id)).where(
+                    *paypal_terminal_events(order_id), PaymentEventModel.ingested_at <= as_of
+                )
+                return bool((await self.session.execute(paypal_stmt)).scalar())
+            else:
+                stmt = select(func.count(PaymentEventModel.event_id)).where(
+                    PaymentEventModel.payment_id == payment_attempt_id,
+                    PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
+                    PaymentEventModel.ingested_at <= as_of,
+                    PaymentEventModel.source_system == source_system,
+                )
+                return bool((await self.session.execute(stmt)).scalar())
+
         order_id = paypal_order_id(payment_attempt_id)
         if order_id is not None:
             paypal_stmt = select(func.count(PaymentEventModel.event_id)).where(
@@ -270,23 +330,37 @@ class ExecutionRepository:
         return bool(result.scalar())
 
     async def get_canonical_terminal_events(
-        self, payment_attempt_id: str, as_of: datetime
+        self, payment_attempt_id: str, as_of: datetime, source_system: Optional[str] = None
     ) -> List[PaymentEventModel]:
         """
         Retrieve all canonical terminal payment events ingested as-of as_of timestamp,
-        ordered by ingested_at ASC. For a PayPal attempt these are its order's PayPal capture
-        outcomes, correlated by order_id.
+        ordered by ingested_at ASC. When source_system is provided, enforces provider-exact scoping.
         """
-        order_id = paypal_order_id(payment_attempt_id)
-        if order_id is not None:
-            conditions = (*paypal_terminal_events(order_id), PaymentEventModel.ingested_at <= as_of)
+        if source_system is not None:
+            validate_provider(source_system)
+            if source_system == PAYPAL_SOURCE_SYSTEM:
+                order_id = paypal_order_id(payment_attempt_id)
+                if order_id is None:
+                    return []
+                conditions = (*paypal_terminal_events(order_id), PaymentEventModel.ingested_at <= as_of)
+            else:
+                conditions = (
+                    PaymentEventModel.payment_id == payment_attempt_id,
+                    PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
+                    PaymentEventModel.ingested_at <= as_of,
+                    PaymentEventModel.source_system == source_system,
+                )
         else:
-            conditions = (
-                PaymentEventModel.payment_id == payment_attempt_id,
-                PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
-                PaymentEventModel.ingested_at <= as_of,
-                PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
-            )
+            order_id = paypal_order_id(payment_attempt_id)
+            if order_id is not None:
+                conditions = (*paypal_terminal_events(order_id), PaymentEventModel.ingested_at <= as_of)
+            else:
+                conditions = (
+                    PaymentEventModel.payment_id == payment_attempt_id,
+                    PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
+                    PaymentEventModel.ingested_at <= as_of,
+                    PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+                )
         stmt = (
             select(PaymentEventModel)
             .where(*conditions)
@@ -335,6 +409,7 @@ class ExecutionRepository:
     ) -> Optional[PaymentOutcomeObservation]:
         """
         Retrieve latest (highest observation_version) observation for a command.
+        Validates provider consistency against the command.
         """
         stmt = (
             select(PaymentOutcomeObservationModel)
@@ -346,6 +421,13 @@ class ExecutionRepository:
         model = result.scalar_one_or_none()
         if model is None:
             return None
+        obs_provider = recorded_provider(model.source_system, f"outcome observation {model.observation_id}")
+        cmd = await self.get_command_by_id(command_id)
+        if cmd is not None and obs_provider != cmd.source_system:
+            raise AttemptProviderConflictError(
+                f"Outcome observation {model.observation_id} has provider {obs_provider} which conflicts with "
+                f"command {command_id} provider {cmd.source_system}"
+            )
         return self._map_observation(model)
 
     async def get_all_observations(
@@ -353,6 +435,7 @@ class ExecutionRepository:
     ) -> List[PaymentOutcomeObservation]:
         """
         Retrieve all observation records for a command ordered by version ASC.
+        Validates provider consistency against the command.
         """
         stmt = (
             select(PaymentOutcomeObservationModel)
@@ -360,7 +443,20 @@ class ExecutionRepository:
             .order_by(PaymentOutcomeObservationModel.observation_version.asc())
         )
         result = await self.session.execute(stmt)
-        return [self._map_observation(m) for m in result.scalars().all()]
+        models = result.scalars().all()
+        if not models:
+            return []
+        cmd = await self.get_command_by_id(command_id)
+        observations = []
+        for m in models:
+            obs_provider = recorded_provider(m.source_system, f"outcome observation {m.observation_id}")
+            if cmd is not None and obs_provider != cmd.source_system:
+                raise AttemptProviderConflictError(
+                    f"Outcome observation {m.observation_id} has provider {obs_provider} which conflicts with "
+                    f"command {command_id} provider {cmd.source_system}"
+                )
+            observations.append(self._map_observation(m))
+        return observations
 
     def _map_command(self, model: InterventionCommandModel) -> InterventionCommand:
         return InterventionCommand(

@@ -89,8 +89,12 @@ class InterventionDecisionService:
         # 1. Fetch Upstream Context Strictly As-Of T_decide
         # -------------------------------------------------------------------
         auth_event = await self.feature_repo.get_payment_event_by_id(payment_attempt_id, t_decide)
-        terminal_exists = await self.intervention_repo.check_terminal_event_exists(payment_attempt_id, t_decide)
-        stage5_pred = await self.intervention_repo.get_stage5_prediction_as_of(payment_attempt_id, t_decide)
+        terminal_exists = await self.intervention_repo.check_terminal_event_exists(
+            payment_attempt_id, t_decide, source_system=attempt.source_system
+        )
+        stage5_pred = await self.intervention_repo.get_stage5_prediction_as_of(
+            payment_attempt_id, t_decide, source_system=attempt.source_system
+        )
 
         # Extract payment facts
         amount_minor_units = auth_event.amount_minor_units if auth_event else 0
@@ -153,7 +157,9 @@ class InterventionDecisionService:
         # -------------------------------------------------------------------
         # 3. Fast Idempotency Check (before lock)
         # -------------------------------------------------------------------
-        latest = await self.intervention_repo.get_latest_decision(payment_attempt_id)
+        latest = await self.intervention_repo.get_latest_decision(
+            payment_attempt_id, source_system=attempt.source_system
+        )
         if latest is not None and latest.input_fingerprint == fingerprint:
             return latest
 
@@ -161,7 +167,9 @@ class InterventionDecisionService:
         # 4. Acquire Per-Attempt Version Lock & Recheck Idempotency
         # -------------------------------------------------------------------
         await self.intervention_repo.acquire_version_allocation_lock(payment_attempt_id)
-        latest = await self.intervention_repo.get_latest_decision(payment_attempt_id)
+        latest = await self.intervention_repo.get_latest_decision(
+            payment_attempt_id, source_system=attempt.source_system
+        )
         if latest is not None and latest.input_fingerprint == fingerprint:
             return latest
 
@@ -246,6 +254,7 @@ class InterventionDecisionService:
                 payment_attempt_id,
                 route_key.value,
                 since_timestamp=t_decide - timedelta(seconds=route_def.cooldown_seconds),
+                source_system=attempt.source_system,
             )
 
             is_eligible, eligibility_reason = evaluate_route_eligibility(
@@ -359,7 +368,9 @@ class InterventionDecisionService:
         # -------------------------------------------------------------------
         # 8. Persist Immutable Decision Record
         # -------------------------------------------------------------------
-        max_version = await self.intervention_repo.get_max_decision_version(payment_attempt_id)
+        max_version = await self.intervention_repo.get_max_decision_version(
+            payment_attempt_id, source_system=attempt.source_system
+        )
         new_version = max_version + 1
 
         audit_payload = {
@@ -432,7 +443,9 @@ class InterventionDecisionService:
         Helper to construct and persist a NO_ACTION decision when a hard gate triggers.
         """
         payment_attempt_id = attempt.payment_attempt_id
-        max_version = await self.intervention_repo.get_max_decision_version(payment_attempt_id)
+        max_version = await self.intervention_repo.get_max_decision_version(
+            payment_attempt_id, source_system=attempt.source_system
+        )
         new_version = max_version + 1
 
         audit_payload = {

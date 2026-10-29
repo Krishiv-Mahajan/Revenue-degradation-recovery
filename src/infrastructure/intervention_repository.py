@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import bindparam, func, select, text
+from sqlalchemy import and_, bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.intervention_models import (
@@ -20,9 +20,10 @@ from src.core.domain.intervention_models import (
     InterventionDecision,
     InterventionRouteKey,
 )
-from src.core.domain.payment_attempts import paypal_order_id, recorded_provider
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
-from src.infrastructure.models import InterventionDecisionModel, PaymentEventModel
+from src.core.domain.payment_attempt_exceptions import UnsupportedProviderError
+from src.core.domain.payment_attempts import paypal_order_id, recorded_provider, validate_provider
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PIPELINE_PROVIDERS
+from src.infrastructure.models import InterventionDecisionModel, PaymentAttemptModel, PaymentEventModel
 from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
 
 # Fixed global lock key pair for atomic Stage 6 ACT admission
@@ -60,27 +61,51 @@ class InterventionRepository:
             {"k1": GLOBAL_RATE_LIMIT_LOCK_K1, "k2": GLOBAL_RATE_LIMIT_LOCK_K2},
         )
 
-    async def get_max_decision_version(self, payment_attempt_id: str) -> int:
+    async def get_max_decision_version(
+        self, payment_attempt_id: str, source_system: Optional[str] = None
+    ) -> int:
         """
-        Returns the current maximum decision_version for a payment attempt.
+        Returns the current maximum decision_version for a payment attempt under source_system.
         Returns 0 if no decisions exist yet.
         """
         stmt = select(func.max(InterventionDecisionModel.decision_version)).where(
             InterventionDecisionModel.payment_attempt_id == payment_attempt_id
         )
+        if source_system is not None:
+            if source_system not in PIPELINE_PROVIDERS:
+                raise UnsupportedProviderError(f"source_system={source_system!r} is not a valid pipeline provider")
+            stmt = stmt.join(
+                PaymentAttemptModel,
+                and_(
+                    PaymentAttemptModel.payment_attempt_id == InterventionDecisionModel.payment_attempt_id,
+                    PaymentAttemptModel.source_system == InterventionDecisionModel.source_system,
+                ),
+            ).where(InterventionDecisionModel.source_system == source_system)
         result = await self.session.execute(stmt)
         return result.scalar() or 0
 
-    async def get_latest_decision(self, payment_attempt_id: str) -> Optional[InterventionDecision]:
+    async def get_latest_decision(
+        self, payment_attempt_id: str, source_system: Optional[str] = None
+    ) -> Optional[InterventionDecision]:
         """
-        Returns the latest (highest decision_version) decision for a payment attempt.
+        Returns the latest (highest decision_version) decision for a payment attempt under source_system.
+        When source_system is specified, joins payment_attempts on composite identity.
         """
-        stmt = (
-            select(InterventionDecisionModel)
-            .where(InterventionDecisionModel.payment_attempt_id == payment_attempt_id)
-            .order_by(InterventionDecisionModel.decision_version.desc())
-            .limit(1)
+        stmt = select(InterventionDecisionModel).where(
+            InterventionDecisionModel.payment_attempt_id == payment_attempt_id
         )
+        if source_system is not None:
+            if source_system not in PIPELINE_PROVIDERS:
+                raise UnsupportedProviderError(f"source_system={source_system!r} is not a valid pipeline provider")
+            stmt = stmt.join(
+                PaymentAttemptModel,
+                and_(
+                    PaymentAttemptModel.payment_attempt_id == InterventionDecisionModel.payment_attempt_id,
+                    PaymentAttemptModel.source_system == InterventionDecisionModel.source_system,
+                ),
+            ).where(InterventionDecisionModel.source_system == source_system)
+
+        stmt = stmt.order_by(InterventionDecisionModel.decision_version.desc()).limit(1)
         result = await self.session.execute(stmt)
         model = result.scalar_one_or_none()
         if model is None:
@@ -115,7 +140,11 @@ class InterventionRepository:
         return result.scalar() or 0
 
     async def has_recent_route_decision(
-        self, payment_attempt_id: str, route_id: str, since_timestamp: datetime
+        self,
+        payment_attempt_id: str,
+        route_id: str,
+        since_timestamp: datetime,
+        source_system: Optional[str] = None,
     ) -> bool:
         """
         Check if a specific route was selected for this payment attempt since since_timestamp.
@@ -127,15 +156,49 @@ class InterventionRepository:
             InterventionDecisionModel.decision_type == DecisionType.ACT.value,
             InterventionDecisionModel.decided_at >= since_timestamp,
         )
+        if source_system is not None:
+            if source_system not in PIPELINE_PROVIDERS:
+                raise UnsupportedProviderError(f"source_system={source_system!r} is not a valid pipeline provider")
+            stmt = stmt.where(InterventionDecisionModel.source_system == source_system)
         result = await self.session.execute(stmt)
         count = result.scalar() or 0
         return count > 0
 
-    async def check_terminal_event_exists(self, payment_id: str, t_decide: datetime) -> bool:
+    async def check_terminal_event_exists(
+        self, payment_id: str, t_decide: datetime, source_system: Optional[str] = None
+    ) -> bool:
         """
         Checks if a terminal event (payment.captured, payment.failed) was ingested before t_decide.
         A PayPal attempt's terminal events are its order's PayPal capture outcomes.
         """
+        if source_system is not None:
+            validate_provider(source_system)
+            if source_system == "paypal":
+                order_id = paypal_order_id(payment_id) or payment_id
+                paypal_stmt = select(func.count(PaymentEventModel.event_id)).where(
+                    *paypal_terminal_events(order_id),
+                    PaymentEventModel.ingested_at < t_decide,
+                    PaymentEventModel.source_system == "paypal",
+                )
+                return bool((await self.session.execute(paypal_stmt)).scalar())
+
+            stmt = text("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM payment_events
+                    WHERE payment_id = :payment_id
+                      AND event_type IN ('payment.captured', 'payment.failed')
+                      AND ingested_at < :t_decide
+                      AND source_system = :source_system
+                )
+            """)
+            result = await self.session.execute(stmt, {
+                "payment_id": payment_id,
+                "t_decide": t_decide,
+                "source_system": source_system,
+            })
+            return bool(result.scalar())
+
         order_id = paypal_order_id(payment_id)
         if order_id is not None:
             paypal_stmt = select(func.count(PaymentEventModel.event_id)).where(
@@ -161,24 +224,32 @@ class InterventionRepository:
         return bool(result.scalar())
 
     async def get_stage5_prediction_as_of(
-        self, payment_attempt_id: str, t_decide: datetime
+        self, payment_attempt_id: str, t_decide: datetime, source_system: Optional[str] = None
     ) -> Optional[FailurePrediction]:
         """
         Retrieves the latest FailurePrediction for a payment attempt evaluated as-of t_decide.
         Strict temporal boundary: predicted_at <= t_decide.
+        When source_system is specified, joins payment_attempts on composite identity.
         """
         from src.infrastructure.models import FailurePredictionModel
         from src.core.domain.failure_prediction_models import FailurePrediction
 
-        stmt = (
-            select(FailurePredictionModel)
-            .where(
-                FailurePredictionModel.payment_attempt_id == payment_attempt_id,
-                FailurePredictionModel.predicted_at <= t_decide,
-            )
-            .order_by(FailurePredictionModel.prediction_version.desc())
-            .limit(1)
+        stmt = select(FailurePredictionModel).where(
+            FailurePredictionModel.payment_attempt_id == payment_attempt_id,
+            FailurePredictionModel.predicted_at <= t_decide,
         )
+        if source_system is not None:
+            if source_system not in PIPELINE_PROVIDERS:
+                raise UnsupportedProviderError(f"source_system={source_system!r} is not a valid pipeline provider")
+            stmt = stmt.join(
+                PaymentAttemptModel,
+                and_(
+                    PaymentAttemptModel.payment_attempt_id == FailurePredictionModel.payment_attempt_id,
+                    PaymentAttemptModel.source_system == FailurePredictionModel.source_system,
+                ),
+            ).where(FailurePredictionModel.source_system == source_system)
+
+        stmt = stmt.order_by(FailurePredictionModel.prediction_version.desc()).limit(1)
         result = await self.session.execute(stmt)
         model = result.scalar_one_or_none()
         if model is None:

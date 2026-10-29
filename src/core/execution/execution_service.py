@@ -29,7 +29,7 @@ from src.core.domain.execution_models import (
     make_command_id,
 )
 from src.core.domain.intervention_models import DecisionType, GateVerdict, InterventionDecision
-from src.core.domain.payment_attempts import AttemptRef
+from src.core.domain.payment_attempts import AttemptProviderConflictError, AttemptRef
 from src.core.execution.executor import InterventionExecutor
 from src.core.execution.simulator import SimulatorInterventionExecutor
 from src.core.execution.state_machine import validate_transition
@@ -86,11 +86,16 @@ class InterventionExecutionService:
         # 2. Check Idempotency by decision_id
         existing = await self.execution_repo.get_command_by_decision_id(decision.decision_id)
         if existing is not None:
+            if existing.source_system != decision.source_system:
+                raise AttemptProviderConflictError(
+                    f"Command {existing.command_id} belongs to {existing.source_system}, "
+                    f"but decision {decision.decision_id} belongs to {decision.source_system}"
+                )
             return existing
 
         # Check (payment_attempt_id, decision_version)
         existing_version = await self.execution_repo.get_command_by_attempt_and_version(
-            decision.payment_attempt_id, decision.decision_version
+            decision.payment_attempt_id, decision.decision_version, source_system=decision.source_system
         )
         if existing_version is not None:
             return existing_version

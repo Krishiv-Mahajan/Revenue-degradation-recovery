@@ -51,7 +51,7 @@ class FailurePredictionService:
         payment_attempt_id = attempt.payment_attempt_id
 
         # 1. Check eligibility
-        is_eligible = await self.is_eligible_for_prediction(payment_attempt_id, T)
+        is_eligible = await self.is_eligible_for_prediction(payment_attempt_id, T, source_system=attempt.source_system)
         
         feature_snapshot = None
         feature_dict = {}
@@ -79,8 +79,8 @@ class FailurePredictionService:
             feature_schema_version=self.model.get_feature_schema_version(),
         )
         
-        # 4. Idempotency Check: Get latest prediction for this attempt
-        latest_prediction = await self.repository.get_latest_prediction(payment_attempt_id)
+        # 4. Idempotency Check: Get latest prediction for this attempt under this provider
+        latest_prediction = await self.repository.get_latest_prediction(payment_attempt_id, source_system=attempt.source_system)
         if latest_prediction is not None and latest_prediction.input_fingerprint == fingerprint:
             return latest_prediction
             
@@ -98,7 +98,7 @@ class FailurePredictionService:
                 
         # 6. Persist new prediction version
         await self.repository.acquire_version_allocation_lock(payment_attempt_id)
-        max_version = await self.repository.get_max_prediction_version(payment_attempt_id)
+        max_version = await self.repository.get_max_prediction_version(payment_attempt_id, source_system=attempt.source_system)
         new_version = max_version + 1
         
         prediction = FailurePrediction(
@@ -122,7 +122,9 @@ class FailurePredictionService:
         await self.repository.append_prediction(prediction)
         return prediction
 
-    async def is_eligible_for_prediction(self, payment_attempt_id: str, T: datetime) -> bool:
+    async def is_eligible_for_prediction(
+        self, payment_attempt_id: str, T: datetime, source_system: Optional[str] = None
+    ) -> bool:
         """
         Evaluate if a payment is eligible for prediction as of T.
         
@@ -134,6 +136,33 @@ class FailurePredictionService:
         Uses the ix_payment_events_eligibility index.
         A PayPal attempt's terminal events are its order's PayPal capture outcomes.
         """
+        if source_system == "paypal":
+            order_id = paypal_order_id(payment_attempt_id) or payment_attempt_id
+            stmt = select(func.count(PaymentEventModel.event_id)).where(
+                *paypal_terminal_events(order_id),
+                PaymentEventModel.ingested_at < T,
+                PaymentEventModel.source_system == "paypal",
+            )
+            return not (await self.session.execute(stmt)).scalar()
+
+        if source_system is not None:
+            stmt = text("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM payment_events
+                    WHERE payment_id = :payment_id
+                      AND event_type IN ('payment.captured', 'payment.failed')
+                      AND ingested_at < :T
+                      AND source_system = :source_system
+                )
+            """)
+            result = await self.session.execute(stmt, {
+                "payment_id": payment_attempt_id,
+                "T": T,
+                "source_system": source_system,
+            })
+            return not result.scalar()
+
         order_id = paypal_order_id(payment_attempt_id)
         if order_id is not None:
             stmt = select(func.count(PaymentEventModel.event_id)).where(

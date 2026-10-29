@@ -8,12 +8,14 @@ import struct
 import uuid
 from typing import Optional
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.failure_prediction_models import FailurePrediction
+from src.core.domain.payment_attempt_exceptions import UnsupportedProviderError
 from src.core.domain.payment_attempts import recorded_provider
-from src.infrastructure.models import FailurePredictionModel
+from src.core.domain.source_systems import PIPELINE_PROVIDERS
+from src.infrastructure.models import FailurePredictionModel, PaymentAttemptModel
 
 
 class FailurePredictionRepository:
@@ -24,14 +26,26 @@ class FailurePredictionRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get_max_prediction_version(self, payment_attempt_id: str) -> int:
+    async def get_max_prediction_version(
+        self, payment_attempt_id: str, source_system: Optional[str] = None
+    ) -> int:
         """
-        Returns the current maximum prediction_version for a payment attempt.
+        Returns the current maximum prediction_version for a payment attempt under source_system.
         Returns 0 if no predictions exist yet.
         """
         stmt = select(func.max(FailurePredictionModel.prediction_version)).where(
             FailurePredictionModel.payment_attempt_id == payment_attempt_id
         )
+        if source_system is not None:
+            if source_system not in PIPELINE_PROVIDERS:
+                raise UnsupportedProviderError(f"source_system={source_system!r} is not a valid pipeline provider")
+            stmt = stmt.join(
+                PaymentAttemptModel,
+                and_(
+                    PaymentAttemptModel.payment_attempt_id == FailurePredictionModel.payment_attempt_id,
+                    PaymentAttemptModel.source_system == FailurePredictionModel.source_system,
+                ),
+            ).where(FailurePredictionModel.source_system == source_system)
         result = await self.session.execute(stmt)
         return result.scalar() or 0
 
@@ -46,16 +60,28 @@ class FailurePredictionRepository:
             text("SELECT pg_advisory_xact_lock(:k1, :k2)"), {"k1": k1, "k2": k2}
         )
 
-    async def get_latest_prediction(self, payment_attempt_id: str) -> Optional[FailurePrediction]:
+    async def get_latest_prediction(
+        self, payment_attempt_id: str, source_system: Optional[str] = None
+    ) -> Optional[FailurePrediction]:
         """
-        Returns the latest (highest prediction_version) prediction for a payment attempt.
+        Returns the latest (highest prediction_version) prediction for a payment attempt under source_system.
+        When source_system is specified, joins payment_attempts on composite identity (payment_attempt_id, source_system).
         """
-        stmt = (
-            select(FailurePredictionModel)
-            .where(FailurePredictionModel.payment_attempt_id == payment_attempt_id)
-            .order_by(FailurePredictionModel.prediction_version.desc())
-            .limit(1)
+        stmt = select(FailurePredictionModel).where(
+            FailurePredictionModel.payment_attempt_id == payment_attempt_id
         )
+        if source_system is not None:
+            if source_system not in PIPELINE_PROVIDERS:
+                raise UnsupportedProviderError(f"source_system={source_system!r} is not a valid pipeline provider")
+            stmt = stmt.join(
+                PaymentAttemptModel,
+                and_(
+                    PaymentAttemptModel.payment_attempt_id == FailurePredictionModel.payment_attempt_id,
+                    PaymentAttemptModel.source_system == FailurePredictionModel.source_system,
+                ),
+            ).where(FailurePredictionModel.source_system == source_system)
+
+        stmt = stmt.order_by(FailurePredictionModel.prediction_version.desc()).limit(1)
         result = await self.session.execute(stmt)
         model = result.scalar_one_or_none()
         if model is None:

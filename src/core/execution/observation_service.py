@@ -67,6 +67,7 @@ class PaymentOutcomeObservationService:
         terminal_events = await self.execution_repo.get_canonical_terminal_events(
             payment_attempt_id=cmd.payment_attempt_id,
             as_of=as_of,
+            source_system=cmd.source_system,
         )
 
         now = datetime.now(timezone.utc)

@@ -41,6 +41,8 @@ from typing import Optional, Tuple
 
 from src.core.domain.models import PaymentEvent
 from src.core.domain.payment_attempt_exceptions import (
+    AttemptNotRegisteredError,
+    AttemptProviderConflictError,
     InvalidAttemptIdentityError,
     PaymentAttemptError,
     ProviderIdentityMissingError,
@@ -142,6 +144,17 @@ def recorded_provider(source_system: Optional[str], record: str) -> str:
     """The provider stored on a Stage 5-8 record; a missing one is never guessed from the key."""
     if source_system is None:
         raise ProviderIdentityMissingError(f"{record} has no source_system")
+    return source_system
+
+
+def validate_provider(source_system: Optional[str]) -> str:
+    """Validate that source_system is present and supported in PIPELINE_PROVIDERS."""
+    if source_system is None:
+        raise ProviderIdentityMissingError("Missing required provider identity (source_system is None)")
+    if source_system not in PIPELINE_PROVIDERS:
+        raise UnsupportedProviderError(
+            f"source_system={source_system!r} cannot own a Stage 5-8 payment attempt; expected one of {sorted(PIPELINE_PROVIDERS)}"
+        )
     return source_system
 
 

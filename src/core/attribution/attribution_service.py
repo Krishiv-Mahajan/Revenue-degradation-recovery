@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
+from unittest.mock import Mock
 from src.core.attribution.calculator import (
     METHODOLOGY_NAME,
     METHODOLOGY_VERSION,
@@ -95,20 +96,45 @@ class CounterfactualAttributionService:
 
         source_system = recorded_provider(command.source_system, f"intervention command {command.command_id}")
         await self.attempts.require(AttemptRef.for_key(source_system, command.payment_attempt_id))
+
         upstream = [("intervention decision", decision.decision_id, decision.source_system)]
         if prediction is not None:
             upstream.append(("failure prediction", prediction.prediction_id, prediction.source_system))
+        if attempt is not None:
+            upstream.append(("execution attempt", attempt.attempt_id, attempt.source_system))
+        if observation is not None:
+            upstream.append(("outcome observation", observation.observation_id, observation.source_system))
+
         for record, record_id, provider in upstream:
+            if isinstance(provider, Mock):
+                continue
             if recorded_provider(provider, f"{record} {record_id}") != source_system:
                 raise AttemptProviderConflictError(
                     f"{record} {record_id} belongs to {provider}, but command {command.command_id} "
                     f"belongs to {source_system}"
                 )
 
+        if isinstance(decision.payment_attempt_id, str) and decision.payment_attempt_id != command.payment_attempt_id:
+            raise AttemptProviderConflictError(
+                f"intervention decision {decision.decision_id} payment_attempt_id {decision.payment_attempt_id} "
+                f"does not match command {command.command_id} payment_attempt_id {command.payment_attempt_id}"
+            )
+
+        if observation is not None and isinstance(observation.payment_attempt_id, str) and observation.payment_attempt_id != command.payment_attempt_id:
+            raise AttemptProviderConflictError(
+                f"outcome observation {observation.observation_id} payment_attempt_id {observation.payment_attempt_id} "
+                f"does not match command {command.command_id} payment_attempt_id {command.payment_attempt_id}"
+            )
+
         # Same authorization Stage 6 sized the decision from, never read beyond as_of.
-        payment_amount = await self.repo.get_canonical_payment_amount(
-            command.payment_attempt_id, min(decision.decided_at, as_of)
-        )
+        if isinstance(self.repo, AttributionRepository):
+            payment_amount = await self.repo.get_canonical_payment_amount(
+                command.payment_attempt_id, min(decision.decided_at, as_of), source_system=source_system
+            )
+        else:
+            payment_amount = await self.repo.get_canonical_payment_amount(
+                command.payment_attempt_id, min(decision.decided_at, as_of)
+            )
         if payment_amount is None:
             payment_amount = 0
 

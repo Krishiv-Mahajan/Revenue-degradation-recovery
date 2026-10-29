@@ -33,19 +33,19 @@ class MockInterventionRepository:
     def __init__(self, pred_map=None):
         self.pred_map = pred_map or {}
 
-    async def get_latest_decision(self, payment_attempt_id):
+    async def get_latest_decision(self, payment_attempt_id, source_system=None):
         return None
-    async def get_max_decision_version(self, payment_attempt_id):
+    async def get_max_decision_version(self, payment_attempt_id, source_system=None):
         return 0
     async def acquire_version_allocation_lock(self, payment_attempt_id):
         return True
-    async def has_recent_route_decision(self, payment_attempt_id, route_key, since_timestamp):
+    async def has_recent_route_decision(self, payment_attempt_id, route_key, since_timestamp, source_system=None):
         return False
     async def save_decision(self, decision):
         return decision
-    async def check_terminal_event_exists(self, payment_attempt_id, t_decide):
+    async def check_terminal_event_exists(self, payment_attempt_id, t_decide, source_system=None):
         return False
-    async def get_stage5_prediction_as_of(self, payment_attempt_id, t_decide):
+    async def get_stage5_prediction_as_of(self, payment_attempt_id, t_decide, source_system=None):
         return self.pred_map.get(payment_attempt_id)
     async def acquire_global_rate_limit_lock(self):
         return True

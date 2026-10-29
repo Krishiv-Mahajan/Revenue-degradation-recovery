@@ -15,8 +15,13 @@ from src.core.domain.attribution_models import (
     CounterfactualAttribution,
     TreatmentStatus,
 )
-from src.core.domain.payment_attempts import paypal_order_id, recorded_provider
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.core.domain.payment_attempts import (
+    AttemptProviderConflictError,
+    paypal_order_id,
+    recorded_provider,
+    validate_provider,
+)
+from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.paypal_attempt_queries import paypal_trigger_events
 from src.infrastructure.models import (
     CounterfactualAttributionModel,
@@ -76,8 +81,12 @@ class AttributionRepository:
             created_at=m.created_at,
         )
 
-    async def get_latest_attribution(self, command_id: uuid.UUID) -> Optional[CounterfactualAttribution]:
+    async def get_latest_attribution(
+        self, command_id: uuid.UUID, source_system: Optional[str] = None
+    ) -> Optional[CounterfactualAttribution]:
         """Fetch latest attribution record for a command by version."""
+        if source_system is not None:
+            validate_provider(source_system)
         stmt = (
             select(CounterfactualAttributionModel)
             .where(CounterfactualAttributionModel.command_id == command_id)
@@ -86,12 +95,31 @@ class AttributionRepository:
         )
         res = await self.session.execute(stmt)
         model = res.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        if model is None:
+            return None
+        domain = self._to_domain(model)
+        cmd = await self.get_command(command_id)
+        if cmd is not None:
+            cmd_provider = recorded_provider(cmd.source_system, f"intervention command {cmd.command_id}")
+            if domain.source_system != cmd_provider:
+                raise AttemptProviderConflictError(
+                    f"Attribution {domain.attribution_id} has provider {domain.source_system} which conflicts with "
+                    f"command {command_id} provider {cmd_provider}"
+                )
+        if source_system is not None:
+            if domain.source_system != source_system:
+                raise AttemptProviderConflictError(
+                    f"Attribution {domain.attribution_id} has provider {domain.source_system} which conflicts with "
+                    f"requested provider {source_system}"
+                )
+        return domain
 
     async def get_attribution_by_as_of(
-        self, command_id: uuid.UUID, as_of_timestamp: datetime
+        self, command_id: uuid.UUID, as_of_timestamp: datetime, source_system: Optional[str] = None
     ) -> Optional[CounterfactualAttribution]:
         """Fetch attribution record for a specific command and exact as_of_timestamp."""
+        if source_system is not None:
+            validate_provider(source_system)
         stmt = (
             select(CounterfactualAttributionModel)
             .where(
@@ -102,17 +130,57 @@ class AttributionRepository:
         )
         res = await self.session.execute(stmt)
         model = res.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        if model is None:
+            return None
+        domain = self._to_domain(model)
+        cmd = await self.get_command(command_id)
+        if cmd is not None:
+            cmd_provider = recorded_provider(cmd.source_system, f"intervention command {cmd.command_id}")
+            if domain.source_system != cmd_provider:
+                raise AttemptProviderConflictError(
+                    f"Attribution {domain.attribution_id} has provider {domain.source_system} which conflicts with "
+                    f"command {command_id} provider {cmd_provider}"
+                )
+        if source_system is not None:
+            if domain.source_system != source_system:
+                raise AttemptProviderConflictError(
+                    f"Attribution {domain.attribution_id} has provider {domain.source_system} which conflicts with "
+                    f"requested provider {source_system}"
+                )
+        return domain
 
-    async def get_all_attributions(self, command_id: uuid.UUID) -> List[CounterfactualAttribution]:
+    async def get_all_attributions(
+        self, command_id: uuid.UUID, source_system: Optional[str] = None
+    ) -> List[CounterfactualAttribution]:
         """Fetch all historical attribution records for a command ordered by version."""
+        if source_system is not None:
+            validate_provider(source_system)
         stmt = (
             select(CounterfactualAttributionModel)
             .where(CounterfactualAttributionModel.command_id == command_id)
             .order_by(CounterfactualAttributionModel.attribution_version.asc())
         )
         res = await self.session.execute(stmt)
-        return [self._to_domain(m) for m in res.scalars().all()]
+        models = res.scalars().all()
+        if not models:
+            return []
+        cmd = await self.get_command(command_id)
+        cmd_provider = recorded_provider(cmd.source_system, f"intervention command {cmd.command_id}") if cmd is not None else None
+        domains = []
+        for m in models:
+            domain = self._to_domain(m)
+            if cmd_provider is not None and domain.source_system != cmd_provider:
+                raise AttemptProviderConflictError(
+                    f"Attribution {domain.attribution_id} has provider {domain.source_system} which conflicts with "
+                    f"command {command_id} provider {cmd_provider}"
+                )
+            if source_system is not None and domain.source_system != source_system:
+                raise AttemptProviderConflictError(
+                    f"Attribution {domain.attribution_id} has provider {domain.source_system} which conflicts with "
+                    f"requested provider {source_system}"
+                )
+            domains.append(domain)
+        return domains
 
     async def append_attribution(self, attr: CounterfactualAttribution) -> CounterfactualAttribution:
         """Persist a new immutable attribution record version."""
@@ -198,7 +266,10 @@ class AttributionRepository:
         return res.scalar_one_or_none()
 
     async def get_canonical_payment_amount(
-        self, payment_attempt_id: str, as_of_timestamp: datetime
+        self,
+        payment_attempt_id: str,
+        as_of_timestamp: datetime,
+        source_system: Optional[str] = None,
     ) -> Optional[int]:
         """
         Fetch canonical payment amount in minor units from Stage 1 payment_events table <= as_of_timestamp.
@@ -207,16 +278,31 @@ class AttributionRepository:
         never be attributed. A PayPal attempt is sized, as in Stage 6, by its order's latest
         order.approved event at or before the cutoff.
         """
-        order_id = paypal_order_id(payment_attempt_id)
-        if order_id is not None:
-            conditions = (*paypal_trigger_events(order_id), PaymentEventModel.ingested_at <= as_of_timestamp)
+        if source_system is not None:
+            validate_provider(source_system)
+            if source_system == PAYPAL_SOURCE_SYSTEM:
+                order_id = paypal_order_id(payment_attempt_id)
+                if order_id is None:
+                    return None
+                conditions = (*paypal_trigger_events(order_id), PaymentEventModel.ingested_at <= as_of_timestamp)
+            else:
+                conditions = (
+                    PaymentEventModel.payment_id == payment_attempt_id,
+                    PaymentEventModel.event_type == "payment.authorized",
+                    PaymentEventModel.ingested_at <= as_of_timestamp,
+                    PaymentEventModel.source_system == source_system,
+                )
         else:
-            conditions = (
-                PaymentEventModel.payment_id == payment_attempt_id,
-                PaymentEventModel.event_type == "payment.authorized",
-                PaymentEventModel.ingested_at <= as_of_timestamp,
-                PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
-            )
+            order_id = paypal_order_id(payment_attempt_id)
+            if order_id is not None:
+                conditions = (*paypal_trigger_events(order_id), PaymentEventModel.ingested_at <= as_of_timestamp)
+            else:
+                conditions = (
+                    PaymentEventModel.payment_id == payment_attempt_id,
+                    PaymentEventModel.event_type == "payment.authorized",
+                    PaymentEventModel.ingested_at <= as_of_timestamp,
+                    PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+                )
         stmt = (
             select(PaymentEventModel.amount_minor_units)
             .where(*conditions)
