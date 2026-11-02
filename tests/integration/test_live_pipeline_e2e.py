@@ -986,3 +986,111 @@ async def test_degraded_context_without_razorpay_history_records_insufficient_da
     assert (prediction.prediction_status, prediction.failure_probability) == ("INSUFFICIENT_DATA", None)
     assert prediction.feature_snapshot["is_in_active_degradation"] is True
     assert await _rows(e2e.Session, InterventionDecisionModel) == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_provider_and_mixed_currency_e2e_summary_and_recovery_safety(e2e, monkeypatch):
+    """
+    CP4 regression:
+    Executes both a Razorpay INR flow and a PayPal USD flow within the live pipeline.
+    Proves:
+    1. Both interventions succeed and are attributed with correct currency and provider provenance.
+    2. Default /summary surfaces both protected currencies (INR and USD) without dropping PayPal.
+    3. Multi-currency scalar totals (total_protected_gmv_minor_units) safely return None, proving
+       no misleading arithmetic conflation between paise and cents.
+    4. Explicit provider filtering (?provider=razorpay and ?provider=paypal) strictly isolates metrics.
+    5. Recovery workspace ledger retains exact 'provider' and 'source_system' attributes on both records.
+    """
+    monkeypatch.setenv("DASHBOARD_USERNAME", "e2e-dashboard-user")
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "e2e-dashboard-password")
+    auth = ("e2e-dashboard-user", "e2e-dashboard-password")
+
+    e2e.use_fixed_probability(0.90)
+    now = datetime.now(timezone.utc)
+
+    # 1. Razorpay INR flow: auth + capture
+    await _seed_razorpay_history(e2e.Session, now)
+    rzp_pid = _payment_id()
+    auth_id, _, _ = await _authorize(e2e, rzp_pid, now)
+    cap_id, _, _ = await _capture(e2e, rzp_pid, now)
+    _assert_runs_succeeded(e2e.caplog, [auth_id, cap_id])
+
+    # 2. PayPal USD flow: order approved + capture settled
+    _use_test_policy_with_usd_costs(monkeypatch)
+    pp_order_id = _paypal_order_id()
+    pp_attempt_id = paypal_attempt_id(pp_order_id)
+    await _seed_paypal_history(e2e.Session, now)
+    approval_id = await _approve_paypal_order(e2e, pp_order_id, now)
+    settle_id = await _settle_paypal_capture(e2e, samples.capture_completed, pp_order_id, now)
+    _assert_runs_succeeded(e2e.caplog, [auth_id, cap_id, approval_id, settle_id])
+
+    # 3. Default Summary: preserves multi-currency visibility without misleading scalar summation
+    summary = (await e2e.client.get("/api/v1/summary", auth=auth)).json()
+    assert summary["scope"] == "all_providers"
+    assert summary["metric_scopes"]["processed_gmv"] == "razorpay_pipeline"
+    assert summary["metric_scopes"]["protected_gmv"] == "all_providers"
+    assert summary["metric_scopes"]["interventions"] == "all_providers"
+    assert summary["metric_scopes"]["capture_success_rate"] == "razorpay_pipeline"
+
+    # Processed GMV in default summary remains Razorpay-only (PayPal does not emit payment.authorized)
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary["total_gmv_by_currency"]] == [("INR", 50000)]
+    assert summary["total_gmv_minor_units"] == 50000
+
+    protected_by_curr = {g["currency"]: g["amount_minor_units"] for g in summary["total_protected_gmv_by_currency"]}
+    assert protected_by_curr == {"INR": 16200, "USD": 16200}
+
+    # Provider protected breakdown exact equalities
+    assert {
+        (p["provider"], p["currency"]): p["amount_minor_units"]
+        for p in summary["protected_gmv_by_provider"]
+    } == {
+        ("paypal", "USD"): 16200,
+        ("razorpay", "INR"): 16200,
+    }
+
+    # Multi-currency scalar total MUST be None to prevent adding INR minor units to USD minor units
+    assert summary["total_protected_gmv_minor_units"] is None
+
+    # 4. Filtered Summary: Razorpay only
+    summary_rzp = (await e2e.client.get("/api/v1/summary?provider=razorpay", auth=auth)).json()
+    assert summary_rzp["scope"] == "razorpay"
+    assert summary_rzp["metric_scopes"]["processed_gmv"] == "razorpay"
+    assert summary_rzp["metric_scopes"]["protected_gmv"] == "razorpay"
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_rzp["total_protected_gmv_by_currency"]] == [
+        ("INR", 16200),
+    ]
+    assert summary_rzp["total_protected_gmv_minor_units"] == 16200
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_rzp["total_gmv_by_currency"]] == [
+        ("INR", 50000),
+    ]
+    assert summary_rzp["total_gmv_minor_units"] == 50000
+
+    # 5. Filtered Summary: PayPal only
+    summary_pp = (await e2e.client.get("/api/v1/summary?provider=paypal", auth=auth)).json()
+    assert summary_pp["scope"] == "paypal"
+    assert summary_pp["metric_scopes"]["processed_gmv"] == "not_applicable"
+    assert summary_pp["metric_scopes"]["capture_success_rate"] == "not_applicable"
+    assert summary_pp["metric_scopes"]["protected_gmv"] == "paypal"
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_pp["total_protected_gmv_by_currency"]] == [
+        ("USD", 16200),
+    ]
+    assert summary_pp["total_protected_gmv_minor_units"] == 16200
+    # A PayPal capture was ingested, but PayPal has no payment.authorized events: the rate is undefined, not 0%
+    assert summary_pp["total_gmv_by_currency"] == []
+    assert summary_pp["total_gmv_minor_units"] is None
+    assert (summary_pp["total_auths"], summary_pp["total_captures"], summary_pp["overall_success_rate"]) == (
+        None, None, None,
+    )
+
+    # 6. Recovery workspace ledger: exact source labels and isolation
+    recovery = (await e2e.client.get("/api/v1/recovery", auth=auth)).json()
+    assert recovery["summary"]["total_protected_gmv_minor_units"] is None
+    assert recovery["metric_scopes"]["protected_gmv"] == "all_providers"
+    assert recovery["summary"]["metric_scopes"]["protected_gmv"] == "all_providers"
+    ledger_map = {row["payment_attempt_id"]: row for row in recovery["ledger"]}
+    assert rzp_pid in ledger_map
+    assert pp_attempt_id in ledger_map
+    assert ledger_map[rzp_pid]["provider"] == "razorpay"
+    assert ledger_map[rzp_pid]["source_system"] == "razorpay"
+    assert ledger_map[pp_attempt_id]["provider"] == "paypal"
+    assert ledger_map[pp_attempt_id]["source_system"] == "paypal"

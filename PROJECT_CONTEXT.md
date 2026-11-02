@@ -604,14 +604,84 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
 - **Known Remaining Limitations:**
   - Stage 5–8 read paths still resolve by `payment_attempt_id` key alone rather than provider-exact identity. This is addressed in Checkpoint 3.
 
+### Phase 3 Checkpoint 3 — Provider-Exact Reads Across Stages 5–8 (2026-10-29, committed)
+
+- **Commit:** `6a799ea470a76e29199b00e5cc8dac26ff0e57ec` — `feat: enforce provider-exact reads across Stages 5-8`
+- **Files:** the Stage 5–8 services (`failure_prediction_service.py`, `intervention/service.py`, `execution_service.py`, `observation_service.py`, `attribution_service.py`), their repositories, `payment_attempts.py`, and new tests `tests/integration/test_stage5_8_provider_exact_reads.py` and `tests/unit/test_stage5_8_provider_exact_reads.py` (renamed to `test_stage5_8_provider_exact_reads_unit.py` in `cddb60c`).
+- **CI:** [run 40791685997](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40791685997), success — offline 1,539, PostgreSQL integration/API 664, migration 66; 0 failed, 0 skipped.
+- **Not re-audited in detail:** this entry records the commit and its CI evidence only. The module docstring of `src/core/domain/payment_attempts.py` still states that Stage 5–8 reads route by attempt key alone; whether that sentence is now stale has not been verified.
+
+### Phase 3 Revision B — Provider Identity Contract Migration (2026-10-29, committed)
+
+- **Commit:** `cddb60c07d1483cc00dcb1e81527e672ee52b2e5` — `Enforce Phase 3 Revision B provider identity contract and composite database constraints`
+- **Migration:** `migrations/versions/e2d3c4b5a6f7_stage5_8_provider_identity_contract.py` (revision `e2d3c4b5a6f7`, revises `9d2e4f6a8b1c`; current Alembic head; the chain is linear across 12 revisions).
+  - Preflight checks PF-B01..PF-B19 (NOT NULL, registry membership, inter-stage provider consistency, version uniqueness) fail closed before any change.
+  - `source_system` becomes NOT NULL on all six Stage 5–8 tables; version unique constraints now include `source_system`.
+  - Composite FKs `(payment_attempt_id, source_system) → payment_attempts` on predictions, decisions, commands, observations and attributions; `(command_id, source_system)` FKs from execution attempts, observations and attributions to commands; `(decision_id, source_system)` FKs from commands and attributions to decisions.
+  - Downgrade restores the Revision A schema exactly (covered by `tests/migration/test_revision_b.py`).
+- **CI:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416), success — offline 1,552, PostgreSQL integration/API 664, migration 95; 0 failed, 0 skipped.
+- **Known constraint gaps (found in the 2026-11-02 audit, not fixed):**
+  - `intervention_decisions.stage5_prediction_id` has no foreign key. The migration creates the target `uq_failure_prediction_provider (prediction_id, source_system)`, but nothing references it.
+  - Only provider consistency is enforced between linked Stage 5–8 rows, not attempt consistency: a command's `payment_attempt_id` is not constrained to equal its decision's, nor an observation's or attribution's to equal its command's. Application code derives these values today; the database would not catch a bug.
+
+### Phase 3 Checkpoint 4 — Provider-Scoped Dashboard Inspection (2026-11-02, verified locally; uncommitted)
+
+- **Status:** verified against the disposable PostgreSQL test database; **not yet committed or run in CI** (awaiting approval).
+- **Files:** `src/api/inspection_routes.py`, `tests/api/test_inspection_routes.py`, `tests/integration/test_live_pipeline_e2e.py`.
+- **Scope:** read-only inspection endpoints only. No schema, migration, pipeline, frontend or Stage 1–8 behavior changes.
+- **API changes:**
+  - Optional `provider` query parameter (`razorpay`, `synthetic`, `paypal`) on `/summary`, `/recovery`, `/attributions` and `/payments`. Values are trimmed and lower-cased; anything else (including `all`, `*`) fails closed with 400. `/payments?provider=paypal` returns 400 because the payments inspector only models the Razorpay/synthetic lifecycle.
+  - Every response carries a truthful `scope` / `provider_scope` label. Defaults: `all_providers` for `/summary` and `/recovery`; `razorpay_pipeline` (Razorpay + synthetic) for `/payments`. `/summary` and `/recovery` also report `metric_scopes` per metric. Active degradation episodes are labeled `global`, because episodes carry no provider.
+  - New `protected_gmv_by_provider` breakdown (provider × currency) on `/summary` and `/recovery`. Per-currency totals are derived from the same single grouped query.
+  - Records in `/payments`, `/recovery`, `/attributions` and `/timeline` now carry `provider` and `source_system`.
+  - `_single_currency_amount` returns null, not a number, when the only currency group is unknown (`currency = NULL`).
+- **Fixes made during verification (2026-11-02):**
+  1. **`/payments` cross-provider join leak.** The latest-decision join matched only `payment_attempt_id == payment_id`, so under `?provider=razorpay` a Razorpay row whose `payment_id` collided with a synthetic attempt showed the synthetic decision, attribution and protected GMV. The join now also requires `InterventionDecisionModel.source_system == PaymentEventModel.source_system`. The attribution join goes through `decision_id`, which the Revision B composite FK ties to the same provider. Regression test `test_payments_provider_filter_never_joins_another_providers_decision` failed before the fix and passes after it.
+  2. **PayPal-scoped `/summary` authorization metrics (decision approved by the owner: "not applicable").** PayPal never emits `payment.authorized`, so `?provider=paypal` reported `overall_success_rate = 0.0` and `total_auths = 0`, with `total_captures` counting PayPal captures, and processed GMV `0` beside non-zero protected GMV. For PayPal (`AUTHORIZATION_METRICS_UNSUPPORTED_PROVIDERS`), `/summary` now skips those queries and returns `total_gmv_minor_units`, `total_auths`, `total_captures` and `overall_success_rate` as null, `total_gmv_by_currency` as `[]`, and labels `metric_scopes.processed_gmv`, `metric_scopes.capture_success_rate` and `processed_gmv_scope` as `not_applicable`. The Checkpoint 4 assertions were tightened from `0` / `"paypal"` to null / `not_applicable` and extended to the rate and both counts. Razorpay, synthetic and default scopes are unchanged.
+- **Validation (2026-11-02, local; uncommitted tree = `cddb60c` + Checkpoint 4 + the two fixes):**
+  - Environment: Docker `db_test` only (`postgres:15-alpine`, server 15.19, tmpfs, host port 5434, database `payment_recovery_test`). `TEST_DATABASE_URL` passed `assert_disposable_test_target` against the fixtures' protected URLs, and `current_database()` was confirmed as `payment_recovery_test` before any test. `DATABASE_URL` pointed at unreachable `127.0.0.1:1`. The development container `paymentrecovery-db-1` (port 5433) stayed exited with unchanged start/finish timestamps and was never started or connected to.
+  - Before the fixes: `tests/api/test_inspection_routes.py` 33 passed; `tests/integration/test_live_pipeline_e2e.py` 24 passed; `tests/integration` + `tests/api` 669 passed; `tests/migration` 95 passed. All against PostgreSQL, 0 skipped.
+  - After the fixes, against PostgreSQL: `tests/integration` + `tests/api` **670 passed, 0 failed, 0 skipped** (the committed 664 + 5 Checkpoint 4 tests + 1 regression test); `RUN_MIGRATION_TESTS=1 tests/migration` **95 passed, 0 skipped**.
+  - After the fixes, without a database (`TEST_DATABASE_URL` unset): `tests/unit` + `tests/boundaries` **1,552 passed, 0 skipped**, 4 known httpx deprecation warnings; `node --test tests/frontend/dashboard_formatters.test.mjs` **7 passed**.
+- **Known limitations (not changed):**
+  - The frontend (`src/static/js/api.js`, `app.js`) sends no `provider` parameter and does not render `metric_scopes` or `protected_gmv_by_provider`.
+  - `/timeline` still excludes PayPal events, so PayPal ledger rows in `/recovery` cannot be opened. `/payments` rejects `provider=paypal`.
+  - In the default `/payments` scope (Razorpay + synthetic), `DISTINCT ON (payment_id)` and the terminal-status subquery still merge Razorpay and synthetic rows that share a `payment_id`. `/timeline`'s Stage 5–8 lookups are keyed by `payment_attempt_id` only. Both are pre-existing and only matter on an identifier collision between those two sources.
+  - The summary's `interventions` and `execution_provenance` default to all providers, while processed GMV and the capture rate default to the Razorpay pipeline; these are labeled scopes, not a coverage ratio.
+
 ## Current State
 
-The repository is currently **Phase 3 Checkpoint 2 complete and frozen**, with Checkpoints 1 and 2 committed and pushed.
+The repository is at **Phase 3 Revision B committed (`cddb60c`, CI green)**, with **Checkpoint 4 verified locally but uncommitted**.
 
-- **Branch:** `main`
-- **Latest Commit:** `fbf1661` (`feat: register payment attempts and enforce provider write provenance in Stages 5-8`)
-- **CI Status:** CI Run #9 green across all offline, migration, and PostgreSQL suites.
-- **Working Tree:** Clean.
+- **Branch:** `main`, in sync with `origin/main` at `cddb60c`.
+- **Latest Commit:** `cddb60c` (`Enforce Phase 3 Revision B provider identity contract and composite database constraints`).
+- **CI Status:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416) green on `cddb60c`.
+- **Working Tree:** modified `src/api/inspection_routes.py`, `tests/api/test_inspection_routes.py`, `tests/integration/test_live_pipeline_e2e.py` and this file (Checkpoint 4), pending approval to commit.
+
+### What is real versus simulated (2026-11-02 audit)
+
+- **Real:** Razorpay and PayPal webhook verification, ingestion and deduplication; Stage 2–4 analytics, degradation and RCA (Razorpay/synthetic only); Stage 5–8 persistence with attempt registration and provider constraints; outcome observation from canonical events; attribution arithmetic; the authenticated read-only dashboard.
+- **Simulated or placeholder:** all intervention execution (`SimulatorInterventionExecutor`, `SIMULATOR_V1`; the PayPal client implements only OAuth and webhook verification); the live Stage 5 model (`DeterministicBaselineModel`, a heuristic); demo data (`synthetic` source, written directly to services by `scripts/demo_orchestrator.py`).
+- **Behavior to be aware of:**
+  - With the real heuristic, the tested end-to-end scenarios end in MONITOR or INSUFFICIENT_DATA. ACT → execution → attribution is exercised only with fixed-probability test models.
+  - The default policy prices routes in INR, so USD PayPal attempts never reach ACT.
+  - Degradation detection uses absolute/relative drop thresholds with persistence (hysteresis); there is no Z-score.
+
+### Remaining work (prioritized)
+
+- **P0:**
+  1. Commit Checkpoint 4 after approval and confirm CI.
+  2. Add the missing `stage5_prediction_id` foreign key.
+  3. Enforce attempt consistency between linked Stage 5–8 rows.
+- **P1:**
+  - Real executor for one route (not started; explicitly deferred).
+  - Multi-currency route costs.
+  - Record MONITOR/NO_ACTION by removing the runner's p > 0.5 pre-gate.
+  - Durable pipeline runs (outbox and reconciliation) and idempotent capture replay.
+  - Z-score degradation signal.
+  - Explicit live-model selection.
+- **P2:** provider selector and PayPal support in the dashboard (`/timeline`, `/payments`); a webhook-driven demo including PayPal; PayPal sandbox validation.
+- **P3:** optional narrative layer kept off the financial path; model-artifact hash pinning; `ingested_at` tie-breakers; httpx deprecation warnings.
 
 ## Terminal Status
 

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, or_, and_, case, literal, union_all
@@ -29,6 +29,54 @@ from src.infrastructure.models import (
 router = APIRouter(
     prefix="/api/v1", tags=["internal-inspection"], dependencies=[Depends(require_dashboard_auth)]
 )
+
+SUPPORTED_PROVIDERS = ("razorpay", "synthetic", "paypal")
+DEFAULT_DASHBOARD_SCOPE = "all_providers"
+DEFAULT_PAYMENTS_SCOPE = "razorpay_pipeline"
+NOT_APPLICABLE_SCOPE = "not_applicable"
+# Processed GMV and the capture success rate are defined over payment.authorized events, which these
+# providers never emit; their values would read as zero rather than as undefined.
+AUTHORIZATION_METRICS_UNSUPPORTED_PROVIDERS = (PAYPAL_SOURCE_SYSTEM,)
+
+
+def _validate_provider(
+    provider: Any,
+    default_scope: str = DEFAULT_DASHBOARD_SCOPE,
+) -> Tuple[Optional[str], str]:
+    """
+    Validates optional provider parameter.
+    Returns (normalized_provider_or_none, truthful_scope_label).
+    Fails closed with HTTPException(400) for unsupported provider values.
+    """
+    if hasattr(provider, "default"):
+        provider = provider.default
+    if provider is None:
+        return None, default_scope
+    if not isinstance(provider, str):
+        allowed = ", ".join(repr(p) for p in SUPPORTED_PROVIDERS)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported provider: '{provider}'. Supported providers are: {allowed}.",
+        )
+    cleaned = provider.strip().lower()
+    if cleaned not in SUPPORTED_PROVIDERS:
+        allowed = ", ".join(repr(p) for p in SUPPORTED_PROVIDERS)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported provider: '{provider}'. Supported providers are: {allowed}.",
+        )
+    return cleaned, cleaned
+
+
+def _apply_provider_filter(column, validated_provider: Optional[str]):
+    """
+    Returns SQL filter:
+    - If validated_provider is None: column.notin_(NON_RAZORPAY_PIPELINE_SOURCES) (legacy Razorpay-plus-synthetic scope).
+    - If validated_provider is set: column == validated_provider (exact provider filter).
+    """
+    if validated_provider is None:
+        return column.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
+    return column == validated_provider
 
 
 def _latest_version_ids(id_column, group_column, version_column):
@@ -109,14 +157,20 @@ def _payment_currency():
     )
 
 
-async def _protected_gmv_by_currency(
+async def _protected_gmv_breakdown(
     session: AsyncSession, *conditions, join_decisions: bool = False
-) -> List[Dict[str, Any]]:
-    """Latest-version protected GMV per currency, with the provenance of the attributions behind it."""
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Computes both:
+    1. total_protected_gmv_by_currency
+    2. protected_gmv_by_provider
+    in a single query grouped by (source_system, currency).
+    """
     currency = _payment_currency()
     positive = CounterfactualAttributionModel.attributed_protected_gmv_minor_units > 0
     stmt = (
         select(
+            CounterfactualAttributionModel.source_system,
             currency.c.currency,
             func.coalesce(func.sum(CounterfactualAttributionModel.attributed_protected_gmv_minor_units), 0),
             func.count(CounterfactualAttributionModel.attribution_id).filter(positive),
@@ -137,26 +191,64 @@ async def _protected_gmv_by_currency(
         )
     stmt = (
         stmt.where(CounterfactualAttributionModel.attribution_id.in_(_latest_attribution_ids()), *conditions)
-        .group_by(currency.c.currency)
-        .order_by(currency.c.currency.asc().nulls_last())
+        .group_by(CounterfactualAttributionModel.source_system, currency.c.currency)
+        .order_by(CounterfactualAttributionModel.source_system.asc(), currency.c.currency.asc().nulls_last())
     )
-    return [
+    rows = (await session.execute(stmt)).all()
+
+    by_provider = [
         {
-            "currency": row[0],
-            "amount_minor_units": int(row[1]),
-            "positive_attribution_count": row[2],
-            "simulated_execution_count": row[3],
-            "synthetic_baseline_count": row[4],
+            "provider": row[0],
+            "source_system": row[0],
+            "currency": row[1],
+            "amount_minor_units": int(row[2]),
+            "positive_attribution_count": row[3],
         }
-        for row in (await session.execute(stmt)).all()
+        for row in rows
     ]
+
+    currency_map: Dict[Optional[str], Dict[str, Any]] = {}
+    for row in rows:
+        curr = row[1]
+        if curr not in currency_map:
+            currency_map[curr] = {
+                "currency": curr,
+                "amount_minor_units": 0,
+                "positive_attribution_count": 0,
+                "simulated_execution_count": 0,
+                "synthetic_baseline_count": 0,
+            }
+        currency_map[curr]["amount_minor_units"] += int(row[2])
+        currency_map[curr]["positive_attribution_count"] += row[3]
+        currency_map[curr]["simulated_execution_count"] += row[4]
+        currency_map[curr]["synthetic_baseline_count"] += row[5]
+
+    by_currency = sorted(
+        currency_map.values(),
+        key=lambda g: (g["currency"] is None, g["currency"]),
+    )
+    return by_currency, by_provider
+
+
+async def _protected_gmv_by_currency(
+    session: AsyncSession, *conditions, join_decisions: bool = False
+) -> List[Dict[str, Any]]:
+    by_currency, _ = await _protected_gmv_breakdown(session, *conditions, join_decisions=join_decisions)
+    return by_currency
+
+
+async def _protected_gmv_by_provider(
+    session: AsyncSession, *conditions, join_decisions: bool = False
+) -> List[Dict[str, Any]]:
+    _, by_provider = await _protected_gmv_breakdown(session, *conditions, join_decisions=join_decisions)
+    return by_provider
 
 
 def _single_currency_amount(groups: List[Dict[str, Any]]) -> Optional[int]:
-    """Legacy scalar total: only meaningful when every amount shares one currency; None when mixed."""
+    """Legacy scalar total: only meaningful when every amount shares one known currency; None when mixed or unknown."""
     if not groups:
         return 0
-    if len(groups) == 1:
+    if len(groups) == 1 and groups[0].get("currency") is not None:
         return groups[0]["amount_minor_units"]
     return None
 
@@ -191,29 +283,50 @@ async def _prediction_models(
 
 
 @router.get("/summary")
-async def get_executive_summary(session: AsyncSession = Depends(get_db_session)) -> Dict[str, Any]:
+async def get_executive_summary(
+    session: AsyncSession = Depends(get_db_session),
+    provider: Optional[str] = Query(default=None, description="Optional provider filter: 'razorpay', 'synthetic', or 'paypal'"),
+) -> Dict[str, Any]:
     """
     Returns executive summary metrics across the end-to-end engine.
-    Money is reported per currency; the legacy scalar totals are null when currencies are mixed.
+    - Default scope preserves processed metrics on Razorpay-pipeline (matching ingestion) and protected metrics
+      across all providers, labeling metric scopes explicitly without implying a common coverage ratio.
+    - Provider filter isolates both processed and protected metrics to the chosen provider.
+    - Processed GMV and the capture success rate are not applicable to PayPal (no payment.authorized
+      events): their scalars are null and their scopes are labeled 'not_applicable'.
+    - Money is reported per currency; scalar totals are null when currencies are mixed or unknown.
     Read-only internal/demo inspection endpoint.
     """
-    # Total processed GMV (from auths), per currency
-    auth_stmt = (
-        select(PaymentEventModel.currency, func.sum(PaymentEventModel.amount_minor_units))
-        .where(
-            PaymentEventModel.event_type == 'payment.authorized',
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
-        )
-        .group_by(PaymentEventModel.currency)
-        .order_by(PaymentEventModel.currency)
-    )
-    total_gmv_by_currency = [
-        {"currency": currency, "amount_minor_units": int(amount or 0)}
-        for currency, amount in (await session.execute(auth_stmt)).all()
-    ]
+    prov_val, scope_label = _validate_provider(provider)
+    authorization_metrics_apply = prov_val not in AUTHORIZATION_METRICS_UNSUPPORTED_PROVIDERS
 
-    # Total protected GMV (latest attribution version per command), per currency
-    total_protected_gmv_by_currency = await _protected_gmv_by_currency(session)
+    processed_scope = "razorpay_pipeline" if prov_val is None else prov_val
+    protected_scope = "all_providers" if prov_val is None else prov_val
+    interventions_scope = "all_providers" if prov_val is None else prov_val
+    rates_scope = "razorpay_pipeline" if prov_val is None else prov_val
+    if not authorization_metrics_apply:
+        processed_scope = rates_scope = NOT_APPLICABLE_SCOPE
+
+    # Total processed GMV (from auths), per currency
+    total_gmv_by_currency: List[Dict[str, Any]] = []
+    if authorization_metrics_apply:
+        auth_stmt = (
+            select(PaymentEventModel.currency, func.sum(PaymentEventModel.amount_minor_units))
+            .where(
+                PaymentEventModel.event_type == 'payment.authorized',
+                _apply_provider_filter(PaymentEventModel.source_system, prov_val),
+            )
+            .group_by(PaymentEventModel.currency)
+            .order_by(PaymentEventModel.currency)
+        )
+        total_gmv_by_currency = [
+            {"currency": currency, "amount_minor_units": int(amount or 0)}
+            for currency, amount in (await session.execute(auth_stmt)).all()
+        ]
+
+    # Total protected GMV (latest attribution version per command), per currency and breakdown by provider
+    conds = [CounterfactualAttributionModel.source_system == prov_val] if prov_val is not None else []
+    total_protected_gmv_by_currency, protected_gmv_by_provider = await _protected_gmv_breakdown(session, *conds)
 
     # Active degradation episodes
     active_episodes_stmt = select(func.count(DegradationEpisodeModel.episode_id)).where(DegradationEpisodeModel.status == 'ACTIVE')
@@ -221,7 +334,11 @@ async def get_executive_summary(session: AsyncSession = Depends(get_db_session))
     active_episodes = active_episodes_res.scalar_one_or_none() or 0
 
     # Total interventions executed
-    interventions_stmt = select(func.count(InterventionCommandModel.command_id)).where(InterventionCommandModel.command_status == 'SUCCEEDED')
+    interventions_stmt = select(func.count(InterventionCommandModel.command_id)).where(
+        InterventionCommandModel.command_status == 'SUCCEEDED'
+    )
+    if prov_val is not None:
+        interventions_stmt = interventions_stmt.where(InterventionCommandModel.source_system == prov_val)
     interventions_res = await session.execute(interventions_stmt)
     total_interventions = interventions_res.scalar_one_or_none() or 0
 
@@ -240,6 +357,11 @@ async def get_executive_summary(session: AsyncSession = Depends(get_db_session))
             InterventionCommandModel.command_status == 'SUCCEEDED',
             InterventionExecutionAttemptModel.attempt_id.in_(_latest_attempt_ids()),
         )
+    )
+    if prov_val is not None:
+        executor_stmt = executor_stmt.where(InterventionCommandModel.source_system == prov_val)
+    executor_stmt = (
+        executor_stmt
         .group_by(InterventionExecutionAttemptModel.executor_name, InterventionExecutionAttemptModel.is_simulation)
         .order_by(InterventionExecutionAttemptModel.executor_name)
     )
@@ -250,33 +372,55 @@ async def get_executive_summary(session: AsyncSession = Depends(get_db_session))
     simulated_interventions = sum(
         e["succeeded_command_count"] for e in execution_provenance if e["is_simulation"]
     )
-    
-    # Successful payment capture rate (overall)
-    all_events_stmt = (
-        select(PaymentEventModel.event_type, func.count(PaymentEventModel.event_id))
-        .where(PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES))
-        .group_by(PaymentEventModel.event_type)
-    )
-    all_events_res = await session.execute(all_events_stmt)
-    event_counts = dict(all_events_res.all())
-    
-    total_auths = event_counts.get('payment.authorized', 0)
-    total_captures = event_counts.get('payment.captured', 0)
-    success_rate = (total_captures / total_auths) if total_auths > 0 else 0.0
+
+    # Successful payment capture rate (scoped strictly to processed pipeline events; NOT a coverage ratio)
+    total_auths: Optional[int] = None
+    total_captures: Optional[int] = None
+    success_rate: Optional[float] = None
+    if authorization_metrics_apply:
+        all_events_stmt = (
+            select(PaymentEventModel.event_type, func.count(PaymentEventModel.event_id))
+            .where(_apply_provider_filter(PaymentEventModel.source_system, prov_val))
+            .group_by(PaymentEventModel.event_type)
+        )
+        all_events_res = await session.execute(all_events_stmt)
+        event_counts = dict(all_events_res.all())
+
+        total_auths = event_counts.get('payment.authorized', 0)
+        total_captures = event_counts.get('payment.captured', 0)
+        success_rate = (total_captures / total_auths) if total_auths > 0 else 0.0
+
+    pred_conditions = [FailurePredictionModel.source_system == prov_val] if prov_val else []
+    prediction_models = await _prediction_models(session, *pred_conditions)
 
     return {
-        "total_gmv_minor_units": _single_currency_amount(total_gmv_by_currency),
+        "scope": scope_label,
+        "provider_scope": scope_label,
+        "metric_scopes": {
+            "processed_gmv": processed_scope,
+            "protected_gmv": protected_scope,
+            "interventions": interventions_scope,
+            "capture_success_rate": rates_scope,
+            "active_degradation_episodes": "global",
+        },
+        "processed_gmv_scope": processed_scope,
+        "protected_gmv_scope": protected_scope,
+        "active_degradation_episodes_scope": "global",
+        "total_gmv_minor_units": (
+            _single_currency_amount(total_gmv_by_currency) if authorization_metrics_apply else None
+        ),
         "total_gmv_by_currency": total_gmv_by_currency,
         "total_protected_gmv_minor_units": _single_currency_amount(total_protected_gmv_by_currency),
         "total_protected_gmv_by_currency": total_protected_gmv_by_currency,
+        "protected_gmv_by_provider": protected_gmv_by_provider,
         "active_degradation_episodes": active_episodes,
         "total_successful_interventions": total_interventions,
         "simulated_successful_interventions": simulated_interventions,
         "execution_provenance": execution_provenance,
-        "prediction_models": await _prediction_models(session),
+        "prediction_models": prediction_models,
         "overall_success_rate": success_rate,
         "total_auths": total_auths,
-        "total_captures": total_captures
+        "total_captures": total_captures,
     }
 
 
@@ -456,12 +600,14 @@ async def get_recent_attributions(
     include_history: bool = Query(
         default=False, description="Include superseded attribution versions instead of only the latest per command"
     ),
+    provider: Optional[str] = Query(default=None, description="Optional provider filter: 'razorpay', 'synthetic', 'paypal'"),
     session: AsyncSession = Depends(get_db_session)
 ) -> List[Dict[str, Any]]:
     """
     Returns recent protected GMV attributions, by default only the latest version per command.
     Safe bounded read-only inspection endpoint.
     """
+    prov_val, _ = _validate_provider(provider)
     currency = _payment_currency()
     stmt = (
         select(CounterfactualAttributionModel, currency.c.currency)
@@ -471,6 +617,8 @@ async def get_recent_attributions(
     )
     if not include_history:
         stmt = stmt.where(CounterfactualAttributionModel.attribution_id.in_(_latest_attribution_ids()))
+    if prov_val is not None:
+        stmt = stmt.where(CounterfactualAttributionModel.source_system == prov_val)
     res = await session.execute(stmt)
 
     results = []
@@ -487,6 +635,8 @@ async def get_recent_attributions(
             "attribution_id": str(a.attribution_id),
             "attribution_version": a.attribution_version,
             "payment_attempt_id": a.payment_attempt_id,
+            "provider": a.source_system,
+            "source_system": a.source_system,
             "decision_id": str(a.decision_id),
             "status": a.attribution_status,
             "treatment_status": a.treatment_status,
@@ -519,6 +669,7 @@ async def get_recovery_workspace(
     decision_type: Optional[str] = Query(default=None, description="Filter by decision type: ACT, MONITOR"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    provider: Optional[str] = Query(default=None, description="Optional provider filter: 'razorpay', 'synthetic', 'paypal'"),
     session: AsyncSession = Depends(get_db_session)
 ) -> Dict[str, Any]:
     """
@@ -527,34 +678,66 @@ async def get_recovery_workspace(
     - Dense recovery ledger rows linking decisions, execution commands, observations, and attributions.
     Safe bounded read-only inspection endpoint.
     """
+    prov_val, scope_label = _validate_provider(provider, default_scope=DEFAULT_DASHBOARD_SCOPE)
+
     # 1. Summary aggregations
-    cmd_count = await session.scalar(select(func.count(InterventionCommandModel.command_id))) or 0
-    act_count = await session.scalar(select(func.count(InterventionDecisionModel.decision_id)).where(InterventionDecisionModel.decision_type == "ACT")) or 0
-    mon_count = await session.scalar(select(func.count(InterventionDecisionModel.decision_id)).where(InterventionDecisionModel.decision_type == "MONITOR")) or 0
+    cmd_stmt = select(func.count(InterventionCommandModel.command_id))
+    act_stmt = select(func.count(InterventionDecisionModel.decision_id)).where(InterventionDecisionModel.decision_type == "ACT")
+    mon_stmt = select(func.count(InterventionDecisionModel.decision_id)).where(InterventionDecisionModel.decision_type == "MONITOR")
     latest_observation = PaymentOutcomeObservationModel.observation_id.in_(_latest_observation_ids())
     latest_attribution = CounterfactualAttributionModel.attribution_id.in_(_latest_attribution_ids())
     latest_attempt = InterventionExecutionAttemptModel.attempt_id.in_(_latest_attempt_ids())
-    cap_count = await session.scalar(select(func.count(PaymentOutcomeObservationModel.observation_id)).where(PaymentOutcomeObservationModel.payment_outcome == "CAPTURED", latest_observation)) or 0
-    fail_count = await session.scalar(select(func.count(PaymentOutcomeObservationModel.observation_id)).where(PaymentOutcomeObservationModel.payment_outcome == "FAILED", latest_observation)) or 0
-    protected_gmv_by_currency = await _protected_gmv_by_currency(session)
-    attr_count = await session.scalar(select(func.count(CounterfactualAttributionModel.attribution_id)).where(latest_attribution)) or 0
-    avg_conf = await session.scalar(select(func.avg(CounterfactualAttributionModel.attribution_confidence)).where(latest_attribution)) or 0.0
-    simulated_execution_count = await session.scalar(
-        select(func.count(InterventionExecutionAttemptModel.attempt_id)).where(
-            latest_attempt, InterventionExecutionAttemptModel.is_simulation.is_(True)
-        )
-    ) or 0
-
+    cap_stmt = select(func.count(PaymentOutcomeObservationModel.observation_id)).where(
+        PaymentOutcomeObservationModel.payment_outcome == "CAPTURED", latest_observation
+    )
+    fail_stmt = select(func.count(PaymentOutcomeObservationModel.observation_id)).where(
+        PaymentOutcomeObservationModel.payment_outcome == "FAILED", latest_observation
+    )
+    attr_stmt = select(func.count(CounterfactualAttributionModel.attribution_id)).where(latest_attribution)
+    avg_conf_stmt = select(func.avg(CounterfactualAttributionModel.attribution_confidence)).where(latest_attribution)
+    sim_stmt = select(func.count(InterventionExecutionAttemptModel.attempt_id)).where(
+        latest_attempt, InterventionExecutionAttemptModel.is_simulation.is_(True)
+    )
     rescued_stmt = select(
         func.count(CounterfactualAttributionModel.attribution_id),
         func.avg(CounterfactualAttributionModel.attribution_confidence)
     ).where(CounterfactualAttributionModel.attributed_protected_gmv_minor_units > 0, latest_attribution)
+
+    if prov_val is not None:
+        cmd_stmt = cmd_stmt.where(InterventionCommandModel.source_system == prov_val)
+        act_stmt = act_stmt.where(InterventionDecisionModel.source_system == prov_val)
+        mon_stmt = mon_stmt.where(InterventionDecisionModel.source_system == prov_val)
+        cap_stmt = cap_stmt.where(PaymentOutcomeObservationModel.source_system == prov_val)
+        fail_stmt = fail_stmt.where(PaymentOutcomeObservationModel.source_system == prov_val)
+        sim_stmt = sim_stmt.where(InterventionExecutionAttemptModel.source_system == prov_val)
+        attr_stmt = attr_stmt.where(CounterfactualAttributionModel.source_system == prov_val)
+        avg_conf_stmt = avg_conf_stmt.where(CounterfactualAttributionModel.source_system == prov_val)
+        rescued_stmt = rescued_stmt.where(CounterfactualAttributionModel.source_system == prov_val)
+
+    conds = [CounterfactualAttributionModel.source_system == prov_val] if prov_val is not None else []
+    protected_gmv_by_currency, protected_gmv_by_provider = await _protected_gmv_breakdown(session, *conds)
+
+    cmd_count = await session.scalar(cmd_stmt) or 0
+    act_count = await session.scalar(act_stmt) or 0
+    mon_count = await session.scalar(mon_stmt) or 0
+    cap_count = await session.scalar(cap_stmt) or 0
+    fail_count = await session.scalar(fail_stmt) or 0
+    attr_count = await session.scalar(attr_stmt) or 0
+    avg_conf = await session.scalar(avg_conf_stmt) or 0.0
+    simulated_execution_count = await session.scalar(sim_stmt) or 0
+
     rescued_res = await session.execute(rescued_stmt)
     rescued_row = rescued_res.fetchone()
     rescued_count = rescued_row[0] if rescued_row else 0
     rescued_avg_conf = float(rescued_row[1]) if (rescued_row and rescued_row[1] is not None) else 0.0
 
     summary = {
+        "scope": scope_label,
+        "provider_scope": scope_label,
+        "metric_scopes": {
+            "protected_gmv": "all_providers" if prov_val is None else prov_val,
+            "interventions": "all_providers" if prov_val is None else prov_val,
+        },
         "interventions_dispatched": cmd_count,
         "simulated_execution_count": simulated_execution_count,
         "act_count": act_count,
@@ -563,6 +746,7 @@ async def get_recovery_workspace(
         "failed_outcomes": fail_count,
         "total_protected_gmv_minor_units": _single_currency_amount(protected_gmv_by_currency),
         "total_protected_gmv_by_currency": protected_gmv_by_currency,
+        "protected_gmv_by_provider": protected_gmv_by_provider,
         "attribution_count": attr_count,
         "avg_attribution_confidence": float(avg_conf),
         "rescued_count": rescued_count,
@@ -575,6 +759,7 @@ async def get_recovery_workspace(
         select(
             InterventionDecisionModel.decision_id,
             InterventionDecisionModel.payment_attempt_id,
+            InterventionDecisionModel.source_system,
             InterventionDecisionModel.decision_type,
             InterventionDecisionModel.selected_route_id,
             InterventionDecisionModel.decided_at,
@@ -613,6 +798,9 @@ async def get_recovery_workspace(
     )
 
     count_query = select(func.count(InterventionDecisionModel.decision_id))
+    if prov_val is not None:
+        base_query = base_query.where(InterventionDecisionModel.source_system == prov_val)
+        count_query = count_query.where(InterventionDecisionModel.source_system == prov_val)
 
     if decision_type:
         dt_upper = decision_type.upper()
@@ -643,6 +831,8 @@ async def get_recovery_workspace(
         ledger.append({
             "decision_id": str(r.decision_id),
             "payment_attempt_id": r.payment_attempt_id,
+            "provider": r.source_system,
+            "source_system": r.source_system,
             "episode_id": ep_id,
             "decision_type": r.decision_type,
             "intervention_route": r.selected_route_id,
@@ -662,6 +852,13 @@ async def get_recovery_workspace(
         })
 
     return {
+        "scope": scope_label,
+        "provider_scope": scope_label,
+        "metric_scopes": {
+            "protected_gmv": "all_providers" if prov_val is None else prov_val,
+            "interventions": "all_providers" if prov_val is None else prov_val,
+            "ledger": "all_providers" if prov_val is None else prov_val,
+        },
         "summary": summary,
         "ledger": ledger,
         "total_count": total_ledger_count,
@@ -676,12 +873,20 @@ async def get_payments_list(
     search: Optional[str] = Query(default=None, description="Search by payment_id"),
     filter_type: Optional[str] = Query(default=None, description="ALL, INTERVENED, ATTRIBUTED"),
     status: Optional[str] = Query(default=None, description="captured, failed, authorized"),
+    provider: Optional[str] = Query(default=None, description="Optional provider filter: 'razorpay', 'synthetic', 'paypal'"),
     session: AsyncSession = Depends(get_db_session)
 ) -> Dict[str, Any]:
     """
     Returns a searchable and filterable list of payments for the Payment Audit Inspector.
     Safe bounded read-only inspection endpoint.
     """
+    prov_val, scope_label = _validate_provider(provider, default_scope=DEFAULT_PAYMENTS_SCOPE)
+    if prov_val == "paypal":
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported provider for payments list: 'paypal'. Payments inspector operates on 'razorpay' and 'synthetic' pipelines.",
+        )
+
     terminal_subq = (
         select(
             PaymentEventModel.payment_id,
@@ -689,7 +894,7 @@ async def get_payments_list(
         )
         .where(
             PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+            _apply_provider_filter(PaymentEventModel.source_system, prov_val),
         )
         .group_by(PaymentEventModel.payment_id)
         .subquery()
@@ -697,7 +902,7 @@ async def get_payments_list(
 
     canonical_events_stmt = (
         select(PaymentEventModel.event_id)
-        .where(PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES))
+        .where(_apply_provider_filter(PaymentEventModel.source_system, prov_val))
         .distinct(PaymentEventModel.payment_id)
         .order_by(PaymentEventModel.payment_id, PaymentEventModel.timestamp.asc())
     )
@@ -705,6 +910,7 @@ async def get_payments_list(
     base_query = (
         select(
             PaymentEventModel.payment_id,
+            PaymentEventModel.source_system,
             PaymentEventModel.timestamp,
             PaymentEventModel.amount_minor_units,
             PaymentEventModel.currency,
@@ -734,7 +940,11 @@ async def get_payments_list(
         .outerjoin(terminal_subq, terminal_subq.c.payment_id == PaymentEventModel.payment_id)
         .outerjoin(
             InterventionDecisionModel,
-            and_(InterventionDecisionModel.payment_attempt_id == PaymentEventModel.payment_id, latest_decision),
+            and_(
+                InterventionDecisionModel.payment_attempt_id == PaymentEventModel.payment_id,
+                InterventionDecisionModel.source_system == PaymentEventModel.source_system,
+                latest_decision,
+            ),
         )
         .outerjoin(
             CounterfactualAttributionModel,
@@ -785,6 +995,8 @@ async def get_payments_list(
         is_attr = r.attribution_id is not None and r.attribution_status == "ATTRIBUTED"
         items.append({
             "payment_id": r.payment_id,
+            "provider": r.source_system,
+            "source_system": r.source_system,
             "timestamp": r.timestamp.isoformat(),
             "amount_minor_units": r.amount_minor_units,
             "currency": r.currency,
@@ -803,6 +1015,8 @@ async def get_payments_list(
         })
 
     return {
+        "scope": scope_label,
+        "provider_scope": scope_label,
         "items": items,
         "total_count": total_count,
         "limit": limit,
@@ -840,6 +1054,8 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
     first_event = events[0]
     canonical_pid = first_event.payment_id
     payment_info = {
+        "provider": first_event.source_system,
+        "source_system": first_event.source_system,
         "amount_minor_units": first_event.amount_minor_units,
         "currency": first_event.currency,
         "payment_method": first_event.payment_method,
@@ -918,11 +1134,15 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
                 "event_type": e.event_type,
                 "timestamp": e.timestamp.isoformat(),
                 "status": e.payment_status,
-                "amount_minor_units": e.amount_minor_units
+                "amount_minor_units": e.amount_minor_units,
+                "provider": getattr(e, "source_system", None),
+                "source_system": getattr(e, "source_system", None),
             } for e in events
         ],
         "prediction": {
             "prediction_id": str(prediction.prediction_id),
+            "provider": getattr(prediction, "source_system", None),
+            "source_system": getattr(prediction, "source_system", None),
             "status": prediction.prediction_status,
             "failure_probability": prediction.failure_probability,
             "risk_band": prediction.risk_band,
@@ -933,6 +1153,8 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
         } if prediction else None,
         "decision": {
             "decision_id": str(decision.decision_id),
+            "provider": getattr(decision, "source_system", None),
+            "source_system": getattr(decision, "source_system", None),
             "type": decision.decision_type,
             "route": decision.selected_route_id,
             "gate_verdict": decision.gate_verdict,
@@ -942,12 +1164,16 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
         } if decision else None,
         "command": {
             "command_id": str(command.command_id),
+            "provider": getattr(command, "source_system", None),
+            "source_system": getattr(command, "source_system", None),
             "status": command.command_status,
             "route": command.route_key,
             "created_at": command.created_at.isoformat()
         } if command else None,
         "execution": {
             "attempt_id": str(execution.attempt_id),
+            "provider": getattr(execution, "source_system", None),
+            "source_system": getattr(execution, "source_system", None),
             "status": execution.execution_status,
             "duration_ms": execution.duration_ms,
             "executed_at": execution.completed_at.isoformat() if execution.completed_at else None,
@@ -956,11 +1182,15 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
         } if execution else None,
         "observation": {
             "observation_id": str(observation.observation_id),
+            "provider": getattr(observation, "source_system", None),
+            "source_system": getattr(observation, "source_system", None),
             "outcome": observation.payment_outcome,
             "observed_at": observation.observed_at.isoformat() if observation.observed_at else None
         } if observation else None,
         "attribution": {
             "attribution_id": str(attribution.attribution_id),
+            "provider": getattr(attribution, "source_system", None),
+            "source_system": getattr(attribution, "source_system", None),
             "status": attribution.attribution_status,
             "protected_gmv": attribution.attributed_protected_gmv_minor_units if attribution.attribution_status == "ATTRIBUTED" else 0,
             "confidence": float(attribution.attribution_confidence) if (attribution.attribution_status == "ATTRIBUTED" and attribution.attribution_confidence is not None) else None,

@@ -1008,6 +1008,7 @@ HEURISTIC_MODEL = ("DeterministicBaselineModel", "untrained-heuristic-v2")
 async def _seed_attributed_payment(
     db_engine,
     *,
+    source_system="razorpay",
     currency="INR",
     amount=100000,
     protected_versions=(10000,),
@@ -1025,46 +1026,56 @@ async def _seed_attributed_payment(
     one attribution row per entry in `protected_versions` (versions 1..n of the same command).
     """
     now = datetime.now(timezone.utc)
-    pid = f"pay_phase1_{uuid.uuid4().hex[:10]}"
+    if source_system == "paypal":
+        raw_id = uuid.uuid4().hex[:10]
+        pid = f"paypal-order:{raw_id}"
+        event_payment_id = raw_id
+        auth_event_type = "order.approved"
+        auth_status = "approved"
+    else:
+        pid = f"pay_phase1_{uuid.uuid4().hex[:10]}"
+        event_payment_id = pid
+        auth_event_type = "payment.authorized"
+        auth_status = "authorized"
     prediction_id, decision_id, command_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with Session() as session:
         auth_evt = None
         if authorized:
             auth_evt = PaymentEventModel(
-                event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
-                payment_id=pid, timestamp=now - timedelta(minutes=10), event_type="payment.authorized",
-                currency=currency, amount_minor_units=amount, payment_status="authorized",
-                payment_method="UPI", ingested_at=now - timedelta(minutes=10),
+                event_id=uuid.uuid4(), source_system=source_system, source_event_id=uuid.uuid4().hex,
+                payment_id=event_payment_id, timestamp=now - timedelta(minutes=10), event_type=auth_event_type,
+                currency=currency, amount_minor_units=amount, payment_status=auth_status,
+                payment_method="UPI" if source_system != "paypal" else "PAYPAL", ingested_at=now - timedelta(minutes=10),
             )
             session.add(auth_evt)
         cap_evt = PaymentEventModel(
-            event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
-            payment_id=pid, timestamp=now - timedelta(minutes=5), event_type="payment.captured",
-            currency=currency, amount_minor_units=amount, payment_status="captured",
-            payment_method="UPI", ingested_at=now - timedelta(minutes=5),
+            event_id=uuid.uuid4(), source_system=source_system, source_event_id=uuid.uuid4().hex,
+            payment_id=event_payment_id, timestamp=now - timedelta(minutes=5), event_type="payment.captured" if source_system != "paypal" else "order.completed",
+            currency=currency, amount_minor_units=amount, payment_status="captured" if source_system != "paypal" else "completed",
+            payment_method="UPI" if source_system != "paypal" else "PAYPAL", ingested_at=now - timedelta(minutes=5),
         )
         session.add(cap_evt)
         trigger_evt = auth_evt if authorized else cap_evt
         await session.flush()
         session.add(PaymentAttemptModel(
             payment_attempt_id=pid,
-            source_system="razorpay",
-            provider_reference=pid,
+            source_system=source_system,
+            provider_reference=event_payment_id,
             trigger_event_id=trigger_evt.event_id,
             registered_at=now - timedelta(minutes=10 if authorized else 5),
         ))
         await session.flush()
         session.add_all([
             FailurePredictionModel(
-                prediction_id=prediction_id, payment_attempt_id=pid, source_system="razorpay", prediction_version=1,
+                prediction_id=prediction_id, payment_attempt_id=pid, source_system=source_system, prediction_version=1,
                 predicted_at=now - timedelta(minutes=10), prediction_horizon="30m", failure_probability=0.8,
                 risk_band="HIGH", prediction_status="PREDICTED", model_name=model[0], model_version=model[1],
                 feature_schema_version="v1.0.0", feature_snapshot={}, input_fingerprint="sha256:" + "a" * 64,
                 created_at=now,
             ),
             InterventionDecisionModel(
-                decision_id=decision_id, payment_attempt_id=pid, source_system="razorpay", decision_version=1,
+                decision_id=decision_id, payment_attempt_id=pid, source_system=source_system, decision_version=1,
                 decided_at=now - timedelta(minutes=9), decision_type="ACT", selected_route_id="FALLBACK_PAYMENT_LINK",
                 failure_probability=0.8, stage5_prediction_id=prediction_id, diagnosis_confidence="STRONG",
                 decision_confidence=0.9, gate_verdict="PASSED", policy_id="default-recovery-v1",
@@ -1075,14 +1086,14 @@ async def _seed_attributed_payment(
         ])
         await session.flush()
         session.add(InterventionCommandModel(
-            command_id=command_id, decision_id=decision_id, payment_attempt_id=pid, source_system="razorpay", decision_version=1,
+            command_id=command_id, decision_id=decision_id, payment_attempt_id=pid, source_system=source_system, decision_version=1,
             route_key="FALLBACK_PAYMENT_LINK", policy_id="default-recovery-v1", policy_version="1.0.0",
             command_status="SUCCEEDED", idempotency_key=f"cmd_{decision_id}",
             created_at=now - timedelta(minutes=9), expires_at=now, updated_at=now - timedelta(minutes=9),
         ))
         await session.flush()
         session.add(InterventionExecutionAttemptModel(
-            attempt_id=uuid.uuid4(), command_id=command_id, source_system="razorpay", attempt_number=1,
+            attempt_id=uuid.uuid4(), command_id=command_id, source_system=source_system, attempt_number=1,
             started_at=now - timedelta(minutes=9), completed_at=now - timedelta(minutes=9), duration_ms=15,
             execution_status="SUCCESS", executor_name=executor_name, is_simulation=simulated,
             provider_action_type="PAYMENT_LINK_DISPATCH", provider_response_payload={},
@@ -1091,7 +1102,7 @@ async def _seed_attributed_payment(
         for version in range(1, observation_versions + 1):
             observed = now - timedelta(minutes=5) + timedelta(seconds=version)
             session.add(PaymentOutcomeObservationModel(
-                observation_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid, source_system="razorpay",
+                observation_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid, source_system=source_system,
                 observation_version=version, observed_at=observed, as_of_timestamp=observed,
                 payment_outcome="CAPTURED", observation_audit_payload={}, created_at=observed,
             ))
@@ -1099,7 +1110,7 @@ async def _seed_attributed_payment(
         for version, protected in enumerate(protected_versions, start=1):
             attributed = now - timedelta(minutes=4) + timedelta(seconds=version)
             session.add(CounterfactualAttributionModel(
-                attribution_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid, source_system="razorpay",
+                attribution_id=uuid.uuid4(), command_id=command_id, payment_attempt_id=pid, source_system=source_system,
                 decision_id=decision_id, attribution_version=version, attributed_at=attributed,
                 as_of_timestamp=attributed, attribution_status="ATTRIBUTED",
                 methodology_name="COUNTERFACTUAL_RISK_WEIGHTED_V1", methodology_version="1.0.0",
@@ -1308,3 +1319,305 @@ async def test_payments_list_uses_only_the_latest_decision_version(client, db_en
 
     assert data["total_count"] == 1
     assert [(i["payment_id"], i["decision_type"]) for i in data["items"]] == [(pid, "ACT")]
+
+
+@pytest.mark.asyncio
+async def test_unknown_currency_total_returns_none_for_scalar_fields(client, db_engine):
+    """
+    CP4 regression:
+    1. _single_currency_amount must return None when currency is None/unknown, preventing
+       clients from wrongly assuming default currency (e.g. INR).
+    2. An event with currency=None or mixed currencies must result in null scalar totals
+       in /summary and /recovery, while the per-currency breakdown truthfully reflects data.
+    """
+    from src.api.inspection_routes import _single_currency_amount
+    assert _single_currency_amount([{"currency": None, "amount_minor_units": 5000}]) is None
+    assert _single_currency_amount([]) == 0
+    assert _single_currency_amount([{"currency": "INR", "amount_minor_units": 5000}]) == 5000
+    assert _single_currency_amount([
+        {"currency": "INR", "amount_minor_units": 5000},
+        {"currency": "USD", "amount_minor_units": 100},
+    ]) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_query_validation_and_truthful_scope_labels(client):
+    """
+    CP4 contract guard:
+    - Default inspection scope is labeled 'all_providers' on /summary and /recovery,
+      and 'razorpay_pipeline' on /payments (which excludes PayPal from canonical queries).
+    - Explicit query '?provider=razorpay' returns scope 'razorpay'.
+    - Explicit query '?provider=synthetic' returns scope 'synthetic'.
+    - Explicit query '?provider=paypal' returns scope 'paypal' on /summary, /recovery, and /attributions.
+    - /payments rejects '?provider=paypal' with HTTP 400 because bare order IDs fail prefixed
+      joins and terminal event semantics on the Razorpay payment inspector.
+    - Summary active_degradation_episodes is labeled global even under provider filters.
+    - Broad or unsupported scopes ('all', '*', 'stripe', 'invalid') fail closed with HTTP 400.
+    """
+    for route, expected_default in (
+        ("/api/v1/summary", "all_providers"),
+        ("/api/v1/recovery", "all_providers"),
+    ):
+        # Default scope
+        resp_def = await client.get(route)
+        assert resp_def.status_code == 200
+        data_def = resp_def.json()
+        assert data_def["scope"] == expected_default
+        assert data_def["provider_scope"] == expected_default
+        if route == "/api/v1/summary":
+            assert data_def["active_degradation_episodes_scope"] == "global"
+            assert data_def["metric_scopes"]["active_degradation_episodes"] == "global"
+
+        # Explicit razorpay
+        resp_rzp = await client.get(f"{route}?provider=razorpay")
+        assert resp_rzp.status_code == 200
+        assert resp_rzp.json()["scope"] == "razorpay"
+        assert resp_rzp.json()["provider_scope"] == "razorpay"
+        if route == "/api/v1/summary":
+            assert resp_rzp.json()["active_degradation_episodes_scope"] == "global"
+            assert resp_rzp.json()["metric_scopes"]["active_degradation_episodes"] == "global"
+
+        # Explicit synthetic
+        resp_syn = await client.get(f"{route}?provider=synthetic")
+        assert resp_syn.status_code == 200
+        assert resp_syn.json()["scope"] == "synthetic"
+        assert resp_syn.json()["provider_scope"] == "synthetic"
+
+        # Explicit paypal
+        resp_pp = await client.get(f"{route}?provider=paypal")
+        assert resp_pp.status_code == 200
+        assert resp_pp.json()["scope"] == "paypal"
+        assert resp_pp.json()["provider_scope"] == "paypal"
+        if route == "/api/v1/summary":
+            assert resp_pp.json()["active_degradation_episodes_scope"] == "global"
+            assert resp_pp.json()["metric_scopes"]["active_degradation_episodes"] == "global"
+
+        # Refusal of invalid or unsupported provider filters
+        for invalid_provider in ("all", "*", "stripe", "invalid_provider"):
+            resp_err = await client.get(f"{route}?provider={invalid_provider}")
+            assert resp_err.status_code == 400
+            err_json = resp_err.json()
+            assert "Unsupported provider" in err_json["detail"]
+            assert "'razorpay', 'synthetic', 'paypal'" in err_json["detail"]
+
+    # /payments route provider contract:
+    # 1. Default scope
+    resp_pay_def = await client.get("/api/v1/payments")
+    assert resp_pay_def.status_code == 200
+    assert resp_pay_def.json()["scope"] == "razorpay_pipeline"
+
+    # 2. Supported providers on /payments
+    for p in ("razorpay", "synthetic"):
+        resp_p = await client.get(f"/api/v1/payments?provider={p}")
+        assert resp_p.status_code == 200
+        assert resp_p.json()["scope"] == p
+
+    # 3. Exact endpoint rejection regression for /payments?provider=paypal
+    resp_pay_pp = await client.get("/api/v1/payments?provider=paypal")
+    assert resp_pay_pp.status_code == 400
+    assert (
+        resp_pay_pp.json()["detail"]
+        == "Unsupported provider for payments list: 'paypal'. Payments inspector operates on 'razorpay' and 'synthetic' pipelines."
+    )
+
+    # 4. Refusal of invalid providers on /payments
+    for invalid_provider in ("all", "*", "stripe", "invalid_provider"):
+        resp_err = await client.get(f"/api/v1/payments?provider={invalid_provider}")
+        assert resp_err.status_code == 400
+        assert "Unsupported provider" in resp_err.json()["detail"]
+
+    # /attributions provider validation
+    assert (await client.get("/api/v1/attributions")).status_code == 200
+    assert (await client.get("/api/v1/attributions?provider=razorpay")).status_code == 200
+    assert (await client.get("/api/v1/attributions?provider=synthetic")).status_code == 200
+    assert (await client.get("/api/v1/attributions?provider=paypal")).status_code == 200
+    resp_attr_err = await client.get("/api/v1/attributions?provider=invalid_provider")
+    assert resp_attr_err.status_code == 400
+    assert "Unsupported provider: 'invalid_provider'" in resp_attr_err.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_records_carry_exact_source_labels(client, db_engine):
+    """
+    CP4 regression:
+    Individual records across /payments, /recovery, /attributions, and /timeline
+    must carry exact 'provider' and 'source_system' attributes reflecting their origin.
+    """
+    rzp = await _seed_attributed_payment(db_engine, source_system="razorpay")
+    syn = await _seed_attributed_payment(db_engine, source_system="synthetic")
+
+    # /payments
+    rzp_pay = (await client.get(f"/api/v1/payments?search={rzp.payment_id}")).json()
+    assert rzp_pay["items"][0]["provider"] == "razorpay"
+    assert rzp_pay["items"][0]["source_system"] == "razorpay"
+
+    syn_pay = (await client.get(f"/api/v1/payments?search={syn.payment_id}")).json()
+    assert syn_pay["items"][0]["provider"] == "synthetic"
+    assert syn_pay["items"][0]["source_system"] == "synthetic"
+
+    # /recovery
+    recovery = (await client.get("/api/v1/recovery")).json()
+    ledger_map = {row["payment_attempt_id"]: row for row in recovery["ledger"]}
+    assert ledger_map[rzp.payment_id]["provider"] == "razorpay"
+    assert ledger_map[rzp.payment_id]["source_system"] == "razorpay"
+    assert ledger_map[syn.payment_id]["provider"] == "synthetic"
+    assert ledger_map[syn.payment_id]["source_system"] == "synthetic"
+
+    # /attributions
+    attrs = {a["payment_attempt_id"]: a for a in (await client.get("/api/v1/attributions")).json()}
+    assert attrs[rzp.payment_id]["provider"] == "razorpay"
+    assert attrs[rzp.payment_id]["source_system"] == "razorpay"
+    assert attrs[syn.payment_id]["provider"] == "synthetic"
+    assert attrs[syn.payment_id]["source_system"] == "synthetic"
+
+    # /timeline
+    for item, expected_source in ((rzp, "razorpay"), (syn, "synthetic")):
+        tl = (await client.get(f"/api/v1/timeline/{item.payment_id}")).json()
+        assert tl["payment_info"]["provider"] == expected_source
+        assert tl["payment_info"]["source_system"] == expected_source
+        for evt in tl["events"]:
+            assert evt["provider"] == expected_source
+            assert evt["source_system"] == expected_source
+        for stage in ("prediction", "decision", "command", "execution", "observation", "attribution"):
+            assert tl[stage]["provider"] == expected_source
+            assert tl[stage]["source_system"] == expected_source
+
+
+@pytest.mark.asyncio
+async def test_summary_and_recovery_provider_isolation(client, db_engine):
+    """
+    CP4 regression:
+    - Provider filtering on /summary restricts GMV and intervention metrics to the chosen provider.
+    - Provider filtering on /recovery isolates ledger rows and recovery summaries.
+    - Default scope ('all_providers') reports all protected currencies truthfully with null scalar total when mixed.
+    - Scopes are labeled per metric: processed is 'razorpay_pipeline' while protected is 'all_providers'.
+    - Provider protected breakdown is explicitly reported with exact equality assertions.
+    """
+    rzp = await _seed_attributed_payment(db_engine, source_system="razorpay", currency="INR", amount=100000, protected_versions=(20000,))
+    syn = await _seed_attributed_payment(db_engine, source_system="synthetic", currency="INR", amount=50000, protected_versions=(10000,))
+    pp = await _seed_attributed_payment(db_engine, source_system="paypal", currency="USD", amount=20000, protected_versions=(16200,))
+
+    # Summary provider isolation
+    summary_rzp = (await client.get("/api/v1/summary?provider=razorpay")).json()
+    summary_syn = (await client.get("/api/v1/summary?provider=synthetic")).json()
+    summary_pp = (await client.get("/api/v1/summary?provider=paypal")).json()
+    summary_all = (await client.get("/api/v1/summary")).json()
+
+    # Scopes
+    assert summary_rzp["scope"] == "razorpay"
+    assert summary_syn["scope"] == "synthetic"
+    assert summary_pp["scope"] == "paypal"
+    assert summary_all["scope"] == "all_providers"
+
+    # Per-metric scopes in default summary
+    assert summary_all["metric_scopes"]["processed_gmv"] == "razorpay_pipeline"
+    assert summary_all["metric_scopes"]["protected_gmv"] == "all_providers"
+    assert summary_all["metric_scopes"]["interventions"] == "all_providers"
+    assert summary_all["metric_scopes"]["capture_success_rate"] == "razorpay_pipeline"
+    assert summary_all["processed_gmv_scope"] == "razorpay_pipeline"
+    assert summary_all["protected_gmv_scope"] == "all_providers"
+
+    # Per-metric scopes when filtered
+    assert summary_rzp["metric_scopes"]["processed_gmv"] == "razorpay"
+    assert summary_rzp["metric_scopes"]["protected_gmv"] == "razorpay"
+    assert summary_pp["metric_scopes"]["processed_gmv"] == "not_applicable"
+    assert summary_pp["metric_scopes"]["capture_success_rate"] == "not_applicable"
+    assert summary_pp["processed_gmv_scope"] == "not_applicable"
+    assert summary_pp["metric_scopes"]["protected_gmv"] == "paypal"
+
+    # Processed GMV in default summary: Razorpay + synthetic only (100000 + 50000 = 150000 INR)
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_all["total_gmv_by_currency"]] == [("INR", 150000)]
+    assert summary_all["total_gmv_minor_units"] == 150000
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_rzp["total_gmv_by_currency"]] == [("INR", 100000)]
+    assert summary_rzp["total_gmv_minor_units"] == 100000
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_syn["total_gmv_by_currency"]] == [("INR", 50000)]
+    assert summary_syn["total_gmv_minor_units"] == 50000
+    # PayPal emits no payment.authorized events: authorization-based metrics are undefined, not zero
+    assert summary_pp["total_gmv_by_currency"] == []
+    assert summary_pp["total_gmv_minor_units"] is None
+    assert (summary_pp["total_auths"], summary_pp["total_captures"], summary_pp["overall_success_rate"]) == (
+        None, None, None,
+    )
+
+    # Protected GMV exact equality isolation
+    assert summary_rzp["total_protected_gmv_minor_units"] == 20000
+    assert summary_syn["total_protected_gmv_minor_units"] == 10000
+    assert summary_pp["total_protected_gmv_minor_units"] == 16200
+
+    # When both INR and USD are protected, multi-currency scalar is safely None
+    assert summary_all["total_protected_gmv_minor_units"] is None
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary_all["total_protected_gmv_by_currency"]] == [
+        ("INR", 30000),
+        ("USD", 16200),
+    ]
+
+    # Provider protected breakdown exact equalities
+    provider_breakdown = {
+        (p["provider"], p["currency"]): p["amount_minor_units"]
+        for p in summary_all["protected_gmv_by_provider"]
+    }
+    assert provider_breakdown == {
+        ("paypal", "USD"): 16200,
+        ("razorpay", "INR"): 20000,
+        ("synthetic", "INR"): 10000,
+    }
+
+    # Recovery provider isolation and exact equalities
+    rec_rzp = (await client.get("/api/v1/recovery?provider=razorpay")).json()
+    rec_syn = (await client.get("/api/v1/recovery?provider=synthetic")).json()
+    rec_pp = (await client.get("/api/v1/recovery?provider=paypal")).json()
+    rec_all = (await client.get("/api/v1/recovery")).json()
+
+    assert rec_rzp["summary"]["total_protected_gmv_minor_units"] == 20000
+    assert rec_syn["summary"]["total_protected_gmv_minor_units"] == 10000
+    assert rec_pp["summary"]["total_protected_gmv_minor_units"] == 16200
+    assert rec_all["summary"]["total_protected_gmv_minor_units"] is None
+    assert rec_all["metric_scopes"]["protected_gmv"] == "all_providers"
+    assert rec_all["metric_scopes"]["interventions"] == "all_providers"
+
+    rzp_pids = {row["payment_attempt_id"] for row in rec_rzp["ledger"]}
+    syn_pids = {row["payment_attempt_id"] for row in rec_syn["ledger"]}
+    pp_pids = {row["payment_attempt_id"] for row in rec_pp["ledger"]}
+    all_pids = {row["payment_attempt_id"] for row in rec_all["ledger"]}
+
+    assert set(rzp_pids) == {rzp.payment_id}
+    assert set(syn_pids) == {syn.payment_id}
+    assert set(pp_pids) == {pp.payment_id}
+    assert set(all_pids) == {rzp.payment_id, syn.payment_id, pp.payment_id}
+
+
+@pytest.mark.asyncio
+async def test_payments_provider_filter_never_joins_another_providers_decision(client, db_engine):
+    """
+    CP4 regression: a Razorpay payment whose payment_id collides with a synthetic attempt must not
+    show the synthetic attempt's decision or attribution under ?provider=razorpay (and vice versa).
+    """
+    syn = await _seed_attributed_payment(db_engine, source_system="synthetic")
+    now = datetime.now(timezone.utc)
+    Session = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add(PaymentEventModel(
+            event_id=uuid.uuid4(), source_system="razorpay", source_event_id=uuid.uuid4().hex,
+            payment_id=syn.payment_id, timestamp=now - timedelta(minutes=8), event_type="payment.authorized",
+            currency="INR", amount_minor_units=70000, payment_status="authorized",
+            payment_method="CARD", ingested_at=now - timedelta(minutes=8),
+        ))
+        await session.commit()
+
+    rzp_items = (await client.get(f"/api/v1/payments?provider=razorpay&search={syn.payment_id}")).json()["items"]
+    assert [
+        (i["provider"], i["amount_minor_units"], i["decision_type"], i["decision_id"], i["is_intervened"],
+         i["is_attributed"], i["attributed_protected_gmv_minor_units"])
+        for i in rzp_items
+    ] == [("razorpay", 70000, None, None, False, False, 0)]
+
+    rzp_intervened = (await client.get(
+        f"/api/v1/payments?provider=razorpay&filter_type=INTERVENED&search={syn.payment_id}"
+    )).json()
+    assert (rzp_intervened["items"], rzp_intervened["total_count"]) == ([], 0)
+
+    syn_items = (await client.get(f"/api/v1/payments?provider=synthetic&search={syn.payment_id}")).json()["items"]
+    assert [
+        (i["provider"], i["decision_type"], i["decision_id"], i["is_attributed"], i["attributed_protected_gmv_minor_units"])
+        for i in syn_items
+    ] == [("synthetic", "ACT", str(syn.decision_id), True, 10000)]
