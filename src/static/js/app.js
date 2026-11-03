@@ -454,7 +454,11 @@ function renderSummary() {
   }
 
   const scopes = data.metric_scopes || {};
-  const notApplicable = 'Not applicable (no authorization events for this provider)';
+  const notApplicable = 'Not applicable';
+  const notApplicableReason = 'This provider emits no authorization events, so authorization-based metrics are undefined (not zero).';
+  [elements.kpiProcessedVolume, elements.kpiSuccessRate, elements.kpiAuthCaptureVolume].forEach((el) => {
+    if (el) el.title = scopes.processed_gmv === 'not_applicable' ? notApplicableReason : '';
+  });
 
   // 2. Processed Volume (Stage 1 Auth GMV), one figure per currency
   if (elements.kpiProcessedVolume) {

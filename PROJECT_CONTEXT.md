@@ -713,6 +713,28 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - The keys are created with immediate validation, which locks the tables while it scans them. That is fine at current volumes; large production tables would need `NOT VALID` followed by `VALIDATE CONSTRAINT`.
   - Three new unique indexes add some write overhead.
 
+### Autonomous Roadmap Milestones A–H (2026-11-03, committed locally; not pushed)
+
+The detailed plan, logs, test results and blockers live in `docs/AUTONOMOUS_ENGINEERING_ROADMAP.md`. Summary:
+
+- **Commits:**
+  - `d40a857` (A–B): per-currency route costs (USD schedule, policy 1.1.0), every prediction decided, model identity in the decision audit, executor context.
+  - `61c884a` (C): pinned, validated live-model selection with heuristic fallback.
+  - `4707f1a` (D): sandbox-only PayPal Orders v2 recovery checkout executor, plus recovery outcome observation and routing.
+  - `db011ec` (E): Revision D `a7b8c9d0e1f2` pipeline_runs outbox, claim/lease, reconciler and idempotent terminal replay.
+  - `bfc0dfd` (F): Revision E `b8c9d0e1f2a3` Z-score evidence, with an opt-in combined rule.
+  - `a14798d` (G): PayPal payments and timeline, provider scopes and real-vs-simulated execution on the dashboard.
+  - H: `scripts/demo_end_to_end.py`.
+- **Alembic head:** `b8c9d0e1f2a3`, 15 linear revisions.
+- **Final local results:**
+  - Offline: 1,690 passed.
+  - PostgreSQL integration + API: 693 passed.
+  - Migration: 105 passed.
+  - Frontend: 11 passed; 0 failed, 0 skipped.
+- **Not verified:**
+  - Real PayPal sandbox calls (no credentials configured).
+  - CI for these commits (not pushed).
+
 ## Current State
 
 The repository is at **Phase 3 Revision C**, committed after Checkpoint 4 (`b190213`) on top of Revision B (`cddb60c`, CI green). Both milestones were reviewed, approved and pushed to `origin/main` together.

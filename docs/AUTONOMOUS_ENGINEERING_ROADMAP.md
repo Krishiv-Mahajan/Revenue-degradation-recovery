@@ -104,7 +104,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | E | Done | see E log | Transactional outbox, claim/lease, reconciler, idempotent capture replay |
 | F | Done | see F log | Z-score evidence on every signal; opt-in combined rule; hysteresis unchanged |
 | G | Done | see G log | Provider selector, PayPal payments/timeline, scopes, real-vs-simulated execution, recovery checkout |
-| H | Not started | | |
+| H | Done (PayPal step blocked, see below) | see H log | `scripts/demo_end_to_end.py`: webhook-driven Stage 1–8 run with a provenance report |
 
 ### Milestone B log (2026-11-03)
 
@@ -252,6 +252,52 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Offline: 1,688 passed.
   - PostgreSQL integration + API: 693 passed.
   - Frontend: 11/11.
+
+### Milestone H log (2026-11-03)
+
+- **Script:** `scripts/demo_end_to_end.py` (`DATABASE_URL=<disposable test DB> python -m scripts.demo_end_to_end --reset`).
+  - Refuses any database that is neither the disposable test database nor demo-allowlisted, and checks `current_database()` before an optional reset.
+  - Generates the synthetic outage context, then sends 60 HMAC-signed Razorpay webhooks (60% failed card payments) and a target authorization and capture through the real `/ingest/razorpay` route, in-process.
+  - Prints each stage's record with its provenance and, for the execution, why it was or was not real.
+- **Verified run** (2026-11-03, disposable PostgreSQL, real heuristic, nothing forced):
+  - 62 pipeline runs SUCCEEDED (outbox).
+  - CRITICAL episodes on GLOBAL and payment_method=card, with a 0.70 peak drop.
+  - RCA SEGMENT_SPECIFIC.
+  - p = 0.825 (0.025 + 0.5 × 0.6 + 0.30 CRITICAL + 0.20 STRONG RCA).
+  - ACT on DEGRADATION_CIRCUIT_BYPASS, gates PASSED.
+  - Execution SIMULATOR_V1 (simulated: that route has no PayPal action).
+  - Outcome CAPTURED.
+  - ATTRIBUTED ₹1,237.50 (250,000 × 0.825 × 0.6), flagged as simulated execution and synthetic baseline.
+- **Dashboard check** against that data (uvicorn on the test database, throwaway credentials):
+  - The overview, scope labels, per-provider protected GMV, the real/simulated executor KPI, the simulation notice and PayPal not-applicable metrics rendered correctly.
+  - The audit drawer, opened through `selectPayment`, showed the complete Stage 1–8 trace with simulated execution and estimate labels.
+  - Opening the page with credentials in the URL (an automation shortcut) left the original module's click handlers unbound. Normal Basic-auth login does not use this form, but it was not verified in this environment.
+- **Why the demo cannot yet show a genuine PayPal recovery** (honest constraints, not faked):
+  1. No PayPal sandbox credentials are configured.
+  2. Under the default policy, the PayPal-backed route (FALLBACK_PAYMENT_LINK) wins only when no diagnosis-backed route is eligible. During a diagnosed outage, DEGRADATION_CIRCUIT_BYPASS has higher utility.
+  3. PayPal attempts never carry degradation or RCA context, because Stages 2–4 are Razorpay-only, so the heuristic tops out at p ≈ 0.525 (MONITOR) for them.
+
+  The real PayPal path is proven end to end in `test_real_paypal_recovery_checkout_is_executed_observed_and_attributed` (real routes, pipeline and PostgreSQL; only PayPal's HTTP API mocked in-process).
+
+## 5. Final status and remaining work (2026-11-03)
+
+**Completed:** all eight stages are integrated through the real webhook routes. The work delivered:
+- Durable, idempotent pipeline runs.
+- Provider and same-attempt isolation enforced by the database.
+- Multi-currency decisioning that records every verdict.
+- Validated, pinned model selection.
+- Z-score evidence.
+- A real, sandbox-only PayPal recovery executor with outcome observation and honest attribution.
+- A provider-aware dashboard.
+- A reproducible, provenance-labelled demo.
+
+**Remaining, in priority order:**
+1. **Provide sandbox credentials** and run `scripts/paypal_sandbox_recovery_smoke.py`, then the pipeline with `PAYPAL_RECOVERY_EXECUTION_ENABLED=true`. This needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and a public webhook URL (or tunnel) for PayPal events.
+2. **Provider-partitioned Stages 2–4** (a provider segment with its own baselines, provider-aware RCA, and Stage 5 episode matching for PayPal attempts), so PayPal degradation can drive PayPal recovery decisions.
+3. **Route policy review:** whether the PayPal checkout should also execute PROMPT_PAYMENT_METHOD_SWITCH (offering PayPal *is* a method switch). This is a product decision, so it is not made unilaterally.
+4. **Provider-trained Stage 5 model** evaluated on genuine traffic, then registered in `VERIFIED_EMPIRICAL_MODELS` after review.
+5. **Push and CI:** commits `d40a857`…(H) are local and need approval to push.
+6. **Pre-existing test isolation issue:** `tests/unit` + `tests/api` in one process fail 2 route tests; CI runs them separately.
 
 ## 4. External blockers
 
