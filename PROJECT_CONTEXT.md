@@ -624,9 +624,10 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - `intervention_decisions.stage5_prediction_id` has no foreign key. The migration creates the target `uq_failure_prediction_provider (prediction_id, source_system)`, but nothing references it.
   - Only provider consistency is enforced between linked Stage 5–8 rows, not attempt consistency: a command's `payment_attempt_id` is not constrained to equal its decision's, nor an observation's or attribution's to equal its command's. Application code derives these values today; the database would not catch a bug.
 
-### Phase 3 Checkpoint 4 — Provider-Scoped Dashboard Inspection (2026-11-02, verified locally; uncommitted)
+### Phase 3 Checkpoint 4 — Provider-Scoped Dashboard Inspection (2026-11-02, committed; verified locally)
 
-- **Status:** verified against the disposable PostgreSQL test database; **not yet committed or run in CI** (awaiting approval).
+- **Commit:** `b190213d6287a18848b947f6331a6fda5b631aef` — `feat: add provider-scoped dashboard inspection (Phase 3 Checkpoint 4)`
+- **Status:** verified against the disposable PostgreSQL test database; committed on `main` but **not yet pushed or run in CI**.
 - **Files:** `src/api/inspection_routes.py`, `tests/api/test_inspection_routes.py`, `tests/integration/test_live_pipeline_e2e.py`.
 - **Scope:** read-only inspection endpoints only. No schema, migration, pipeline, frontend or Stage 1–8 behavior changes.
 - **API changes:**
@@ -638,7 +639,7 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
 - **Fixes made during verification (2026-11-02):**
   1. **`/payments` cross-provider join leak.** The latest-decision join matched only `payment_attempt_id == payment_id`, so under `?provider=razorpay` a Razorpay row whose `payment_id` collided with a synthetic attempt showed the synthetic decision, attribution and protected GMV. The join now also requires `InterventionDecisionModel.source_system == PaymentEventModel.source_system`. The attribution join goes through `decision_id`, which the Revision B composite FK ties to the same provider. Regression test `test_payments_provider_filter_never_joins_another_providers_decision` failed before the fix and passes after it.
   2. **PayPal-scoped `/summary` authorization metrics (decision approved by the owner: "not applicable").** PayPal never emits `payment.authorized`, so `?provider=paypal` reported `overall_success_rate = 0.0` and `total_auths = 0`, with `total_captures` counting PayPal captures, and processed GMV `0` beside non-zero protected GMV. For PayPal (`AUTHORIZATION_METRICS_UNSUPPORTED_PROVIDERS`), `/summary` now skips those queries and returns `total_gmv_minor_units`, `total_auths`, `total_captures` and `overall_success_rate` as null, `total_gmv_by_currency` as `[]`, and labels `metric_scopes.processed_gmv`, `metric_scopes.capture_success_rate` and `processed_gmv_scope` as `not_applicable`. The Checkpoint 4 assertions were tightened from `0` / `"paypal"` to null / `not_applicable` and extended to the rate and both counts. Razorpay, synthetic and default scopes are unchanged.
-- **Validation (2026-11-02, local; uncommitted tree = `cddb60c` + Checkpoint 4 + the two fixes):**
+- **Validation (2026-11-02, local; on the tree later committed as `b190213` = `cddb60c` + Checkpoint 4 + the two fixes):**
   - Environment: Docker `db_test` only (`postgres:15-alpine`, server 15.19, tmpfs, host port 5434, database `payment_recovery_test`). `TEST_DATABASE_URL` passed `assert_disposable_test_target` against the fixtures' protected URLs, and `current_database()` was confirmed as `payment_recovery_test` before any test. `DATABASE_URL` pointed at unreachable `127.0.0.1:1`. The development container `paymentrecovery-db-1` (port 5433) stayed exited with unchanged start/finish timestamps and was never started or connected to.
   - Before the fixes: `tests/api/test_inspection_routes.py` 33 passed; `tests/integration/test_live_pipeline_e2e.py` 24 passed; `tests/integration` + `tests/api` 669 passed; `tests/migration` 95 passed. All against PostgreSQL, 0 skipped.
   - After the fixes, against PostgreSQL: `tests/integration` + `tests/api` **670 passed, 0 failed, 0 skipped** (the committed 664 + 5 Checkpoint 4 tests + 1 regression test); `RUN_MIGRATION_TESTS=1 tests/migration` **95 passed, 0 skipped**.
@@ -651,12 +652,12 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
 
 ## Current State
 
-The repository is at **Phase 3 Revision B committed (`cddb60c`, CI green)**, with **Checkpoint 4 verified locally but uncommitted**.
+The repository is at **Phase 3 Checkpoint 4 committed (`b190213`, verified locally; not yet pushed)** on top of Revision B (`cddb60c`, CI green).
 
-- **Branch:** `main`, in sync with `origin/main` at `cddb60c`.
-- **Latest Commit:** `cddb60c` (`Enforce Phase 3 Revision B provider identity contract and composite database constraints`).
-- **CI Status:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416) green on `cddb60c`.
-- **Working Tree:** modified `src/api/inspection_routes.py`, `tests/api/test_inspection_routes.py`, `tests/integration/test_live_pipeline_e2e.py` and this file (Checkpoint 4), pending approval to commit.
+- **Branch:** `main`, ahead of `origin/main` (`cddb60c`) by the unpushed Checkpoint 4 commit and this documentation update.
+- **Latest Checkpoint Commit:** `b190213` (`feat: add provider-scoped dashboard inspection (Phase 3 Checkpoint 4)`).
+- **CI Status:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416) green on `cddb60c`; Checkpoint 4 has not run in CI.
+- **Working Tree:** Clean.
 
 ### What is real versus simulated (2026-11-02 audit)
 
@@ -670,7 +671,7 @@ The repository is at **Phase 3 Revision B committed (`cddb60c`, CI green)**, wit
 ### Remaining work (prioritized)
 
 - **P0:**
-  1. Commit Checkpoint 4 after approval and confirm CI.
+  1. Push Checkpoint 4 (`b190213`) after approval and confirm CI.
   2. Add the missing `stage5_prediction_id` foreign key.
   3. Enforce attempt consistency between linked Stage 5–8 rows.
 - **P1:**
