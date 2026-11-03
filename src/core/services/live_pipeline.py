@@ -53,6 +53,7 @@ from src.core.execution.simulator import SimulatorInterventionExecutor, Simulato
 from src.core.intervention.policy import get_default_policy
 from src.core.intervention.service import InterventionDecisionService
 from src.core.ml.model import get_development_model
+from src.core.ml.selection import select_live_model
 from src.core.rca.service import RCAService
 from src.core.services.failure_prediction_service import FailurePredictionService
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
@@ -106,7 +107,7 @@ async def _execute_live_pipeline(
         degradation_svc = DegradationService(degradation_repo)
         rca_svc = RCAService(session, rca_repo)
 
-        model = get_development_model(mode="deterministic")
+        model = select_live_model(heuristic=lambda: get_development_model(mode="deterministic")).model
         feat_svc = FeatureReconstructionService(feat_repo)
         pred_svc = FailurePredictionService(session, feat_svc, pred_repo, model)
 

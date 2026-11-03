@@ -99,7 +99,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 |---|---|---|---|
 | A | Done | (with B) | Revision C verified: constraints, round trip and rejections against PostgreSQL; CI run 41667680881 green on `5c601c4`. In the live pipeline, attempt registration and Stage 5–8 writes commit in one transaction. No code change. |
 | B | Done | see B log | USD cost schedule; pre-gate removed; model identity in the decision audit; executor context |
-| C | Not started | | |
+| C | Done | see C log | Pinned, validated live-model selection with heuristic fallback |
 | D | Not started | | |
 | E | Not started | | |
 | F | Not started | | |
@@ -126,6 +126,24 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Offline `tests/unit` + `tests/boundaries`: 1,575 passed, 0 skipped.
   - PostgreSQL `tests/integration` + `tests/api`: 681 passed, 0 skipped.
 - **Pre-existing issue found:** running `tests/unit` and `tests/api` in one process fails 2 `tests/api/test_routes.py` tests. The same happens on `5c601c4`, and CI runs those suites in separate jobs. Not caused by this work; to be fixed under E or G.
+
+### Milestone C log (2026-11-03)
+
+- **Evaluation:**
+  - **Heuristic** (`DeterministicBaselineModel`, `untrained-heuristic-v2`): deterministic and auditable, and adds bounded increments for recent failure rate, degradation severity and segment-matching RCA. It is not validated on outcomes. It reaches ACT (≥ 0.70) only under a CRITICAL episode with STRONG segment-matching RCA and a recent failure rate ≥ 0.35. That is a genuine severe-outage profile, not a typical payment.
+  - **Logistic models:** `SyntheticLogisticRegressionModel` trains on generated data, and `ProviderLogisticRegressionModel` trains offline in provider-evaluation mode. The committed `models/synthetic-development-v1.joblib` carries **no held-out metrics**, so it is not eligible to predict live.
+  - **Training data:** `Stage5PipelineValidator` extracts authorizations and their 30-minute terminal labels, then reconstructs features as of each authorization. Provider mode uses genuine Razorpay events only, under a contamination guard and a REPEATABLE READ snapshot.
+  - **Quality:** the time-ordered held-out split reports ROC AUC and Brier score into `training_metadata` (`src/core/ml/training.py`).
+- **Implemented:** `src/core/ml/selection.py` with `select_live_model`, used by the live pipeline.
+  - `STAGE5_MODEL_MODE=heuristic` is the default. `artifact` requires `STAGE5_MODEL_PATH` and a **SHA-256 pin** (`STAGE5_MODEL_SHA256`), which is checked before `joblib.load` executes the pickle.
+  - An artifact is accepted only if it implements the interface, uses a v1.0.0 feature schema, and has computed held-out ROC AUC ≥ 0.60 and Brier ≤ 0.25.
+  - Every failure falls back to the heuristic with a logged, recorded reason. Prediction rows keep recording `model_name` / `model_version`, and Stage 8 provenance classification is unchanged. Passing selection is not empirical validation.
+  - No LLM anywhere in the path; the boundary tests enforce this.
+- **Tests:** `tests/unit/test_live_model_selection.py` (17 tests, including a check that the committed synthetic artifact is refused).
+- **Results:**
+  - Offline: 1,594 passed, 0 skipped.
+  - PostgreSQL integration + API: 681 passed, 0 skipped.
+- **Remaining:** a provider-trained model can only be accepted after an offline provider evaluation on genuine traffic, which this environment does not have.
 
 ## 4. External blockers
 
