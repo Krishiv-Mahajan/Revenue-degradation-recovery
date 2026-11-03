@@ -20,6 +20,7 @@ from src.infrastructure.database import AsyncSessionLocal
 from src.core.domain.models import PaymentEvent
 from src.core.domain.payment_attempt_exceptions import AttemptProviderConflictError
 from src.core.domain.payment_attempts import (
+    AttemptRef,
     PipelineRole,
     pipeline_attempt_refusal,
     resolve_pipeline_attempt,
@@ -234,19 +235,21 @@ async def _execute_live_pipeline(
             current_stage = "STAGE_5_PREDICTION"
             prediction = await pred_svc.orchestrate_prediction(attempt.ref, T=t_eval)
 
-            # Stage 6: Intervention Decisioning
+            # Stage 6: every prediction is decided, so ACT, MONITOR and NO_ACTION (including the
+            # gate-forced NO_ACTION for an unusable prediction) are all recorded.
             current_stage = "STAGE_6_DECISION"
-            if prediction.failure_probability is not None and prediction.failure_probability > 0.5:
-                decision = await inter_decision_svc.decide(attempt.ref, t_decide=t_eval)
+            decision = await inter_decision_svc.decide(attempt.ref, t_decide=t_eval)
 
-                if decision.decision_type.value == "ACT":
-                    # Stage 7A: Execution Command Creation & Dispatch (Claim immediately at t_eval)
-                    current_stage = "STAGE_7_EXECUTION"
-                    command = await inter_exec_svc.create_command(decision, t_create=t_eval)
-                    await inter_exec_svc.execute_command(command.command_id, t_claim=t_eval)
+            if decision.decision_type.value == "ACT":
+                # Stage 7A: Execution Command Creation & Dispatch (Claim immediately at t_eval)
+                current_stage = "STAGE_7_EXECUTION"
+                command = await inter_exec_svc.create_command(decision, t_create=t_eval)
+                await inter_exec_svc.execute_command(
+                    command.command_id, context=execution_context(decision, attempt.ref), t_claim=t_eval
+                )
 
-                    # Note: Stage 7B observation and Stage 8 attribution are NOT performed here.
-                    # An authorized payment is still in flight and must not be prematurely observed/attributed.
+                # Note: Stage 7B observation and Stage 8 attribution are NOT performed here.
+                # An authorized payment is still in flight and must not be prematurely observed/attributed.
 
         elif attempt is not None and attempt.role is PipelineRole.TERMINAL:
             # Terminal event: observe outcome & attribute using authoritative terminal boundary
@@ -304,6 +307,22 @@ async def _execute_live_pipeline(
             "failed_stage": current_stage,
             "error": str(e),
         }
+
+
+def execution_context(decision, attempt: AttemptRef) -> Dict[str, Any]:
+    """
+    The facts an executor may act on: the amount and currency Stage 6 recorded when it decided, and
+    the attempt's provider identity. Executors never re-derive amounts from later events.
+    """
+    facts = (decision.evaluation_audit_payload or {}).get("payment_facts", {})
+    return {
+        "source_system": attempt.source_system,
+        "payment_attempt_id": attempt.payment_attempt_id,
+        "provider_reference": attempt.provider_reference,
+        "decision_id": str(decision.decision_id),
+        "amount_minor_units": facts.get("amount_minor_units"),
+        "currency": facts.get("currency"),
+    }
 
 
 def _log_attempt_refused(payment_event: PaymentEvent, reason: str) -> None:

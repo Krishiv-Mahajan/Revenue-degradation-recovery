@@ -184,13 +184,19 @@ def determine_verdict(
     failure_probability: Optional[float],
     policy: InterventionPolicy,
     rca_evidence_strength: Optional[str],
+    min_policy_utility_threshold: Optional[Decimal] = None,
 ) -> Tuple[DecisionType, Optional[InterventionRouteKey], float, GateVerdict]:
     """
     Deterministically computes decision verdict, selected route, and decision confidence.
+    min_policy_utility_threshold is the threshold of the payment currency's cost schedule; it defaults
+    to the policy's base-currency threshold.
     """
     prob = failure_probability if failure_probability is not None else 0.0
+    min_utility = (
+        policy.min_policy_utility_threshold if min_policy_utility_threshold is None else min_policy_utility_threshold
+    )
 
-    if best_candidate is not None and best_candidate.policy_utility >= policy.min_policy_utility_threshold:
+    if best_candidate is not None and best_candidate.policy_utility >= min_utility:
         if prob >= policy.act_risk_threshold:
             conf = calculate_act_confidence(
                 prob,

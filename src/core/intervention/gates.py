@@ -46,22 +46,30 @@ def evaluate_amount_and_currency(amount_minor_units: int, currency: str) -> Gate
 
 def evaluate_policy_cost_currency(policy: InterventionPolicy, currency: str) -> GateEvaluationResult:
     """
-    Gate 6: Route costs and the minimum policy utility are minor units of policy.cost_currency, so
-    they can only be weighed against payment amounts in that currency. No exchange rate is assumed:
-    any other currency disables cost-based route scoring.
+    Gate 6: Route costs and the minimum policy utility are minor units of one currency's cost schedule,
+    so a payment can only be weighed against the schedule of its own currency. No exchange rate is
+    assumed: a currency without a schedule disables cost-based route scoring.
     """
-    if currency != policy.cost_currency:
+    supported = list(policy.supported_cost_currencies)
+    if policy.cost_schedule(currency) is None:
         return GateEvaluationResult(
             passed=False,
             verdict=GateVerdict.FAILED_UNSUPPORTED_COST_CURRENCY,
             details={
                 "currency": currency,
                 "policy_cost_currency": policy.cost_currency,
-                "reason": f"Policy route costs are defined in {policy.cost_currency}; none exist for {currency}",
+                "supported_cost_currencies": supported,
+                "reason": f"Policy route costs are defined in {', '.join(supported)}; none exist for {currency}",
             },
         )
     return GateEvaluationResult(
-        passed=True, verdict=GateVerdict.PASSED, details={"policy_cost_currency": policy.cost_currency}
+        passed=True,
+        verdict=GateVerdict.PASSED,
+        details={
+            "policy_cost_currency": policy.cost_currency,
+            "cost_schedule_currency": currency,
+            "supported_cost_currencies": supported,
+        },
     )
 
 

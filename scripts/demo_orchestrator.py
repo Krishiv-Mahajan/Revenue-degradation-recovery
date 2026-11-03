@@ -75,6 +75,7 @@ from src.core.normalizers.razorpay import generate_deterministic_hash
 from src.core.rca.service import RCAService
 from src.core.services.failure_prediction_service import FailurePredictionService
 from src.core.services.feature_reconstruction_service import FeatureReconstructionService
+from src.core.services.live_pipeline import execution_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("demo_orchestrator")
@@ -405,21 +406,22 @@ async def run_pipeline(engine) -> None:
                 # Stage 5: Failure Prediction
                 pred = await pred_svc.orchestrate_prediction(attempt, T=ts)
 
-                # Stage 6: Intervention Decisioning
-                if pred.failure_probability and pred.failure_probability > 0.5:
-                    decision = await inter_decision_svc.decide(attempt, t_decide=ts)
+                # Stage 6: every prediction is decided (ACT, MONITOR or NO_ACTION is recorded)
+                decision = await inter_decision_svc.decide(attempt, t_decide=ts)
 
-                    if decision.decision_type.value == "ACT":
-                        # Stage 7A: Dispatch & Execute Command
-                        cmd = await inter_exec_svc.create_command(decision, t_create=ts)
-                        await inter_exec_svc.execute_command(cmd.command_id, t_claim=ts + timedelta(seconds=1))
+                if decision.decision_type.value == "ACT":
+                    # Stage 7A: Dispatch & Execute Command
+                    cmd = await inter_exec_svc.create_command(decision, t_create=ts)
+                    await inter_exec_svc.execute_command(
+                        cmd.command_id, context=execution_context(decision, attempt), t_claim=ts + timedelta(seconds=1)
+                    )
 
-                        # Stage 7B: Observe Terminal Outcome (as-of 45s later)
-                        t_obs = ts + timedelta(seconds=45)
-                        await outcome_obs_svc.observe(cmd.command_id, as_of_timestamp=t_obs)
+                    # Stage 7B: Observe Terminal Outcome (as-of 45s later)
+                    t_obs = ts + timedelta(seconds=45)
+                    await outcome_obs_svc.observe(cmd.command_id, as_of_timestamp=t_obs)
 
-                        # Stage 8: Counterfactual Attribution
-                        await attr_svc.attribute_payment_intervention(cmd.command_id, as_of_timestamp=t_obs)
+                    # Stage 8: Counterfactual Attribution
+                    await attr_svc.attribute_payment_intervention(cmd.command_id, as_of_timestamp=t_obs)
 
             await session.commit()
             current_window = window_end

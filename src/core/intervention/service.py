@@ -229,12 +229,14 @@ class InterventionDecisionService:
         failure_prob = stage5_pred.failure_probability if (stage5_pred and stage5_pred.failure_probability is not None) else 0.0
         candidate_scores: List[CandidateRouteScore] = []
 
-        # Gate 6: route costs are minor units of the policy's cost currency; never weigh them
+        # Gate 6: route costs are minor units of one currency's cost schedule; never weigh them
         # against another currency. Risk-only MONITOR / NO_ACTION verdicts need no costs.
         g6 = evaluate_policy_cost_currency(self.policy, currency)
         audit_gates["policy_cost_currency"] = {"passed": g6.passed, "details": g6.details}
+        cost_schedule = self.policy.cost_schedule(currency)
 
         for route_key, route_def in self.policy.routes.items():
+            route_cost = cost_schedule.route_costs_minor_units.get(route_key) if cost_schedule else None
             if not g6.passed:
                 candidate_scores.append(
                     CandidateRouteScore(
@@ -268,13 +270,15 @@ class InterventionDecisionService:
                 bank=bank,
                 is_on_cooldown=is_on_cooldown,
             )
+            if is_eligible and route_cost is None:
+                is_eligible, eligibility_reason = False, f"Policy defines no {currency} cost for route {route_key.value}"
 
             if is_eligible:
                 expected_benefit, utility = calculate_policy_utility(
                     amount_minor_units=amount_minor_units,
                     failure_probability=failure_prob,
                     recovery_rate=route_def.policy_recovery_rate,
-                    cost_minor_units=route_def.policy_cost_minor_units,
+                    cost_minor_units=route_cost,
                 )
                 alignment = calculate_route_alignment(
                     route=route_def,
@@ -295,7 +299,7 @@ class InterventionDecisionService:
                     is_eligible=is_eligible,
                     eligibility_reason=eligibility_reason,
                     expected_recovery_benefit=expected_benefit,
-                    policy_cost_minor_units=route_def.policy_cost_minor_units,
+                    policy_cost_minor_units=route_cost if route_cost is not None else route_def.policy_cost_minor_units,
                     policy_utility=utility,
                     route_alignment_score=alignment,
                     rank=0,
@@ -335,6 +339,7 @@ class InterventionDecisionService:
             failure_probability=failure_prob,
             policy=self.policy,
             rca_evidence_strength=rca_evidence_strength,
+            min_policy_utility_threshold=cost_schedule.min_policy_utility_threshold if cost_schedule else None,
         )
 
         # -------------------------------------------------------------------
@@ -384,6 +389,8 @@ class InterventionDecisionService:
             "upstream_context": {
                 "stage5_prediction_id": str(stage5_pred.prediction_id) if stage5_pred else None,
                 "stage5_status": stage5_pred.prediction_status if stage5_pred else None,
+                "stage5_model_name": getattr(stage5_pred, "model_name", None),
+                "stage5_model_version": getattr(stage5_pred, "model_version", None),
                 "failure_probability": failure_prob,
                 "episode_id": str(episode_id) if episode_id else None,
                 "episode_status": episode_status,
@@ -399,8 +406,12 @@ class InterventionDecisionService:
                 "policy_version": self.policy.policy_version,
                 "act_risk_threshold": self.policy.act_risk_threshold,
                 "monitor_risk_threshold": self.policy.monitor_risk_threshold,
-                "min_policy_utility_threshold_minor_units": int(self.policy.min_policy_utility_threshold),
+                "min_policy_utility_threshold_minor_units": int(
+                    cost_schedule.min_policy_utility_threshold if cost_schedule else self.policy.min_policy_utility_threshold
+                ),
                 "cost_currency": self.policy.cost_currency,
+                "cost_schedule_currency": currency if cost_schedule else None,
+                "supported_cost_currencies": list(self.policy.supported_cost_currencies),
                 "global_rate_limit_per_minute": self.policy.global_rate_limit_per_minute,
             },
         }
@@ -455,6 +466,11 @@ class InterventionDecisionService:
                 "policy_id": self.policy.policy_id,
                 "policy_version": self.policy.policy_version,
                 "cost_currency": self.policy.cost_currency,
+                "supported_cost_currencies": list(self.policy.supported_cost_currencies),
+            },
+            "stage5_model": {
+                "name": getattr(stage5_pred, "model_name", None),
+                "version": getattr(stage5_pred, "model_version", None),
             },
         }
 

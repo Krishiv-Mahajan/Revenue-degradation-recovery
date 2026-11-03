@@ -389,7 +389,7 @@ async def _assert_attributed_simulated_intervention(Session, payment_id, capture
     assert prediction.model_name == "SyntheticFixedProbabilityTestModel"
 
     decision = await _for_payment(Session, InterventionDecisionModel, payment_id)
-    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.0.0")
+    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.1.0")
     assert decision.selected_route_id in NO_DIAGNOSIS_ROUTES
     assert decision.stage5_prediction_id == prediction.prediction_id
 
@@ -435,7 +435,7 @@ async def _assert_attributed_simulated_intervention(Session, payment_id, capture
 # --- cold start with the real heuristic ------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_cold_start_authorization_and_capture_record_no_decision_with_the_real_heuristic(e2e):
+async def test_cold_start_authorization_records_a_gate_forced_no_action_with_the_real_heuristic(e2e):
     now = datetime.now(timezone.utc)
     payment_id = _payment_id()
 
@@ -467,15 +467,21 @@ async def test_cold_start_authorization_and_capture_record_no_decision_with_the_
     assert (prediction.model_name, prediction.model_version) == ("DeterministicBaselineModel", "untrained-heuristic-v2")
     assert (prediction.prediction_status, prediction.failure_probability) == ("INSUFFICIENT_DATA", None)
 
+    # Stage 6 still records the decision: the prediction gate forces NO_ACTION, and nothing executes.
+    decision = await _for_payment(e2e.Session, InterventionDecisionModel, payment_id)
+    assert (decision.decision_type, decision.gate_verdict, decision.selected_route_id) == (
+        "NO_ACTION", "FAILED_STAGE5_INELIGIBLE", None,
+    )
+    assert decision.stage5_prediction_id == prediction.prediction_id
+
     counts = await _counts(e2e.Session)
     assert (counts["degradation_episodes"], counts["rca_evaluations"]) == (0, 0)
-    assert {table: counts[table] for table in STAGE_5_TO_8_TABLES - {"failure_predictions"}} == dict.fromkeys(
-        STAGE_5_TO_8_TABLES - {"failure_predictions"}, 0,
-    )
+    no_decision_tables = STAGE_5_TO_8_TABLES - {"failure_predictions", "intervention_decisions"}
+    assert {table: counts[table] for table in no_decision_tables} == dict.fromkeys(no_decision_tables, 0)
 
 
 @pytest.mark.asyncio
-async def test_real_heuristic_with_razorpay_history_predicts_below_the_runner_threshold(e2e):
+async def test_real_heuristic_with_razorpay_history_records_a_no_action_decision(e2e):
     now = datetime.now(timezone.utc)
     payment_id = _payment_id()
     await _seed_razorpay_history(e2e.Session, now)
@@ -490,7 +496,9 @@ async def test_real_heuristic_with_razorpay_history_predicts_below_the_runner_th
     snapshot = prediction.feature_snapshot
     assert (snapshot["global_30m_failure_rate"], snapshot["global_24h_failure_rate"]) == (None, 0.0)
     assert prediction.failure_probability == pytest.approx(0.025)
-    assert await _rows(e2e.Session, InterventionDecisionModel) == []
+    decision = await _for_payment(e2e.Session, InterventionDecisionModel, payment_id)
+    assert (decision.decision_type, decision.gate_verdict, decision.selected_route_id) == ("NO_ACTION", "PASSED", None)
+    assert await _rows(e2e.Session, InterventionCommandModel) == []
 
 
 # --- full chain: authorization -> simulated execution -> attribution -------------------------------
@@ -729,10 +737,12 @@ async def test_paypal_attempts_ignore_razorpay_history_and_episodes(e2e, monkeyp
     assert ("GLOBAL", "ALL", "CRITICAL") in {(e.segment_dimension, e.segment_value, e.severity) for e in episodes}
 
     _assert_runs_succeeded(e2e.caplog, [first_id, second_id])
-    [decision] = await _rows(e2e.Session, InterventionDecisionModel)
-    assert (decision.payment_attempt_id, decision.decision_type, decision.selected_route_id in NO_DIAGNOSIS_ROUTES) == (
-        paypal_attempt_id(second_order), "ACT", True,
-    )
+    decisions = {d.payment_attempt_id: d for d in await _rows(e2e.Session, InterventionDecisionModel)}
+    assert set(decisions) == {paypal_attempt_id(first_order), paypal_attempt_id(second_order)}
+    first_decision = decisions[paypal_attempt_id(first_order)]
+    assert (first_decision.decision_type, first_decision.gate_verdict) == ("NO_ACTION", "FAILED_STAGE5_INELIGIBLE")
+    decision = decisions[paypal_attempt_id(second_order)]
+    assert (decision.decision_type, decision.selected_route_id in NO_DIAGNOSIS_ROUTES) == ("ACT", True)
     assert decision.evaluation_audit_payload["upstream_context"]["episode_id"] is None
 
 
@@ -749,7 +759,8 @@ async def test_paypal_capture_ingested_before_approval_makes_the_attempt_ineligi
     _assert_runs_succeeded(e2e.caplog, [capture_id, approval_id])
     prediction = await _for_payment(e2e.Session, FailurePredictionModel, paypal_attempt_id(order_id))
     assert (prediction.prediction_status, prediction.failure_probability) == ("NOT_ELIGIBLE", None)
-    assert await _rows(e2e.Session, InterventionDecisionModel) == []
+    decision = await _for_payment(e2e.Session, InterventionDecisionModel, paypal_attempt_id(order_id))
+    assert (decision.decision_type, decision.gate_verdict) == ("NO_ACTION", "FAILED_TERMINAL_OUTCOME_INGESTED")
     assert await _rows(e2e.Session, InterventionCommandModel) == []
 
 
@@ -773,7 +784,7 @@ async def test_duplicate_paypal_approval_does_not_rerun_the_pipeline(e2e, monkey
 
 
 @pytest.mark.asyncio
-async def test_default_inr_cost_policy_never_acts_on_a_usd_paypal_attempt(e2e):
+async def test_default_policy_scores_a_usd_paypal_attempt_against_its_usd_schedule(e2e):
     e2e.use_fixed_probability(0.90)
     now = datetime.now(timezone.utc)
     order_id = _paypal_order_id()
@@ -783,25 +794,28 @@ async def test_default_inr_cost_policy_never_acts_on_a_usd_paypal_attempt(e2e):
 
     _assert_runs_succeeded(e2e.caplog, [approval_id])
     decision = await _for_payment(e2e.Session, InterventionDecisionModel, paypal_attempt_id(order_id))
-    assert (decision.decision_type, decision.gate_verdict, decision.selected_route_id) == (
-        "NO_ACTION", "FAILED_UNSUPPORTED_COST_CURRENCY", None,
-    )
+    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.1.0")
+    assert decision.selected_route_id in NO_DIAGNOSIS_ROUTES
     gate = decision.evaluation_audit_payload["gates"]["policy_cost_currency"]
-    assert gate == {"passed": False, "details": {
-        "currency": "USD", "policy_cost_currency": "INR",
-        "reason": "Policy route costs are defined in INR; none exist for USD",
+    assert gate == {"passed": True, "details": {
+        "policy_cost_currency": "INR", "cost_schedule_currency": "USD", "supported_cost_currencies": ["INR", "USD"],
     }}
-    assert await _rows(e2e.Session, InterventionCommandModel) == []
+    usd_costs = get_default_policy().cost_schedule("USD").route_costs_minor_units
+    assert {c["route_key"]: c["policy_cost_minor_units"] for c in decision.evaluation_audit_payload["candidates"]} == {
+        route.value: cost for route, cost in usd_costs.items() if route.value in NO_DIAGNOSIS_ROUTES
+    }
+    [command] = await _rows(e2e.Session, InterventionCommandModel)
+    assert (command.payment_attempt_id, command.command_status) == (paypal_attempt_id(order_id), "SUCCEEDED")
 
 
 @pytest.mark.asyncio
-async def test_default_inr_cost_policy_never_acts_on_a_non_inr_razorpay_payment(e2e):
+async def test_default_policy_never_acts_on_a_payment_in_a_currency_without_a_cost_schedule(e2e):
     e2e.use_fixed_probability(0.90)
     now = datetime.now(timezone.utc)
     payment_id = _payment_id()
     await _seed_razorpay_history(e2e.Session, now)
-    source_event_id = f"evt_auth_usd_{payment_id}"
-    body = _razorpay_webhook("payment.authorized", payment_id, int(now.timestamp()), currency="USD")
+    source_event_id = f"evt_auth_jpy_{payment_id}"
+    body = _razorpay_webhook("payment.authorized", payment_id, int(now.timestamp()), currency="JPY")
 
     response = await _post_razorpay(e2e, body, source_event_id)
 
@@ -809,6 +823,7 @@ async def test_default_inr_cost_policy_never_acts_on_a_non_inr_razorpay_payment(
     _assert_runs_succeeded(e2e.caplog, [source_event_id])
     decision = await _for_payment(e2e.Session, InterventionDecisionModel, payment_id)
     assert (decision.decision_type, decision.gate_verdict) == ("NO_ACTION", "FAILED_UNSUPPORTED_COST_CURRENCY")
+    assert decision.evaluation_audit_payload["gates"]["policy_cost_currency"]["details"]["currency"] == "JPY"
     assert await _rows(e2e.Session, InterventionCommandModel) == []
 
 
@@ -901,19 +916,19 @@ async def test_paypal_decline_followed_by_a_successful_retry_keeps_the_first_out
     ]
 
 
-# --- runner threshold ------------------------------------------------------------------------------
+# --- policy thresholds (the runner calls Stage 6 for every prediction) -----------------------------
 
 @pytest.mark.parametrize("probability, expected_decision", [
-    pytest.param(0.30, None, id="below-monitor-threshold"),
-    # Characterization: the policy's MONITOR band starts at 0.35, but the runner only calls Stage 6 above 0.5.
-    pytest.param(0.40, None, id="policy-monitor-band-below-runner-threshold"),
-    pytest.param(0.50, None, id="at-runner-threshold"),
-    pytest.param(math.nextafter(0.5, 1.0), "MONITOR", id="just-above-runner-threshold"),
+    pytest.param(0.30, "NO_ACTION", id="below-monitor-threshold"),
+    pytest.param(0.35, "MONITOR", id="monitor-threshold"),
+    pytest.param(0.40, "MONITOR", id="monitor-band"),
+    pytest.param(0.50, "MONITOR", id="former-runner-threshold"),
+    pytest.param(math.nextafter(0.5, 1.0), "MONITOR", id="just-above-former-runner-threshold"),
     pytest.param(0.55, "MONITOR", id="monitor"),
     pytest.param(0.70, "ACT", id="act-threshold"),
 ])
 @pytest.mark.asyncio
-async def test_stage6_invocation_around_the_runner_threshold(e2e, probability, expected_decision):
+async def test_stage6_records_every_verdict_around_the_policy_thresholds(e2e, probability, expected_decision):
     e2e.use_fixed_probability(probability)
     now = datetime.now(timezone.utc)
     payment_id = _payment_id()
@@ -929,8 +944,11 @@ async def test_stage6_invocation_around_the_runner_threshold(e2e, probability, e
     counts = await _counts(e2e.Session)
     assert (counts["payment_outcome_observations"], counts["counterfactual_attributions"]) == (0, 0)
 
-    if expected_decision is None:
-        assert (decisions, commands) == ([], [])
+    if expected_decision == "NO_ACTION":
+        assert [(d.decision_type, d.selected_route_id, d.gate_verdict) for d in decisions] == [
+            ("NO_ACTION", None, "PASSED"),
+        ]
+        assert commands == []
     elif expected_decision == "MONITOR":
         assert [(d.decision_type, d.selected_route_id) for d in decisions] == [("MONITOR", None)]
         assert commands == []
@@ -985,7 +1003,9 @@ async def test_degraded_context_without_razorpay_history_records_insufficient_da
     prediction = await _for_payment(e2e.Session, FailurePredictionModel, payment_id)
     assert (prediction.prediction_status, prediction.failure_probability) == ("INSUFFICIENT_DATA", None)
     assert prediction.feature_snapshot["is_in_active_degradation"] is True
-    assert await _rows(e2e.Session, InterventionDecisionModel) == []
+    decision = await _for_payment(e2e.Session, InterventionDecisionModel, payment_id)
+    assert (decision.decision_type, decision.gate_verdict) == ("NO_ACTION", "FAILED_STAGE5_INELIGIBLE")
+    assert await _rows(e2e.Session, InterventionCommandModel) == []
 
 
 @pytest.mark.asyncio

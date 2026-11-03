@@ -15,7 +15,7 @@ def test_default_policy_catalogue_integrity():
     policy = get_default_policy()
 
     assert policy.policy_id == "default-recovery-v1"
-    assert policy.policy_version == "1.0.0"
+    assert policy.policy_version == "1.1.0"
     assert policy.kill_switch_enabled is False
     assert 0.0 < policy.act_risk_threshold <= 1.0
     assert 0.0 < policy.monitor_risk_threshold < policy.act_risk_threshold
@@ -37,6 +37,14 @@ def test_default_policy_catalogue_integrity():
         assert isinstance(route_def.policy_recovery_rate, Decimal)
         assert 0 < route_def.policy_recovery_rate <= Decimal("1.0")
         assert isinstance(route_def.policy_cost_minor_units, int)
+
+    # Every additional cost schedule prices every route explicitly, in whole minor units
+    assert policy.supported_cost_currencies == ("INR", "USD")
+    for currency in policy.supported_cost_currencies:
+        schedule = policy.cost_schedule(currency)
+        assert set(schedule.route_costs_minor_units) == expected_routes
+        assert all(isinstance(cost, int) and cost >= 0 for cost in schedule.route_costs_minor_units.values())
+        assert schedule.min_policy_utility_threshold >= Decimal("0")
         assert route_def.policy_cost_minor_units >= 0
         assert route_def.cooldown_seconds > 0
         assert len(route_def.target_dimensions) > 0
