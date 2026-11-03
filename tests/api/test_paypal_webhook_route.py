@@ -18,7 +18,7 @@ from src.api.routes import MAX_PAYPAL_WEBHOOK_BODY_BYTES
 from src.core.domain.exceptions import PersistenceError
 from src.core.services.paypal_ingestion_service import PayPalIngestionService
 from src.infrastructure.database import get_db_session
-from src.infrastructure.models import PaymentEventModel, RawIngestionRecordModel
+from src.infrastructure.models import PaymentEventModel, PipelineRunModel, RawIngestionRecordModel
 from src.infrastructure.paypal_client import PayPalClient
 from src.infrastructure.repository import SQLIngestionRepository
 from src.main import app
@@ -401,7 +401,8 @@ def test_unexpected_database_failure_logs_never_include_sql_parameters(intake, c
     assert sentinel not in response.text
     assert len(stub.verify_requests) == 1
     assert session.calls == ["execute", "commit", "rollback"]
-    assert [type(m) for m in session.added] == [RawIngestionRecordModel, PaymentEventModel]
+    # The outbox row was part of the failed transaction, so it is rolled back with the event.
+    assert [type(m) for m in session.added] == [RawIngestionRecordModel, PaymentEventModel, PipelineRunModel]
     for record in caplog.records:
         assert sentinel not in record.getMessage()
         assert record.exc_info is None or sentinel not in logging.Formatter().formatException(record.exc_info)

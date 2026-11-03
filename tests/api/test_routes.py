@@ -24,7 +24,7 @@ from src.core.domain.exceptions import (
 )
 from src.core.services.ingestion_service import IngestionService
 from src.infrastructure.database import engine as app_engine, get_db_session
-from src.infrastructure.models import PaymentEventModel, RawIngestionRecordModel
+from src.infrastructure.models import PaymentEventModel, PipelineRunModel, RawIngestionRecordModel
 from src.infrastructure.repository import SQLIngestionRepository
 
 client = TestClient(app)
@@ -345,7 +345,8 @@ def test_configured_secret_accepts_correctly_signed_webhook(razorpay_intake, mon
     assert response.json()["status"] == "success"
     [session] = razorpay_intake
     assert session.commits == 1
-    assert [type(m) for m in session.added] == [RawIngestionRecordModel, PaymentEventModel]
+    # The pipeline run (outbox) is committed in the same single transaction as the event.
+    assert [type(m) for m in session.added] == [RawIngestionRecordModel, PaymentEventModel, PipelineRunModel]
     (scheduled_event,) = run_live_pipeline.call_args.args
     assert str(scheduled_event.event_id) == response.json()["event_id"]
     assert RAZORPAY_TEST_SECRET not in response.text

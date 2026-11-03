@@ -23,6 +23,7 @@ BASE_REVISION = "8b9c0d1e2f3a"
 REVISION_A = "9d2e4f6a8b1c"
 REVISION_B = "e2d3c4b5a6f7"
 REVISION_C = "f4a5b6c7d8e9"
+REVISION_D = "a7b8c9d0e1f2"
 
 
 def render(*args, config_path=PROJECT_ROOT / "alembic.ini"):
@@ -53,8 +54,8 @@ class TestDestinationArgumentIsNotReliable:
         return ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
 
     def test_symbolic_and_full_ids_resolve(self, script):
-        assert script.as_revision_number("head") == REVISION_C
-        assert script.as_revision_number("heads") == (REVISION_C,)
+        assert script.as_revision_number("head") == REVISION_D
+        assert script.as_revision_number("heads") == (REVISION_D,)
         assert script.as_revision_number(REVISION_A) == REVISION_A
         assert script.as_revision_number(REVISION_B) == REVISION_B
         assert script.as_revision_number(REVISION_C) == REVISION_C
@@ -66,7 +67,7 @@ class TestDestinationArgumentIsNotReliable:
 
 
 class TestFinalStateGuardOnRealMigrations:
-    """DF-2 on the real chain, where Revision C is currently the head and Revision A is intermediate."""
+    """DF-2 on the real chain, where Revision D is currently the head and Revision A is intermediate."""
 
     @pytest.mark.parametrize(
         "args",
@@ -76,7 +77,7 @@ class TestFinalStateGuardOnRealMigrations:
             ("upgrade", f"{BASE_REVISION}:{REVISION_A}"),
             ("upgrade", f"{BASE_REVISION}:+1"),
             ("upgrade", "8b9c:9d2e"),
-            ("upgrade", f"{BASE_REVISION}:head-2"),
+            ("upgrade", f"{BASE_REVISION}:head-3"),
         ],
         ids=["full", "partial", "range", "relative", "partial-range", "relative-head"],
     )
@@ -127,6 +128,14 @@ class TestFinalStateGuardOnRealMigrations:
         sql = render(*args)
         assert f"version_num='{REVISION_B}'" in sql
         assert not ends_with_assertion(sql)
+
+    @pytest.mark.parametrize(
+        "args",
+        [("upgrade", "head"), ("upgrade", REVISION_D), ("upgrade", f"{REVISION_C}:{REVISION_D}"), ("downgrade", f"{REVISION_D}:{REVISION_C}")],
+        ids=["head", "full", "c-to-d", "d-to-c"],
+    )
+    def test_runs_ending_at_revision_c_or_d_emit_no_assertion(self, args):
+        assert not ends_with_assertion(render(*args))
 
     @pytest.mark.parametrize(
         "args",

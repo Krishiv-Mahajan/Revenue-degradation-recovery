@@ -586,9 +586,10 @@ async def test_replaying_the_pipeline_for_stored_events(e2e):
     async with e2e.Session() as session:
         capture_replay = await live_pipeline.run_live_pipeline(_domain_event(stored_capture), session=session)
 
-    # Characterization: the replay re-observes at the same as_of, which the (command_id, as_of_timestamp)
-    # unique constraint rejects; the runner rolls Stages 5-8 back and reports the failure.
-    assert (capture_replay["status"], capture_replay["failed_stage"]) == ("failed", "STAGE_7_OBSERVATION_TERMINAL")
+    # The replay reaches the same as-of boundary: the observation and attribution recorded there already
+    # exist, so the replay succeeds without rewriting them (it used to fail on the unique constraint).
+    assert capture_replay["status"] == "success", capture_replay
+    assert (capture_replay["observation"], capture_replay["attribution"]) == (None, None)
     after_capture_replay = await _counts(e2e.Session)
     assert {table: after_capture_replay[table] for table in STAGE_5_TO_8_TABLES} == {
         table: before[table] for table in STAGE_5_TO_8_TABLES

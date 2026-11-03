@@ -101,7 +101,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | B | Done | see B log | USD cost schedule; pre-gate removed; model identity in the decision audit; executor context |
 | C | Done | see C log | Pinned, validated live-model selection with heuristic fallback |
 | D | Done (sandbox calls blocked by credentials) | see D log | Real PayPal Orders v2 recovery checkout executor, recovery outcome observation, webhook routing |
-| E | Not started | | |
+| E | Done | see E log | Transactional outbox, claim/lease, reconciler, idempotent capture replay |
 | F | Not started | | |
 | G | Not started | | |
 | H | Not started | | |
@@ -180,6 +180,33 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Offline: 1,638 passed, 0 skipped.
   - PostgreSQL integration + API: 682 passed, 0 skipped.
 - **Blocked:** a real sandbox call (smoke script or pipeline) needs sandbox REST credentials, which are not configured. Run `PAYPAL_CLIENT_ID=… PAYPAL_CLIENT_SECRET=… python -m scripts.paypal_sandbox_recovery_smoke` to verify.
+
+### Milestone E log (2026-11-03)
+
+- **Problem:** the route committed the event and then ran Stages 2–8 in a FastAPI background task, so a crash or restart in between lost the run silently.
+- **Implemented:**
+  - **Outbox:** Revision D (`a7b8c9d0e1f2`) adds `pipeline_runs`.
+    - Columns: event id, provider, status, attempts, last failed stage, last error *type*, and timestamps.
+    - Constraints: status and attempts CHECKs, and a composite FK `(event_id, source_system) → payment_events`.
+    - `SQLIngestionRepository.save_ingestion` writes the PENDING row in the **same commit** as the raw record and event, for every event that needs the pipeline. `pipeline_required()` is shared with the PayPal route, so scheduling and the outbox cannot drift apart.
+    - No backfill: the processing state of earlier events is unknown.
+  - **Claim/lease:** the background path (`run_live_pipeline` without a session) atomically claims the run (PENDING/FAILED, or RUNNING older than a 10-minute lease), runs the unchanged pipeline, then records SUCCEEDED or FAILED.
+    - At most 5 attempts.
+    - Only the exception type is stored, never the message, because messages can carry SQL parameters.
+    - A completed or exhausted run is skipped, and an event without a row (stored before the outbox existed) runs untracked as before.
+  - **Reconciler:** `reconcile_pipeline_runs()` replays PENDING runs older than 30 s, FAILED runs with attempts left, and abandoned RUNNING runs. Available as `scripts/reconcile_pipeline_runs.py` (cron) and as an optional in-app loop (`PIPELINE_RECONCILE_INTERVAL_SECONDS`, off by default).
+  - **Idempotent replay:** a terminal event replayed at an already-recorded as-of boundary no longer fails on the `(command_id, as_of_timestamp)` unique constraint. The recorded observation and attribution are reused, and the same applies to recovery-order outcomes.
+- **Tests:**
+  - New `tests/integration/test_pipeline_outbox.py` (8 tests, PostgreSQL): the row is stored with the event; events that need no pipeline get no row; a lost background task is replayed exactly once and a late task is skipped; a failure is retried and records only the error type; exhausted runs stay unclaimed; a lease is respected, then reclaimed; untracked legacy events still run; the outbox FK is enforced.
+  - New `tests/migration/test_revision_d.py`: exact C ↔ D round trip, no backfill.
+- **Revised tests:**
+  - The capture-replay characterization now asserts success with no new rows.
+  - Two route tests and one bridge test now include the outbox row in the ingestion transaction.
+  - Head pins moved to Revision D, and the Revision C round trip re-upgrades to C explicitly.
+- **Results:**
+  - Offline: 1,648 passed.
+  - PostgreSQL integration + API: 690 passed.
+  - Migration: see the commit message.
 
 ## 4. External blockers
 

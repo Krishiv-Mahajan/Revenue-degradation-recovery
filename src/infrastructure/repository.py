@@ -6,7 +6,9 @@ from sqlalchemy.exc import IntegrityError
 from src.core.services.ingestion_service import IngestionRepository
 from src.core.domain.models import RawIngestionRecord, PaymentEvent
 from src.core.domain.exceptions import DuplicateEventConflictError, PersistenceError
+from src.core.domain.pipeline_runs import pipeline_required
 from src.infrastructure.models import RawIngestionRecordModel, PaymentEventModel
+from src.infrastructure.pipeline_run_repository import new_pending_run
 
 class SQLIngestionRepository(IngestionRepository):
     def __init__(self, session: AsyncSession):
@@ -67,6 +69,11 @@ class SQLIngestionRepository(IngestionRepository):
         try:
             self.session.add(raw_model)
             self.session.add(event_model)
+            # Transactional outbox: the pipeline run is stored with the event or not at all.
+            if pipeline_required(payment_event):
+                self.session.add(
+                    new_pending_run(payment_event.event_id, payment_event.source_system, payment_event.ingested_at)
+                )
             await self.session.commit()
         except IntegrityError as e:
             await self.session.rollback()

@@ -109,6 +109,37 @@ class PaymentAttemptModel(Base):
         ),
     )
 
+class PipelineRunModel(Base):
+    """
+    Transactional outbox: one row per stored event that needs the pipeline, written in the same
+    transaction as the event. status and attempts are the only mutable fields.
+    """
+    __tablename__ = "pipeline_runs"
+
+    event_id = Column(UUID(as_uuid=True), primary_key=True)
+    source_system = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False)
+    attempts = Column(Integer, nullable=False)
+    last_failed_stage = Column(String(64), nullable=True)
+    last_error_type = Column(String(128), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')", name="ck_pipeline_run_status"
+        ),
+        CheckConstraint("attempts >= 0", name="ck_pipeline_run_attempts"),
+        ForeignKeyConstraint(
+            ['event_id', 'source_system'],
+            ['payment_events.event_id', 'payment_events.source_system'],
+            name='fk_pipeline_run_event',
+        ),
+        Index("ix_pipeline_runs_status_updated", "status", "updated_at"),
+    )
+
+
 class PaymentHealthSnapshotModel(Base):
     __tablename__ = "payment_health_snapshots"
 

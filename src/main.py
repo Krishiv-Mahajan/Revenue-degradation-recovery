@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -22,17 +23,35 @@ from src.api.security import (
 )
 from src.infrastructure.database import get_db_session
 from src.infrastructure.paypal_recovery_executor import close_recovery_clients
+from src.core.services.pipeline_reconciler import run_reconciler_loop
 
 logger = logging.getLogger(__name__)
+
+
+def _reconcile_interval_seconds() -> float:
+    try:
+        interval = float(os.getenv("PIPELINE_RECONCILE_INTERVAL_SECONDS", "0") or 0)
+    except ValueError:
+        logger.error("PIPELINE_RECONCILE_INTERVAL_SECONDS is not a number; the reconciler stays off")
+        return 0.0
+    return interval if interval > 0 else 0.0
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # One PayPalClient per process so the OAuth token cache and connection pool are shared.
     app.state.paypal_client = dependencies.create_paypal_client()
+    # Optional in-process outbox reconciler (off unless PIPELINE_RECONCILE_INTERVAL_SECONDS > 0).
+    stop_reconciler, reconciler = asyncio.Event(), None
+    interval = _reconcile_interval_seconds()
+    if interval:
+        reconciler = asyncio.create_task(run_reconciler_loop(interval, stop_reconciler))
     try:
         yield
     finally:
+        if reconciler is not None:
+            stop_reconciler.set()
+            await reconciler
         paypal_client = app.state.paypal_client
         app.state.paypal_client = None
         if paypal_client is not None:

@@ -27,9 +27,12 @@ from src.core.domain.payment_attempts import (
 )
 from src.core.domain.source_systems import PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.models import (
+    CounterfactualAttributionModel,
     InterventionCommandModel,
+    PaymentOutcomeObservationModel,
 )
 from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
+from src.infrastructure.pipeline_run_repository import ClaimResult, PipelineRunRepository
 from src.infrastructure.paypal_recovery_executor import build_intervention_executor
 
 # Repositories
@@ -76,7 +79,40 @@ async def run_live_pipeline(
         return await _execute_live_pipeline(session, payment_event)
     else:
         async with AsyncSessionLocal() as local_session:
-            return await _execute_live_pipeline(local_session, payment_event)
+            return await _execute_tracked(local_session, payment_event)
+
+
+async def _execute_tracked(session: AsyncSession, payment_event: PaymentEvent) -> Dict[str, Any]:
+    """
+    Background and reconciler entry: claims the event's pipeline_runs row, runs the pipeline and records
+    the outcome. An event stored before the outbox existed has no row and runs untracked, as before.
+    """
+    runs = PipelineRunRepository(session)
+    claim = await runs.claim(payment_event.event_id, datetime.now(timezone.utc))
+    if claim is ClaimResult.NOT_CLAIMABLE:
+        logger.info(
+            f"[LivePipelineSkipped] source_event_id={payment_event.source_event_id} "
+            f"payment_id={payment_event.payment_id}: run already completed, exhausted or claimed elsewhere"
+        )
+        return {"status": "skipped", "payment_id": payment_event.payment_id}
+
+    result = await _execute_live_pipeline(session, payment_event)
+    if claim is ClaimResult.CLAIMED:
+        try:
+            await runs.finish(
+                payment_event.event_id,
+                datetime.now(timezone.utc),
+                succeeded=result["status"] == "success",
+                failed_stage=result.get("failed_stage"),
+                error_type=result.get("error_type"),
+            )
+        except Exception as exc:
+            # The run stays RUNNING; the reconciler reclaims it after the lease and the replay is idempotent.
+            await session.rollback()
+            logger.error(
+                f"[PipelineRunFinishError] source_event_id={payment_event.source_event_id} ({type(exc).__name__})"
+            )
+    return result
 
 
 async def _execute_live_pipeline(
@@ -237,11 +273,13 @@ async def _execute_live_pipeline(
                 if cmd_model is not None and cmd_model.updated_at is not None:
                     as_of_recovery = max(as_of_recovery, _utc(cmd_model.updated_at))
                 current_stage = "STAGE_7_RECOVERY_OBSERVATION"
-                observation = await outcome_obs_svc.observe(recovery_command_id, as_of_timestamp=as_of_recovery)
+                if not await _recorded_as_of(session, PaymentOutcomeObservationModel, recovery_command_id, as_of_recovery):
+                    observation = await outcome_obs_svc.observe(recovery_command_id, as_of_timestamp=as_of_recovery)
                 current_stage = "STAGE_8_RECOVERY_ATTRIBUTION"
-                attribution = await attr_svc.attribute_payment_intervention(
-                    recovery_command_id, as_of_timestamp=as_of_recovery
-                )
+                if not await _recorded_as_of(session, CounterfactualAttributionModel, recovery_command_id, as_of_recovery):
+                    attribution = await attr_svc.attribute_payment_intervention(
+                        recovery_command_id, as_of_timestamp=as_of_recovery
+                    )
             attempt = None
 
         if attempt is not None and attempt.role is PipelineRole.TRIGGER:
@@ -291,10 +329,16 @@ async def _execute_live_pipeline(
 
                 as_of_terminal = max(terminal_ingested, cmd_updated) if cmd_updated else terminal_ingested
 
+                # A replay of the same terminal event reaches the same as-of boundary; the records written
+                # for it then already exist and are identical by construction, so they are not rewritten.
                 current_stage = "STAGE_7_OBSERVATION_TERMINAL"
-                observation = await outcome_obs_svc.observe(cmd_model.command_id, as_of_timestamp=as_of_terminal)
+                if not await _recorded_as_of(session, PaymentOutcomeObservationModel, cmd_model.command_id, as_of_terminal):
+                    observation = await outcome_obs_svc.observe(cmd_model.command_id, as_of_timestamp=as_of_terminal)
                 current_stage = "STAGE_8_ATTRIBUTION_TERMINAL"
-                attribution = await attr_svc.attribute_payment_intervention(cmd_model.command_id, as_of_timestamp=as_of_terminal)
+                if not await _recorded_as_of(session, CounterfactualAttributionModel, cmd_model.command_id, as_of_terminal):
+                    attribution = await attr_svc.attribute_payment_intervention(
+                        cmd_model.command_id, as_of_timestamp=as_of_terminal
+                    )
 
         await session.commit()
         logger.info(
@@ -331,7 +375,14 @@ async def _execute_live_pipeline(
             "payment_id": pid,
             "failed_stage": current_stage,
             "error": str(e),
+            "error_type": type(e).__name__,
         }
+
+
+async def _recorded_as_of(session: AsyncSession, model, command_id, as_of: datetime) -> bool:
+    """Whether an observation or attribution for this command already exists at exactly this as-of boundary."""
+    stmt = select(model.command_id).where(model.command_id == command_id, model.as_of_timestamp == as_of).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 def _utc(value: datetime) -> datetime:

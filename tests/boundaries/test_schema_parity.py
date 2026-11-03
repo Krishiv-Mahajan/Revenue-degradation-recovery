@@ -179,4 +179,5 @@ def test_foreign_keys_declared_on_models(model_ddl):
         "fk_observation_command_attempt",
         "fk_attribution_command_attempt",
         "fk_attribution_decision_attempt",
+        "fk_pipeline_run_event",
     }

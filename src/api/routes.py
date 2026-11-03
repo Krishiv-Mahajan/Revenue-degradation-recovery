@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import logging
 
 from src.api.dependencies import get_ingestion_service, get_paypal_ingestion_service
-from src.core.domain.payment_attempts import resolve_pipeline_attempt
+from src.core.domain.pipeline_runs import pipeline_required
 from src.core.services.ingestion_service import IngestionService
 from src.core.services.paypal_ingestion_service import PayPalIngestionOutcome, PayPalIngestionService
 from src.core.services.live_pipeline import run_live_pipeline
@@ -172,7 +172,8 @@ async def ingest_paypal(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
     if result.outcome is PayPalIngestionOutcome.STORED:
-        if resolve_pipeline_attempt(result.payment_event) is not None:
+        # Same rule as the outbox row written with the event; the reconciler covers a lost task.
+        if pipeline_required(result.payment_event):
             background_tasks.add_task(run_live_pipeline, result.payment_event)
         content = {"status": "stored", "event_id": str(result.payment_event.event_id)}
     else:

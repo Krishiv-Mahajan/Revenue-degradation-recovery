@@ -21,9 +21,16 @@ from src.core.domain.models import PaymentEvent, RawIngestionRecord
 from src.core.execution.simulator import SimulatorInterventionExecutor
 from src.core.services.ingestion_service import IngestionService
 from src.core.services.live_pipeline import run_live_pipeline
-from src.infrastructure.models import PaymentEventModel
+from src.infrastructure.models import PaymentEventModel, PipelineRunModel
 from src.infrastructure.repository import SQLIngestionRepository
 from src.main import app
+
+
+def _not_yet_recorded():
+    """A query result meaning no observation/attribution exists yet at the as-of boundary."""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    return result
 from src.api.dependencies import get_ingestion_service
 
 
@@ -70,9 +77,14 @@ async def test_payment_segment_persistence():
 
     await repo.save_ingestion(raw_record, payment_event)
 
-    # Verify session.add was called twice (raw_record model and payment_event model)
-    assert mock_session.add.call_count == 2
+    # The raw record, the canonical event and its PENDING pipeline run (outbox) are added in one transaction
+    assert mock_session.add.call_count == 3
     added_models = [call.args[0] for call in mock_session.add.call_args_list]
+    [pipeline_run] = [m for m in added_models if isinstance(m, PipelineRunModel)]
+    assert (pipeline_run.event_id, pipeline_run.source_system, pipeline_run.status, pipeline_run.attempts) == (
+        event_id, "razorpay", "PENDING", 0,
+    )
+    mock_session.commit.assert_awaited_once()
 
     event_models = [m for m in added_models if isinstance(m, PaymentEventModel)]
     assert len(event_models) == 1
@@ -508,8 +520,11 @@ async def test_terminal_attribution_invoked_on_captured(
     mock_cmd_query_res = MagicMock()
     mock_cmd_query_res.scalars.return_value.all.return_value = [mock_cmd_model]
 
-    # session.execute sequence: snapshots, episodes, commands
-    mock_session.execute.side_effect = [mock_result_empty, mock_result_empty, mock_cmd_query_res]
+    # session.execute sequence: snapshots, episodes, commands, then "already recorded at this as-of?" for the
+    # observation and the attribution (no: first time)
+    mock_session.execute.side_effect = [
+        mock_result_empty, mock_result_empty, mock_cmd_query_res, _not_yet_recorded(), _not_yet_recorded(),
+    ]
 
     obs_svc_inst = mock_obs_cls.return_value
     obs_svc_inst.observe = AsyncMock(return_value=MagicMock(observation_id=uuid.uuid4(), payment_outcome="CAPTURED"))
@@ -586,7 +601,9 @@ async def test_terminal_as_of_boundary(
     mock_cmd_query_res = MagicMock()
     mock_cmd_query_res.scalars.return_value.all.return_value = [mock_cmd_model]
 
-    mock_session.execute.side_effect = [mock_result_empty, mock_result_empty, mock_cmd_query_res]
+    mock_session.execute.side_effect = [
+        mock_result_empty, mock_result_empty, mock_cmd_query_res, _not_yet_recorded(), _not_yet_recorded(),
+    ]
 
     obs_svc_inst = mock_obs_cls.return_value
     obs_svc_inst.observe = AsyncMock(return_value=MagicMock())
