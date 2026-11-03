@@ -21,6 +21,7 @@ from src.api.security import (
     require_dashboard_auth,
 )
 from src.infrastructure.database import get_db_session
+from src.infrastructure.paypal_recovery_executor import close_recovery_clients
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
         app.state.paypal_client = None
         if paypal_client is not None:
             await paypal_client.aclose()
+        await close_recovery_clients()
 
 
 # The default documentation routes are public; the guarded routes below replace them.

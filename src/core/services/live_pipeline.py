@@ -30,6 +30,7 @@ from src.infrastructure.models import (
     InterventionCommandModel,
 )
 from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
+from src.infrastructure.paypal_recovery_executor import build_intervention_executor
 
 # Repositories
 from src.infrastructure.analytics_repository import AnalyticsRepository
@@ -114,8 +115,9 @@ async def _execute_live_pipeline(
         demo_policy = get_default_policy()
         inter_decision_svc = InterventionDecisionService(session, inter_repo, feat_repo, demo_policy)
 
-        # Stage 7 Simulator: strictly SIMULATOR_V1 / simulation mode
-        executor = SimulatorInterventionExecutor(SimulatorMode.ALWAYS_SUCCEED)
+        # Stage 7: SIMULATOR_V1 unless real PayPal sandbox recovery is enabled and configured; real
+        # results are recorded with is_simulation=False and the PayPal executor's name.
+        executor = build_intervention_executor(SimulatorInterventionExecutor(SimulatorMode.ALWAYS_SUCCEED))
         inter_exec_svc = InterventionExecutionService(session, exec_repo, executor)
         outcome_obs_svc = PaymentOutcomeObservationService(session, exec_repo)
         attr_svc = CounterfactualAttributionService(attr_repo)
@@ -221,6 +223,26 @@ async def _execute_live_pipeline(
         command = None
         observation = None
         attribution = None
+        recovery_command_id = None
+
+        # A PayPal order created by a real recovery execution is not a new payment attempt: it is never
+        # registered or predicted, and its verified capture outcome resolves the command that created it.
+        if paypal and attempt is not None:
+            current_stage = "STAGE_7_RECOVERY_LOOKUP"
+            recovery_command_id = await exec_repo.find_command_for_recovery_order(attempt.ref.provider_reference)
+        if recovery_command_id is not None:
+            if attempt.role is PipelineRole.TERMINAL:
+                cmd_model = await session.get(InterventionCommandModel, recovery_command_id)
+                as_of_recovery = _utc(payment_event.ingested_at)
+                if cmd_model is not None and cmd_model.updated_at is not None:
+                    as_of_recovery = max(as_of_recovery, _utc(cmd_model.updated_at))
+                current_stage = "STAGE_7_RECOVERY_OBSERVATION"
+                observation = await outcome_obs_svc.observe(recovery_command_id, as_of_timestamp=as_of_recovery)
+                current_stage = "STAGE_8_RECOVERY_ATTRIBUTION"
+                attribution = await attr_svc.attribute_payment_intervention(
+                    recovery_command_id, as_of_timestamp=as_of_recovery
+                )
+            attempt = None
 
         if attempt is not None and attempt.role is PipelineRole.TRIGGER:
             # Registration commits or rolls back together with the Stage 5-8 records below.
@@ -281,12 +303,14 @@ async def _execute_live_pipeline(
             f"attempt={attempt.payment_attempt_id if attempt else None} "
             f"pred={prediction.failure_probability if prediction else None} "
             f"act={decision.decision_type.value if decision else None} "
-            f"cmd={command.command_id if command else None}"
+            f"cmd={command.command_id if command else None} "
+            f"recovery_cmd={recovery_command_id}"
         )
         return {
             "status": "success",
             "payment_id": pid,
             "payment_attempt_id": attempt.payment_attempt_id if attempt else None,
+            "recovery_command_id": recovery_command_id,
             "prediction": prediction,
             "decision": decision,
             "command": command,
@@ -308,6 +332,10 @@ async def _execute_live_pipeline(
             "failed_stage": current_stage,
             "error": str(e),
         }
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def execution_context(decision, attempt: AttemptRef) -> Dict[str, Any]:

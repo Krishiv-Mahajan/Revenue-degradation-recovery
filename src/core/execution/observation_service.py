@@ -3,8 +3,9 @@ Stage 7 — Payment Outcome Observation Service.
 
 Orchestrates Phase 7B:
 1. Queries Stage 1 canonical payment_events strictly as-of declared as_of_timestamp boundary
-2. Evaluates canonical terminal events (payment.captured, payment.failed)
-3. Maps to PaymentOutcome (CAPTURED, FAILED, UNKNOWN_IN_FLIGHT)
+2. Evaluates canonical terminal events (payment.captured, payment.failed), including verified capture
+   outcomes of PayPal recovery checkout orders created by a real execution of the command
+3. Maps to PaymentOutcome (CAPTURED, FAILED, UNKNOWN_IN_FLIGHT); a captured recovery order is CAPTURED
 4. Preserves conflicting source facts in audit payload with explicit conflict_detected flag
 5. Appends immutable, versioned PaymentOutcomeObservation records
 """
@@ -70,10 +71,35 @@ class PaymentOutcomeObservationService:
             source_system=cmd.source_system,
         )
 
+        # Recovery checkout orders created by a real (non-simulated) execution of this command, and
+        # their verified capture outcomes as-of the same boundary.
+        recovery_order_ids = await self.execution_repo.get_recovery_order_ids(command_id)
+        recovery_events = await self.execution_repo.get_recovery_terminal_events(recovery_order_ids, as_of)
+        recovery_capture = next((e for e in recovery_events if e.event_type == "payment.captured"), None)
+
         now = datetime.now(timezone.utc)
 
-        # 3. Derive PaymentOutcome from canonical facts
-        if not terminal_events:
+        # 3. Derive PaymentOutcome from canonical facts. A captured recovery order means the payer
+        # completed the purchase through the recovery link, whatever the original attempt's outcome.
+        if recovery_capture is not None:
+            outcome = PaymentOutcome.CAPTURED
+            terminal_event_id = recovery_capture.event_id
+            terminal_event_type = recovery_capture.event_type
+            terminal_event_timestamp = recovery_capture.timestamp
+            time_to_outcome_ms = max(0, int((recovery_capture.timestamp - cmd.created_at).total_seconds() * 1000))
+            original_captured = any(e.event_type == "payment.captured" for e in terminal_events)
+            audit_payload = {
+                "terminal_event_count": len(terminal_events) + len(recovery_events),
+                # The original attempt was also captured: the payer may have paid twice.
+                "conflict_detected": original_captured,
+                "conflicting_events": _event_list(terminal_events) if original_captured else [],
+                "canonical_selected_event": {
+                    "event_id": str(recovery_capture.event_id),
+                    "event_type": recovery_capture.event_type,
+                    "ingested_at": recovery_capture.ingested_at.isoformat() if recovery_capture.ingested_at else None,
+                },
+            }
+        elif not terminal_events:
             outcome = PaymentOutcome.UNKNOWN_IN_FLIGHT
             terminal_event_id = None
             terminal_event_type = None
@@ -102,15 +128,7 @@ class PaymentOutcomeObservationService:
             delta_ms = int((first_event.timestamp - cmd.created_at).total_seconds() * 1000)
             time_to_outcome_ms = max(0, delta_ms)
 
-            conflicting_list = [
-                {
-                    "event_id": str(e.event_id),
-                    "event_type": e.event_type,
-                    "timestamp": e.timestamp.isoformat() if e.timestamp else None,
-                    "ingested_at": e.ingested_at.isoformat() if e.ingested_at else None,
-                }
-                for e in terminal_events
-            ]
+            conflicting_list = _event_list(terminal_events)
 
             audit_payload = {
                 "terminal_event_count": len(terminal_events),
@@ -121,6 +139,14 @@ class PaymentOutcomeObservationService:
                     "event_type": first_event.event_type,
                     "ingested_at": first_event.ingested_at.isoformat() if first_event.ingested_at else None,
                 },
+            }
+
+        if recovery_order_ids:
+            audit_payload["recovery"] = {
+                "order_ids": recovery_order_ids,
+                "recovered_via_recovery_order": recovery_capture is not None,
+                "terminal_events": _event_list(recovery_events),
+                "original_attempt_events": _event_list(terminal_events),
             }
 
         # 4. Version allocation and deterministic observation ID
@@ -147,3 +173,15 @@ class PaymentOutcomeObservationService:
 
         await self.execution_repo.insert_payment_outcome_observation(observation)
         return observation
+
+
+def _event_list(events) -> list:
+    return [
+        {
+            "event_id": str(e.event_id),
+            "event_type": e.event_type,
+            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+            "ingested_at": e.ingested_at.isoformat() if e.ingested_at else None,
+        }
+        for e in events
+    ]

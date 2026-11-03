@@ -100,7 +100,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | A | Done | (with B) | Revision C verified: constraints, round trip and rejections against PostgreSQL; CI run 41667680881 green on `5c601c4`. In the live pipeline, attempt registration and Stage 5–8 writes commit in one transaction. No code change. |
 | B | Done | see B log | USD cost schedule; pre-gate removed; model identity in the decision audit; executor context |
 | C | Done | see C log | Pinned, validated live-model selection with heuristic fallback |
-| D | Not started | | |
+| D | Done (sandbox calls blocked by credentials) | see D log | Real PayPal Orders v2 recovery checkout executor, recovery outcome observation, webhook routing |
 | E | Not started | | |
 | F | Not started | | |
 | G | Not started | | |
@@ -144,6 +144,42 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Offline: 1,594 passed, 0 skipped.
   - PostgreSQL integration + API: 681 passed, 0 skipped.
 - **Remaining:** a provider-trained model can only be accepted after an offline provider evaluation on genuine traffic, which this environment does not have.
+
+### Milestone D log (2026-11-03)
+
+- **Recovery action:** for an ACT decision on FALLBACK_PAYMENT_LINK, create a PayPal Orders v2 checkout (`POST /v2/checkout/orders`, intent CAPTURE) for the amount and currency Stage 6 recorded, and record its approval link.
+  - **No money moves when an order is created.** The payer must approve it at PayPal, and capture is a separate merchant step that this engine never performs.
+  - The link is **not delivered** to the payer by the engine; the recorded payload says so. Delivery needs a merchant channel.
+  - This was chosen because it is a documented, legitimate, non-financial API action that genuinely gives the customer a second way to pay.
+- **Client** (`src/infrastructure/paypal_client.py`):
+  - `create_order` and `get_order`, using the existing OAuth token cache.
+  - `PayPal-Request-Id` set to the command's idempotency key, so PayPal deduplicates retries and replays (HTTP 200 marks a replay).
+  - Bounded retries (0.5 s, then 1 s) on timeouts, transport errors, 429 and 5xx, with the same request id; one token refresh on 401.
+  - Typed errors: `PayPalTimeoutError`, `PayPalRequestRejectedError` (carries PayPal's issue code), `PayPalAuthError`, `PayPalUnavailableError`.
+  - Amounts are formatted by currency exponent, failing closed for unsupported currencies.
+  - An approval URL is accepted only if it is https on a paypal.com host.
+- **Executor** (`src/infrastructure/paypal_recovery_executor.py`):
+  - `PayPalRecoveryCheckoutExecutor` is sandbox-only: live is refused before any request. The kill switch `PAYPAL_RECOVERY_EXECUTION_ENABLED=true` is checked at execution time.
+  - Every outcome is classified, never raised: SUCCESS, TIMEOUT, or FAILURE with an explicit code.
+  - Results are always `is_simulation=false` under executor name `PAYPAL_ORDERS_V2_SANDBOX`.
+  - `RecoveryRoutingExecutor` sends unsupported routes to the labelled simulator.
+  - `build_intervention_executor` returns the simulator unless recovery is enabled and a sandbox config is present.
+  - Persistence: the command and append-only execution attempt record the order id, status, approval URL, amount, debug id, replay flag and attempt count.
+- **Observation** (`observation_service.py`, `execution_repository.py`):
+  - Recovery orders come only from real, successful execution attempts.
+  - Their verified PayPal capture webhooks resolve the command. A completed recovery capture is CAPTURED, even after the original order was declined, and the audit records it under `recovery`.
+  - A capture on both the original and the recovery order is flagged as a conflict (possible double payment).
+  - Commands without a recovery order produce exactly the same audit as before.
+- **Routing** (`live_pipeline.py`): PayPal events for a recovery order are never registered as attempts. Their capture outcomes run observation and attribution for the command that created the order.
+- **Tests:**
+  - `tests/unit/test_paypal_recovery_executor.py` (MockTransport, isolated testing only): success, replay, retries with the same request id, token refresh, timeout, 5xx, 422 issue codes, auth rejection without secrets, non-PayPal approval URLs, malformed responses, refusals that make no request, routing, factory and kill switch.
+  - `tests/integration/test_live_pipeline_e2e.py::test_real_paypal_recovery_checkout_is_executed_observed_and_attributed` (PostgreSQL, real routes): ACT → real-executor checkout → original decline (FAILED) → recovery approval (no new attempt) → recovery capture (CAPTURED via the recovery order) → attribution ATTRIBUTED with `is_simulated_execution=false`.
+  - Two unit stubs were updated for the new recovery-order lookup query; their assertions now check the lookup explicitly.
+- **Sandbox smoke:** `scripts/paypal_sandbox_recovery_smoke.py` creates, replays and reads one sandbox order. It refuses live and touches no database.
+- **Results:**
+  - Offline: 1,638 passed, 0 skipped.
+  - PostgreSQL integration + API: 682 passed, 0 skipped.
+- **Blocked:** a real sandbox call (smoke script or pipeline) needs sandbox REST credentials, which are not configured. Run `PAYPAL_CLIENT_ID=… PAYPAL_CLIENT_SECRET=… python -m scripts.paypal_sandbox_recovery_smoke` to verify.
 
 ## 4. External blockers
 

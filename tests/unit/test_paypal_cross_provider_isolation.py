@@ -436,6 +436,8 @@ def _stub_live_pipeline_services(monkeypatch):
     result = MagicMock()
     result.fetchall.return_value = []
     result.scalars.return_value.all.return_value = []
+    # No PayPal order in these tests is a recovery checkout created by the engine.
+    result.scalar_one_or_none.return_value = None
     session.execute.return_value = result
     return session, prediction_service
 
@@ -475,7 +477,15 @@ async def test_paypal_order_approval_enters_prediction_as_its_own_paypal_attempt
     )
     live_pipeline.PaymentAttemptRepository.return_value.register.assert_awaited_once_with(event)
     _assert_stages_2_to_4_skipped()
-    session.execute.assert_not_awaited()
+    # The only query is the recovery-order check, keyed by this order's id.
+    [recovery_lookup] = session.execute.await_args_list
+    _assert_recovery_order_lookup(recovery_lookup, samples.ORDER_ID)
+
+
+def _assert_recovery_order_lookup(call, order_id):
+    statement, params = call.args
+    assert "provider_response_payload ->> :key = :order_id" in str(statement)
+    assert (params["key"], params["order_id"]) == ("paypal_order_id", order_id)
 
 
 @pytest.mark.parametrize("builder", TERMINAL_BUILDERS)
@@ -488,7 +498,8 @@ async def test_paypal_capture_outcomes_look_up_commands_of_their_order_attempt_o
     assert outcome["payment_attempt_id"] == PAYPAL_ATTEMPT_ID
     prediction_service.orchestrate_prediction.assert_not_awaited()
     _assert_stages_2_to_4_skipped()
-    [call] = session.execute.await_args_list
+    recovery_lookup, call = session.execute.await_args_list
+    _assert_recovery_order_lookup(recovery_lookup, samples.ORDER_ID)
     command_lookup = call.args[0]
     assert command_lookup.get_final_froms() == [InterventionCommandModel.__table__]
     assert list(command_lookup.compile().params.values()) == [PAYPAL_ATTEMPT_ID]

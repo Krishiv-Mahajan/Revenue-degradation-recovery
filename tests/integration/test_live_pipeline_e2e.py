@@ -1114,3 +1114,103 @@ async def test_mixed_provider_and_mixed_currency_e2e_summary_and_recovery_safety
     assert ledger_map[rzp_pid]["source_system"] == "razorpay"
     assert ledger_map[pp_attempt_id]["provider"] == "paypal"
     assert ledger_map[pp_attempt_id]["source_system"] == "paypal"
+
+
+# --- real PayPal recovery checkout (only PayPal's HTTP API is replaced, in-process) ----------------
+
+def _use_paypal_recovery_executor(monkeypatch, recovery_order_id):
+    """The real PayPal recovery executor and client, with PayPal's HTTP API served by MockTransport."""
+    import httpx
+
+    from src.core.execution.simulator import SimulatorInterventionExecutor
+    from src.infrastructure.paypal_client import PayPalClient, PayPalConfig
+    from src.infrastructure.paypal_recovery_executor import PayPalRecoveryCheckoutExecutor, RecoveryRoutingExecutor
+
+    order_requests = []
+
+    def paypal_api(request):
+        if request.url.path == "/v1/oauth2/token":
+            return httpx.Response(200, json={"access_token": "sandbox-token", "token_type": "Bearer", "expires_in": 3600})
+        order_requests.append(request)
+        return httpx.Response(201, json={
+            "id": recovery_order_id, "status": "PAYER_ACTION_REQUIRED",
+            "links": [{"rel": "payer-action", "href": f"https://www.sandbox.paypal.com/checkoutnow?token={recovery_order_id}"}],
+        })
+
+    client = PayPalClient(
+        PayPalConfig(client_id="sandbox-client", client_secret="sandbox-secret"),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(paypal_api)),
+    )
+    executor = RecoveryRoutingExecutor(
+        PayPalRecoveryCheckoutExecutor(client, enabled=lambda: True), SimulatorInterventionExecutor()
+    )
+    monkeypatch.setattr(live_pipeline, "build_intervention_executor", lambda simulator: executor)
+    return order_requests
+
+
+@pytest.mark.asyncio
+async def test_real_paypal_recovery_checkout_is_executed_observed_and_attributed(e2e, monkeypatch):
+    from src.infrastructure.models import PaymentAttemptModel
+
+    e2e.use_fixed_probability(0.90)
+    now = datetime.now(timezone.utc)
+    order_id, recovery_order_id = _paypal_order_id(), _paypal_order_id()
+    attempt_id = paypal_attempt_id(order_id)
+    order_requests = _use_paypal_recovery_executor(monkeypatch, recovery_order_id)
+    await _seed_paypal_history(e2e.Session, now)
+
+    # 1. The approved order is at risk: ACT on the fallback payment link, executed for real.
+    approval_id = await _approve_paypal_order(e2e, order_id, now)
+    decision = await _for_payment(e2e.Session, InterventionDecisionModel, attempt_id)
+    assert (decision.decision_type, decision.selected_route_id) == ("ACT", "FALLBACK_PAYMENT_LINK")
+    command = await _for_payment(e2e.Session, InterventionCommandModel, attempt_id)
+    execution = await _one(
+        e2e.Session, InterventionExecutionAttemptModel, InterventionExecutionAttemptModel.command_id == command.command_id,
+    )
+    assert (execution.executor_name, execution.is_simulation, execution.execution_status, execution.provider_response_code) == (
+        "PAYPAL_ORDERS_V2_SANDBOX", False, "SUCCESS", "PAYER_ACTION_REQUIRED",
+    )
+    payload = execution.provider_response_payload
+    assert (payload["paypal_order_id"], payload["amount"], payload["environment"]) == (
+        recovery_order_id, {"currency_code": "USD", "value": "500.00"}, "sandbox",
+    )
+    [order_request] = order_requests
+    assert order_request.headers["PayPal-Request-Id"] == command.idempotency_key
+    assert json.loads(order_request.content)["purchase_units"][0]["custom_id"] == str(command.command_id)
+
+    # 2. The original order's capture is declined, then the payer pays through the recovery checkout.
+    decline_id = await _settle_paypal_capture(e2e, samples.capture_declined, order_id, now)
+    recovery_approval_id = await _approve_paypal_order(e2e, recovery_order_id, now)
+    recovery_capture_id = await _settle_paypal_capture(e2e, samples.capture_completed, recovery_order_id, now, delay=45)
+    _assert_runs_succeeded(e2e.caplog, [approval_id, decline_id, recovery_approval_id, recovery_capture_id])
+
+    # The recovery order is never registered or predicted as a payment attempt of its own.
+    assert {a.payment_attempt_id for a in await _rows(e2e.Session, PaymentAttemptModel)} == {attempt_id}
+    assert {p.payment_attempt_id for p in await _rows(e2e.Session, FailurePredictionModel)} == {attempt_id}
+
+    # 3. Observation: FAILED after the decline, then CAPTURED through the recovery order.
+    observations = sorted(
+        await _rows(e2e.Session, PaymentOutcomeObservationModel, PaymentOutcomeObservationModel.command_id == command.command_id),
+        key=lambda o: o.observation_version,
+    )
+    assert [(o.observation_version, o.payment_outcome) for o in observations] == [(1, "FAILED"), (2, "CAPTURED")]
+    recovery_capture = await _one(e2e.Session, PaymentEventModel, PaymentEventModel.source_event_id == recovery_capture_id)
+    recovered = observations[-1]
+    assert (recovered.terminal_event_id, recovered.observation_audit_payload["conflict_detected"]) == (
+        recovery_capture.event_id, False,
+    )
+    assert recovered.observation_audit_payload["recovery"]["order_ids"] == [recovery_order_id]
+    assert recovered.observation_audit_payload["recovery"]["recovered_via_recovery_order"] is True
+    assert [e["event_type"] for e in recovered.observation_audit_payload["recovery"]["original_attempt_events"]] == [
+        "payment.failed",
+    ]
+
+    # 4. Attribution: none for the decline; the recovered payment is attributed, as real (not simulated) execution.
+    attributions = sorted(
+        await _rows(e2e.Session, CounterfactualAttributionModel, CounterfactualAttributionModel.command_id == command.command_id),
+        key=lambda a: a.attribution_version,
+    )
+    assert [(a.attribution_status, a.attributed_protected_gmv_minor_units, a.is_simulated_execution) for a in attributions] == [
+        ("UNATTRIBUTED_PAYMENT_FAILED", 0, False), ("ATTRIBUTED", 16200, False),
+    ]
+    assert attributions[-1].is_synthetic_baseline is True  # the fixed-probability test model is synthetic

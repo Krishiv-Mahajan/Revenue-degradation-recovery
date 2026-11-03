@@ -13,7 +13,8 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, Mapping, Optional
+from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import SecretStr
@@ -24,6 +25,24 @@ SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
 LIVE_BASE_URL = "https://api-m.paypal.com"
 TOKEN_PATH = "/v1/oauth2/token"
 VERIFY_WEBHOOK_SIGNATURE_PATH = "/v1/notifications/verify-webhook-signature"
+ORDERS_PATH = "/v2/checkout/orders"
+
+# Seconds to wait before the second and third attempt of a retryable Orders API request.
+DEFAULT_ORDER_RETRY_DELAYS = (0.5, 1.0)
+_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+_ORDER_STATUSES = frozenset({"CREATED", "SAVED", "APPROVED", "VOIDED", "COMPLETED", "PAYER_ACTION_REQUIRED"})
+_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,108}$")
+_ISSUE_PATTERN = re.compile(r"^[A-Z0-9_]{1,64}$")
+_APPROVAL_RELS = ("approve", "payer-action")
+
+# Currencies the Orders API accepts (developer.paypal.com/api/rest/reference/currency-codes);
+# HUF, JPY and TWD have no decimal places.
+PAYPAL_ORDER_CURRENCIES = frozenset({
+    "AUD", "BRL", "CAD", "CNY", "CZK", "DKK", "EUR", "HKD", "HUF", "ILS", "INR", "JPY", "MYR", "MXN",
+    "TWD", "NZD", "NOK", "PHP", "PLN", "GBP", "SGD", "SEK", "CHF", "THB", "USD",
+})
+_ZERO_DECIMAL_CURRENCIES = frozenset({"HUF", "JPY", "TWD"})
 
 # Lower-cased transmission header -> verify-webhook-signature request field.
 TRANSMISSION_HEADER_FIELDS = {
@@ -64,6 +83,19 @@ class PayPalAuthError(PayPalClientError):
 class PayPalUnavailableError(PayPalClientError):
     """PayPal could not be reached or returned an unusable response."""
     pass
+
+
+class PayPalTimeoutError(PayPalUnavailableError):
+    """PayPal did not answer in time; the outcome of the request is unknown."""
+    pass
+
+
+class PayPalRequestRejectedError(PayPalClientError):
+    """PayPal rejected an API request as invalid (a 4xx other than authentication); retrying cannot help."""
+
+    def __init__(self, message: str, issue: Optional[str] = None):
+        super().__init__(message)
+        self.issue = issue
 
 
 class PayPalVerificationRequestRejectedError(PayPalClientError):
@@ -159,6 +191,32 @@ class _CachedToken:
 class PayPalWebhookVerification:
     """PayPal's answer for one webhook. verified is True only for verification_status SUCCESS."""
     verified: bool
+
+
+@dataclass(frozen=True)
+class PayPalOrder:
+    """
+    A checkout order as PayPal reported it. approve_url is the payer's approval link, kept only when it
+    is an https paypal.com URL. replayed is True when PayPal answered an earlier request with the same
+    PayPal-Request-Id (HTTP 200) instead of creating a new order (HTTP 201).
+    """
+    order_id: str
+    status: str
+    approve_url: Optional[str]
+    debug_id: Optional[str]
+    replayed: bool
+    http_attempts: int
+
+
+def format_order_amount(amount_minor_units: int, currency: str) -> str:
+    """The Orders API decimal string for an amount in minor units; refuses unsupported currencies."""
+    if currency not in PAYPAL_ORDER_CURRENCIES:
+        raise ValueError(f"PayPal Orders does not support currency {currency!r}")
+    if isinstance(amount_minor_units, bool) or not isinstance(amount_minor_units, int) or amount_minor_units <= 0:
+        raise ValueError("Order amount must be a positive integer number of minor units")
+    if currency in _ZERO_DECIMAL_CURRENCIES:
+        return str(amount_minor_units)
+    return f"{amount_minor_units // 100}.{amount_minor_units % 100:02d}"
 
 
 class PayPalClient:
@@ -345,6 +403,120 @@ class PayPalClient:
             f"PayPal webhook verification response has an unexpected verification_status ({status_info})"
         )
 
+    @property
+    def environment(self) -> PayPalEnvironment:
+        return self._config.environment
+
+    async def create_order(
+        self,
+        *,
+        amount_minor_units: int,
+        currency: str,
+        request_id: str,
+        custom_id: str,
+        reference_id: str,
+        description: str,
+        retry_delays: Tuple[float, ...] = DEFAULT_ORDER_RETRY_DELAYS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> PayPalOrder:
+        """
+        Creates a CAPTURE-intent checkout order. Creating an order moves no money: the payer must approve
+        it, and capture is a separate merchant call this client does not make.
+
+        request_id is sent as PayPal-Request-Id, so retries and repeated calls return the same order
+        instead of creating another. Timeouts, transport errors, 429 and 5xx responses are retried with
+        the same request id after each delay in retry_delays.
+        Raises ValueError for an invalid amount, currency or request id, PayPalRequestRejectedError for
+        other 4xx responses, PayPalAuthError for rejected credentials, PayPalTimeoutError /
+        PayPalUnavailableError when retries are exhausted.
+        """
+        if not isinstance(request_id, str) or not _REQUEST_ID_PATTERN.match(request_id):
+            raise ValueError("PayPal-Request-Id must be 1-108 characters of letters, digits, '_' or '-'")
+        body = {
+            "intent": "CAPTURE",
+            "purchase_units": [{
+                "reference_id": reference_id[:256],
+                "custom_id": custom_id[:127],
+                "description": description[:127],
+                "amount": {"currency_code": currency, "value": format_order_amount(amount_minor_units, currency)},
+            }],
+        }
+        response, attempts = await self._send_with_retries(
+            "POST",
+            ORDERS_PATH,
+            json_body=body,
+            extra_headers={"PayPal-Request-Id": request_id, "Prefer": "return=representation"},
+            retry_delays=retry_delays,
+            sleep=sleep,
+        )
+        return _parse_order(response, attempts, replayed=response.status_code == 200)
+
+    async def get_order(
+        self,
+        order_id: str,
+        retry_delays: Tuple[float, ...] = DEFAULT_ORDER_RETRY_DELAYS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> PayPalOrder:
+        """Reads an order's current status (GET /v2/checkout/orders/{id}); never changes it."""
+        if not isinstance(order_id, str) or not _ORDER_ID_PATTERN.match(order_id):
+            raise ValueError("Invalid PayPal order id")
+        response, attempts = await self._send_with_retries(
+            "GET", f"{ORDERS_PATH}/{order_id}", json_body=None, extra_headers={},
+            retry_delays=retry_delays, sleep=sleep,
+        )
+        return _parse_order(response, attempts, replayed=False)
+
+    async def _send_with_retries(self, method, path, *, json_body, extra_headers, retry_delays, sleep):
+        delays = list(retry_delays)
+        attempts = 0
+        refreshed_token = False
+        while True:
+            attempts += 1
+            access_token = await self.get_access_token()
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                **extra_headers,
+            }
+            if json_body is not None:
+                headers["Content-Type"] = "application/json"
+            try:
+                response = await self._http.request(
+                    method,
+                    f"{self._config.base_url}{path}",
+                    content=None if json_body is None else json.dumps(json_body, separators=(",", ":")),
+                    headers=headers,
+                    timeout=self._timeout,
+                    follow_redirects=False,
+                )
+            except httpx.TimeoutException:
+                error: PayPalClientError = PayPalTimeoutError(f"PayPal {method} {path} timed out")
+            except httpx.HTTPError:
+                error = PayPalUnavailableError(f"PayPal {method} {path} failed before a response was received")
+            else:
+                status_info = _status_info(response)
+                if response.status_code == 401 and not refreshed_token:
+                    self._discard_token(access_token)
+                    refreshed_token = True
+                    continue
+                if response.status_code in (401, 403):
+                    raise PayPalAuthError(f"PayPal rejected the {method} {path} credentials ({status_info})")
+                if response.status_code in _RETRYABLE_STATUSES:
+                    error = PayPalUnavailableError(f"PayPal {method} {path} failed ({status_info})")
+                elif 400 <= response.status_code < 500:
+                    issue = _issue(response)
+                    raise PayPalRequestRejectedError(
+                        f"PayPal rejected {method} {path} ({status_info}{', issue=' + issue if issue else ''})",
+                        issue=issue,
+                    )
+                elif response.status_code in (200, 201):
+                    return response, attempts
+                else:
+                    raise PayPalUnavailableError(f"PayPal {method} {path} returned an unexpected status ({status_info})")
+            if not delays:
+                raise error
+            await sleep(delays.pop(0))
+
     def _discard_token(self, access_token: str) -> None:
         token = self._token
         if token is not None and token.value == access_token:
@@ -391,7 +563,66 @@ def _verification_request_body(transmission: Mapping[str, str], webhook_id: str,
 
 def _status_info(response: httpx.Response) -> str:
     info = f"HTTP {response.status_code}"
-    debug_id = response.headers.get("paypal-debug-id")
-    if debug_id and _DEBUG_ID_PATTERN.match(debug_id):
+    debug_id = _debug_id(response)
+    if debug_id:
         info += f", debug_id={debug_id}"
     return info
+
+
+def _debug_id(response: httpx.Response) -> Optional[str]:
+    debug_id = response.headers.get("paypal-debug-id")
+    return debug_id if debug_id and _DEBUG_ID_PATTERN.match(debug_id) else None
+
+
+def _issue(response: httpx.Response) -> Optional[str]:
+    """PayPal's machine-readable issue code (details[0].issue, else name), if well-formed."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    details = body.get("details")
+    candidate = None
+    if isinstance(details, list) and details and isinstance(details[0], dict):
+        candidate = details[0].get("issue")
+    if not isinstance(candidate, str):
+        candidate = body.get("name")
+    return candidate if isinstance(candidate, str) and _ISSUE_PATTERN.match(candidate) else None
+
+
+def _approval_url(links) -> Optional[str]:
+    if not isinstance(links, list):
+        return None
+    for link in links:
+        if not isinstance(link, dict) or link.get("rel") not in _APPROVAL_RELS:
+            continue
+        href = link.get("href")
+        if not isinstance(href, str):
+            continue
+        parsed = urlsplit(href)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme == "https" and (host == "paypal.com" or host.endswith(".paypal.com")):
+            return href
+    return None
+
+
+def _parse_order(response: httpx.Response, attempts: int, *, replayed: bool) -> PayPalOrder:
+    status_info = _status_info(response)
+    try:
+        body = response.json()
+    except ValueError:
+        raise PayPalUnavailableError(f"PayPal order response is not valid JSON ({status_info})") from None
+    if not isinstance(body, dict):
+        raise PayPalUnavailableError(f"PayPal order response is malformed ({status_info})")
+    order_id, status = body.get("id"), body.get("status")
+    if not isinstance(order_id, str) or not _ORDER_ID_PATTERN.match(order_id) or status not in _ORDER_STATUSES:
+        raise PayPalUnavailableError(f"PayPal order response is malformed ({status_info})")
+    return PayPalOrder(
+        order_id=order_id,
+        status=status,
+        approve_url=_approval_url(body.get("links")),
+        debug_id=_debug_id(response),
+        replayed=replayed,
+        http_attempts=attempts,
+    )

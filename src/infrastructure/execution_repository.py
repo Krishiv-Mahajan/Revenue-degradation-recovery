@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import and_, bindparam, func, select, text, update
+from sqlalchemy import and_, bindparam, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.execution_models import (
@@ -40,6 +40,10 @@ from src.infrastructure.models import (
     PaymentOutcomeObservationModel,
 )
 from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
+
+# Key of the PayPal recovery order id in a real execution attempt's provider_response_payload
+# (written by src/infrastructure/paypal_recovery_executor.py).
+RECOVERY_ORDER_ID_KEY = "paypal_order_id"
 
 
 class ExecutionRepository:
@@ -368,6 +372,54 @@ class ExecutionRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_recovery_order_ids(self, command_id: uuid.UUID) -> List[str]:
+        """
+        PayPal recovery checkout orders created for a command: only from real (is_simulation = false),
+        successful execution attempts, in attempt order. Simulated attempts never yield an order.
+        """
+        stmt = (
+            select(InterventionExecutionAttemptModel.provider_response_payload)
+            .where(
+                InterventionExecutionAttemptModel.command_id == command_id,
+                InterventionExecutionAttemptModel.is_simulation.is_(False),
+                InterventionExecutionAttemptModel.execution_status == ExecutionResultStatus.SUCCESS.value,
+            )
+            .order_by(InterventionExecutionAttemptModel.attempt_number)
+        )
+        order_ids: List[str] = []
+        for payload in (await self.session.execute(stmt)).scalars():
+            order_id = (payload or {}).get(RECOVERY_ORDER_ID_KEY)
+            if isinstance(order_id, str) and order_id not in order_ids:
+                order_ids.append(order_id)
+        return order_ids
+
+    async def get_recovery_terminal_events(self, order_ids: List[str], as_of: datetime) -> List[PaymentEventModel]:
+        """Verified PayPal capture outcomes of recovery orders ingested as-of as_of, by ingested_at ASC."""
+        if not order_ids:
+            return []
+        stmt = (
+            select(PaymentEventModel)
+            .where(
+                or_(*[and_(*paypal_terminal_events(order_id)) for order_id in order_ids]),
+                PaymentEventModel.ingested_at <= as_of,
+            )
+            .order_by(PaymentEventModel.ingested_at.asc(), PaymentEventModel.event_id.asc())
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def find_command_for_recovery_order(self, order_id: str) -> Optional[uuid.UUID]:
+        """The command whose real, successful execution created this PayPal recovery order, if any."""
+        stmt = text(
+            "SELECT command_id FROM intervention_execution_attempts "
+            "WHERE is_simulation = false AND execution_status = :success "
+            "AND provider_response_payload ->> :key = :order_id "
+            "ORDER BY created_at ASC LIMIT 1"
+        )
+        result = await self.session.execute(
+            stmt, {"success": ExecutionResultStatus.SUCCESS.value, "key": RECOVERY_ORDER_ID_KEY, "order_id": order_id}
+        )
+        return result.scalar_one_or_none()
 
     async def get_max_observation_version(self, command_id: uuid.UUID) -> int:
         """
