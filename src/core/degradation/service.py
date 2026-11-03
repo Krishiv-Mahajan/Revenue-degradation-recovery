@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 import uuid
 from datetime import datetime
 
@@ -6,11 +6,13 @@ from src.infrastructure.degradation_repository import DegradationRepository
 from src.core.domain.analytics_models import PaymentHealthSnapshot
 from src.core.degradation.signal import evaluate_snapshot
 from src.core.degradation.state_machine import reconcile_timeline
+from src.core.degradation.zscore import DetectionMode, detection_mode
 from src.core.domain.degradation_models import EpisodeStatus
 
 class DegradationService:
-    def __init__(self, repository: DegradationRepository):
+    def __init__(self, repository: DegradationRepository, mode: Optional[DetectionMode] = None):
         self.repository = repository
+        self.mode = mode or detection_mode()
 
     async def process_snapshots(self, snapshots: List[PaymentHealthSnapshot], evaluation_timestamp: datetime) -> None:
         """
@@ -33,7 +35,7 @@ class DegradationService:
             )
             new_version = max_version + 1
             
-            signal = evaluate_snapshot(snapshot, new_version, evaluation_timestamp)
+            signal = evaluate_snapshot(snapshot, new_version, evaluation_timestamp, self.mode)
             await self.repository.append_signal(signal)
             
         # 2. Fetch the latest evaluations for the entire segment history

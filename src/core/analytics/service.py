@@ -2,7 +2,11 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Set, Tuple
 
 from src.infrastructure.analytics_repository import AnalyticsRepository
-from src.core.analytics.calculator import calculate_health_metrics_for_window, calculate_baseline
+from src.core.analytics.calculator import (
+    calculate_baseline,
+    calculate_baseline_statistics,
+    calculate_health_metrics_for_window,
+)
 
 class PaymentHealthAnalyticsService:
     def __init__(self, repository: AnalyticsRepository):
@@ -39,9 +43,15 @@ class PaymentHealthAnalyticsService:
                 weeks_back=4
             )
             baseline = calculate_baseline(historical_snapshots)
+            mean, stddev, sample_count = calculate_baseline_statistics(historical_snapshots)
 
             # Since Pydantic models are frozen, we must use model_copy(update=...)
-            updated_snapshot = snapshot.model_copy(update={'baseline_success_rate': baseline})
+            updated_snapshot = snapshot.model_copy(update={
+                'baseline_success_rate': baseline,
+                'baseline_mean_success_rate': mean,
+                'baseline_stddev_success_rate': stddev,
+                'baseline_sample_count': sample_count,
+            })
 
             # Replace the snapshot in the list
             idx = snapshots.index(snapshot)

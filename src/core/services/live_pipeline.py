@@ -185,7 +185,8 @@ async def _execute_live_pipeline(
                 SELECT snapshot_id, window_start, window_end, segment_dimension, segment_value,
                        transaction_count, successful_transaction_count, failed_transaction_count,
                        success_rate, failure_rate, total_gmv_minor_units, successful_gmv_minor_units,
-                       failed_gmv_minor_units, baseline_success_rate, insufficient_volume, calculated_at
+                       failed_gmv_minor_units, baseline_success_rate, baseline_mean_success_rate,
+                       baseline_stddev_success_rate, baseline_sample_count, insufficient_volume, calculated_at
                 FROM payment_health_snapshots
                 WHERE window_start >= :w_start AND window_end <= :w_end
                 """
@@ -207,6 +208,9 @@ async def _execute_live_pipeline(
                     successful_gmv_minor_units=row.successful_gmv_minor_units,
                     failed_gmv_minor_units=row.failed_gmv_minor_units,
                     baseline_success_rate=row.baseline_success_rate,
+                    baseline_mean_success_rate=row.baseline_mean_success_rate,
+                    baseline_stddev_success_rate=row.baseline_stddev_success_rate,
+                    baseline_sample_count=row.baseline_sample_count,
                     insufficient_volume=row.insufficient_volume,
                     calculated_at=row.calculated_at,
                 )

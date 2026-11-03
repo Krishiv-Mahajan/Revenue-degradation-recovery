@@ -49,7 +49,9 @@ class DegradationRepository:
             baseline_success_rate=signal.baseline_success_rate,
             absolute_drop=signal.absolute_drop,
             relative_drop=signal.relative_drop,
-            evaluation_timestamp=signal.evaluation_timestamp
+            evaluation_timestamp=signal.evaluation_timestamp,
+            z_score=signal.z_score,
+            z_score_status=signal.z_score_status,
         )
         self.session.add(model)
         await self.session.flush()
@@ -113,7 +115,9 @@ class DegradationRepository:
             baseline_success_rate=model.baseline_success_rate,
             absolute_drop=model.absolute_drop,
             relative_drop=model.relative_drop,
-            evaluation_timestamp=model.evaluation_timestamp
+            evaluation_timestamp=model.evaluation_timestamp,
+            z_score=model.z_score,
+            z_score_status=model.z_score_status,
         )
 
     def _map_to_domain_episode(self, model: DegradationEpisodeModel) -> DegradationEpisode:

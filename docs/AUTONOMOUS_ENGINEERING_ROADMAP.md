@@ -102,7 +102,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | C | Done | see C log | Pinned, validated live-model selection with heuristic fallback |
 | D | Done (sandbox calls blocked by credentials) | see D log | Real PayPal Orders v2 recovery checkout executor, recovery outcome observation, webhook routing |
 | E | Done | see E log | Transactional outbox, claim/lease, reconciler, idempotent capture replay |
-| F | Not started | | |
+| F | Done | see F log | Z-score evidence on every signal; opt-in combined rule; hysteresis unchanged |
 | G | Not started | | |
 | H | Not started | | |
 
@@ -206,6 +206,24 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 - **Results:**
   - Offline: 1,648 passed.
   - PostgreSQL integration + API: 690 passed.
+  - Migration: see the commit message.
+
+### Milestone F log (2026-11-03)
+
+- **Implemented:**
+  - **Stage 2:** besides the median baseline, each snapshot now stores the mean, sample standard deviation and count of the same historical windows (`calculate_baseline_statistics`).
+  - **Stage 3** (`src/core/degradation/zscore.py`): every signal records `z = (rate − mean) / max(stddev, 0.02)` and a status.
+    - Statuses: OK, LOW_VARIANCE (the floor prevents a stable history from exploding a tiny dip), COLD_START, INSUFFICIENT_OBSERVATIONS (fewer than 3), MISSING_RATE.
+    - `DEGRADATION_DETECTION_MODE=threshold` is the default and leaves the frozen rule deciding. `threshold_and_zscore` keeps a threshold BAD only if usable evidence confirms z ≤ −3.
+    - This prevents false positives in volatile segments. Without usable evidence the threshold rule decides alone, so cold starts are never blinded, and a Z-score alone never creates BAD.
+    - Hysteresis is unchanged, because it consumes the resulting signal types.
+  - **Revision E** (`b8c9d0e1f2a3`) adds the five nullable columns, with no backfill.
+- **Tests:**
+  - `tests/unit/test_degradation_zscore.py` (26 tests): every guard, the confirmation threshold, mode parsing, default-mode evidence recording, false-positive suppression, confirmed degradation, cold-start fallback, no Z-only BAD, unchanged pause signals, 3-window hysteresis, and Stage 2 statistics.
+  - `tests/integration/test_degradation_zscore_persistence.py` (PostgreSQL, both modes) and `tests/migration/test_revision_e.py`.
+- **Results:**
+  - Offline: 1,682 passed.
+  - PostgreSQL integration + API: 692 passed.
   - Migration: see the commit message.
 
 ## 4. External blockers

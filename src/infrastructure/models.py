@@ -163,6 +163,9 @@ class PaymentHealthSnapshotModel(Base):
     failed_gmv_minor_units = Column(Integer, nullable=False)
 
     baseline_success_rate = Column(Float, nullable=True)
+    baseline_mean_success_rate = Column(Float, nullable=True)
+    baseline_stddev_success_rate = Column(Float, nullable=True)
+    baseline_sample_count = Column(Integer, nullable=True)
     insufficient_volume = Column(Boolean, nullable=False)
 
     calculated_at = Column(DateTime(timezone=True), nullable=False)
@@ -187,6 +190,8 @@ class DegradationSignalModel(Base):
     baseline_success_rate = Column(Float, nullable=True)
     absolute_drop = Column(Float, nullable=True)
     relative_drop = Column(Float, nullable=True)
+    z_score = Column(Float, nullable=True)
+    z_score_status = Column(String(32), nullable=True)
 
     evaluation_timestamp = Column(DateTime(timezone=True), nullable=False)
 

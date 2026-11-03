@@ -10,10 +10,22 @@ from src.core.domain.degradation_models import (
     MIN_RELATIVE_RATE_DROP,
     MIN_BASELINE_RATE_FOR_RELATIVE_TEST
 )
+from src.core.degradation.zscore import DetectionMode, compute_z_score, confirms_degradation
 
-def evaluate_snapshot(snapshot: PaymentHealthSnapshot, evaluation_version: int, evaluation_timestamp: datetime) -> DegradationSignal:
+def evaluate_snapshot(
+    snapshot: PaymentHealthSnapshot,
+    evaluation_version: int,
+    evaluation_timestamp: datetime,
+    mode: DetectionMode = DetectionMode.THRESHOLD,
+) -> DegradationSignal:
     absolute_drop: Optional[float] = None
     relative_drop: Optional[float] = None
+    evidence = compute_z_score(
+        snapshot.success_rate,
+        snapshot.baseline_mean_success_rate,
+        snapshot.baseline_stddev_success_rate,
+        snapshot.baseline_sample_count,
+    )
     
     if snapshot.baseline_success_rate is None:
         signal_type = SignalType.NO_BASELINE
@@ -40,6 +52,15 @@ def evaluate_snapshot(snapshot: PaymentHealthSnapshot, evaluation_version: int, 
             else:
                 signal_type = SignalType.NORMAL
 
+        # Combined mode: usable statistical evidence must agree before a threshold BAD stands.
+        if (
+            mode is DetectionMode.THRESHOLD_AND_ZSCORE
+            and signal_type == SignalType.BAD
+            and evidence.usable
+            and not confirms_degradation(evidence)
+        ):
+            signal_type = SignalType.NORMAL
+
     return DegradationSignal(
         signal_id=uuid.uuid4(),
         snapshot_id=snapshot.snapshot_id,
@@ -51,5 +72,7 @@ def evaluate_snapshot(snapshot: PaymentHealthSnapshot, evaluation_version: int, 
         baseline_success_rate=snapshot.baseline_success_rate,
         absolute_drop=absolute_drop,
         relative_drop=relative_drop,
-        evaluation_timestamp=evaluation_timestamp
+        evaluation_timestamp=evaluation_timestamp,
+        z_score=evidence.z_score,
+        z_score_status=evidence.status.value,
     )

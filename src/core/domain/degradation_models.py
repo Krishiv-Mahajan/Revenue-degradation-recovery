@@ -52,6 +52,9 @@ class DegradationSignal:
     absolute_drop: Optional[float]
     relative_drop: Optional[float]
     evaluation_timestamp: datetime
+    # Statistical evidence (see src/core/degradation/zscore.py); None for signals recorded before it existed.
+    z_score: Optional[float] = None
+    z_score_status: Optional[str] = None
 
 @dataclass
 class DegradationEpisode:

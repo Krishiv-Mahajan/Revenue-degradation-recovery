@@ -124,6 +124,9 @@ class AnalyticsRepository:
                 successful_gmv_minor_units=m.successful_gmv_minor_units,
                 failed_gmv_minor_units=m.failed_gmv_minor_units,
                 baseline_success_rate=m.baseline_success_rate,
+                baseline_mean_success_rate=m.baseline_mean_success_rate,
+                baseline_stddev_success_rate=m.baseline_stddev_success_rate,
+                baseline_sample_count=m.baseline_sample_count,
                 insufficient_volume=m.insufficient_volume,
                 calculated_at=m.calculated_at
             ))
@@ -149,6 +152,9 @@ class AnalyticsRepository:
                 successful_gmv_minor_units=snapshot.successful_gmv_minor_units,
                 failed_gmv_minor_units=snapshot.failed_gmv_minor_units,
                 baseline_success_rate=snapshot.baseline_success_rate,
+                baseline_mean_success_rate=snapshot.baseline_mean_success_rate,
+                baseline_stddev_success_rate=snapshot.baseline_stddev_success_rate,
+                baseline_sample_count=snapshot.baseline_sample_count,
                 insufficient_volume=snapshot.insufficient_volume,
                 calculated_at=snapshot.calculated_at
             )
@@ -166,6 +172,9 @@ class AnalyticsRepository:
                     'successful_gmv_minor_units': stmt.excluded.successful_gmv_minor_units,
                     'failed_gmv_minor_units': stmt.excluded.failed_gmv_minor_units,
                     'baseline_success_rate': stmt.excluded.baseline_success_rate,
+                    'baseline_mean_success_rate': stmt.excluded.baseline_mean_success_rate,
+                    'baseline_stddev_success_rate': stmt.excluded.baseline_stddev_success_rate,
+                    'baseline_sample_count': stmt.excluded.baseline_sample_count,
                     'insufficient_volume': stmt.excluded.insufficient_volume,
                     'calculated_at': stmt.excluded.calculated_at
                 }

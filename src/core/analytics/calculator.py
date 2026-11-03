@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from uuid import uuid4
 import statistics
 
@@ -98,3 +98,17 @@ def calculate_baseline(historical_snapshots: List[PaymentHealthSnapshot]) -> Opt
     if not rates:
         return None
     return statistics.median(rates)
+
+
+def calculate_baseline_statistics(
+    historical_snapshots: List[PaymentHealthSnapshot],
+) -> Tuple[Optional[float], Optional[float], int]:
+    """
+    (mean, sample standard deviation, sample count) of the historical success rates used for the median
+    baseline. The standard deviation needs at least two rates and is None otherwise.
+    """
+    rates = [s.success_rate for s in historical_snapshots if s.success_rate is not None]
+    if not rates:
+        return None, None, 0
+    stddev = statistics.stdev(rates) if len(rates) >= 2 else None
+    return statistics.fmean(rates), stddev, len(rates)

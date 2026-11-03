@@ -29,6 +29,10 @@ class PaymentHealthSnapshot(BaseModel):
     failed_gmv_minor_units: int
 
     baseline_success_rate: Optional[float] = None
+    # Spread of the same historical windows as the median baseline (for Stage 3 Z-score evidence).
+    baseline_mean_success_rate: Optional[float] = None
+    baseline_stddev_success_rate: Optional[float] = None
+    baseline_sample_count: Optional[int] = None
 
     insufficient_volume: bool
 
