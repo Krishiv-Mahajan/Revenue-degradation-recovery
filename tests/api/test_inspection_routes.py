@@ -1358,8 +1358,8 @@ async def test_provider_query_validation_and_truthful_scope_labels(client):
     - Explicit query '?provider=razorpay' returns scope 'razorpay'.
     - Explicit query '?provider=synthetic' returns scope 'synthetic'.
     - Explicit query '?provider=paypal' returns scope 'paypal' on /summary, /recovery, and /attributions.
-    - /payments rejects '?provider=paypal' with HTTP 400 because bare order IDs fail prefixed
-      joins and terminal event semantics on the Razorpay payment inspector.
+    - /payments?provider=paypal lists PayPal orders by their attempt ids (Milestone G); the default
+      /payments scope stays 'razorpay_pipeline'.
     - Summary active_degradation_episodes is labeled global even under provider filters.
     - Broad or unsupported scopes ('all', '*', 'stripe', 'invalid') fail closed with HTTP 400.
     """
@@ -1421,13 +1421,10 @@ async def test_provider_query_validation_and_truthful_scope_labels(client):
         assert resp_p.status_code == 200
         assert resp_p.json()["scope"] == p
 
-    # 3. Exact endpoint rejection regression for /payments?provider=paypal
+    # 3. /payments?provider=paypal is a PayPal-scoped listing
     resp_pay_pp = await client.get("/api/v1/payments?provider=paypal")
-    assert resp_pay_pp.status_code == 400
-    assert (
-        resp_pay_pp.json()["detail"]
-        == "Unsupported provider for payments list: 'paypal'. Payments inspector operates on 'razorpay' and 'synthetic' pipelines."
-    )
+    assert resp_pay_pp.status_code == 200
+    assert (resp_pay_pp.json()["scope"], resp_pay_pp.json()["provider_scope"]) == ("paypal", "paypal")
 
     # 4. Refusal of invalid providers on /payments
     for invalid_provider in ("all", "*", "stripe", "invalid_provider"):
@@ -1630,3 +1627,38 @@ async def test_payments_provider_filter_never_joins_another_providers_decision(c
         (i["provider"], i["decision_type"], i["decision_id"], i["is_attributed"], i["attributed_protected_gmv_minor_units"])
         for i in syn_items
     ] == [("synthetic", "ACT", str(syn.decision_id), True, 10000)]
+
+
+@pytest.mark.asyncio
+async def test_paypal_payments_are_listed_and_traced_by_their_attempt_id(client, db_engine):
+    """Milestone G: PayPal orders appear in /payments?provider=paypal and open in /timeline by attempt id."""
+    pp = await _seed_attributed_payment(db_engine, source_system="paypal", currency="USD", amount=20000)
+    rzp = await _seed_attributed_payment(db_engine, source_system="razorpay")
+    order_id = pp.payment_id.split(":", 1)[1]
+
+    listing = (await client.get("/api/v1/payments?provider=paypal")).json()
+    assert (listing["scope"], listing["total_count"]) == ("paypal", 1)
+    [item] = listing["items"]
+    assert (item["payment_id"], item["payment_attempt_id"], item["provider"], item["currency"]) == (
+        order_id, pp.payment_id, "paypal", "USD",
+    )
+    assert (item["decision_type"], item["decision_id"], item["is_attributed"]) == ("ACT", str(pp.decision_id), True)
+    assert item["payment_status"] == "approved"  # the seeded order has no capture outcome
+    # The default scope never lists PayPal, and searches and filters stay PayPal-only
+    assert rzp.payment_id in {i["payment_id"] for i in (await client.get("/api/v1/payments")).json()["items"]}
+    assert pp.payment_id not in {i["payment_attempt_id"] for i in (await client.get("/api/v1/payments")).json()["items"]}
+    assert (await client.get(f"/api/v1/payments?provider=paypal&search={rzp.payment_id}")).json()["total_count"] == 0
+    assert (await client.get("/api/v1/payments?provider=paypal&filter_type=ATTRIBUTED")).json()["total_count"] == 1
+    assert (await client.get("/api/v1/payments?provider=paypal&status=captured")).json()["total_count"] == 0
+
+    timeline = (await client.get(f"/api/v1/timeline/{pp.payment_id}")).json()
+    assert (timeline["payment_id"], timeline["payment_info"]["provider"], timeline["payment_info"]["currency"]) == (
+        pp.payment_id, "paypal", "USD",
+    )
+    assert [e["event_type"] for e in timeline["events"]] == ["order.approved", "order.completed"]
+    assert {timeline[s]["provider"] for s in ("prediction", "decision", "command", "execution", "observation", "attribution")} == {"paypal"}
+    assert timeline["execution"]["recovery_checkout"] is None  # simulated execution created no checkout
+    assert timeline["observation"]["recovered_via_recovery_order"] is False
+
+    # The bare order id is not a Razorpay payment and still returns 404 (no cross-provider lookup).
+    assert (await client.get(f"/api/v1/timeline/{order_id}")).status_code == 404

@@ -858,7 +858,9 @@ class _EmulatedTimelineSession:
             )
             result.scalars.return_value.all.return_value = [SimpleNamespace(**row) for row in matched]
         elif InterventionDecisionModel.__table__ in froms:
-            self.decision_lookups.append(statement.whereclause.right.value)
+            # The lookup is provider-exact: record (payment_attempt_id, source_system).
+            conditions = {c.left.key: c.right.value for c in statement.whereclause.clauses}
+            self.decision_lookups.append((conditions["payment_attempt_id"], conditions["source_system"]))
             result.scalar_one_or_none.return_value = self.decision
         return result
 
@@ -883,7 +885,7 @@ async def test_timeline_ignores_overlapping_paypal_events_and_keeps_the_razorpay
     assert timeline["payment_info"]["currency"] == "INR"
     assert timeline["payment_info"]["amount_minor_units"] == razorpay_auth["amount_minor_units"]
     assert timeline["payment_info"]["terminal_status"] == "captured"
-    assert session.decision_lookups == [RAZORPAY_ATTEMPT_ID]
+    assert session.decision_lookups == [(RAZORPAY_ATTEMPT_ID, "razorpay")]
     assert timeline["decision"]["decision_id"] == "dec-1"
 
 

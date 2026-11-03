@@ -1215,3 +1215,15 @@ async def test_real_paypal_recovery_checkout_is_executed_observed_and_attributed
         ("UNATTRIBUTED_PAYMENT_FAILED", 0, False), ("ATTRIBUTED", 16200, False),
     ]
     assert attributions[-1].is_synthetic_baseline is True  # the fixed-probability test model is synthetic
+
+    # 5. The dashboard timeline shows the real recovery checkout and the recovered outcome.
+    monkeypatch.setenv("DASHBOARD_USERNAME", "e2e-dashboard-user")
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "e2e-dashboard-password")
+    timeline = (await e2e.client.get(f"/api/v1/timeline/{attempt_id}", auth=("e2e-dashboard-user", "e2e-dashboard-password"))).json()
+    assert (timeline["execution"]["executor_name"], timeline["execution"]["is_simulation"]) == ("PAYPAL_ORDERS_V2_SANDBOX", False)
+    checkout = timeline["execution"]["recovery_checkout"]
+    assert (checkout["order_id"], checkout["environment"], checkout["approve_url"]) == (
+        recovery_order_id, "sandbox", f"https://www.sandbox.paypal.com/checkoutnow?token={recovery_order_id}",
+    )
+    assert (timeline["observation"]["outcome"], timeline["observation"]["recovered_via_recovery_order"]) == ("CAPTURED", True)
+    assert (timeline["attribution"]["status"], timeline["attribution"]["is_simulated_execution"]) == ("ATTRIBUTED", False)

@@ -8,7 +8,7 @@ import uuid
 from src.api.dependencies import get_db_session
 from src.api.security import require_dashboard_auth
 from src.core.attribution.attribution_service import classify_model_provenance
-from src.core.domain.payment_attempts import PAYPAL_ATTEMPT_PREFIX, PAYPAL_TRIGGER_EVENT_TYPE
+from src.core.domain.payment_attempts import PAYPAL_ATTEMPT_PREFIX, PAYPAL_TRIGGER_EVENT_TYPE, paypal_order_id
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.core.intervention.policy import get_default_policy
 from src.infrastructure.models import (
@@ -866,6 +866,115 @@ async def get_recovery_workspace(
         "offset": offset,
     }
 
+async def _paypal_payments_list(session, *, limit, offset, search, filter_type, status) -> Dict[str, Any]:
+    """
+    PayPal payments for the inspector: one row per approved order (its earliest order.approved event),
+    identified by its pipeline attempt id. Status is "captured" when any capture of the order completed,
+    "failed" when only declines exist, otherwise the approval's status. Decisions and attributions are
+    joined provider-exactly by the attempt id.
+    """
+    attempt_id = (literal(PAYPAL_ATTEMPT_PREFIX) + PaymentEventModel.payment_id).label("payment_attempt_id")
+    canonical = (
+        select(PaymentEventModel.event_id)
+        .where(PaymentEventModel.source_system == PAYPAL_SOURCE_SYSTEM, PaymentEventModel.event_type == PAYPAL_TRIGGER_EVENT_TYPE)
+        .distinct(PaymentEventModel.payment_id)
+        .order_by(PaymentEventModel.payment_id, PaymentEventModel.timestamp.asc())
+    )
+    captures = (
+        select(
+            PaymentEventModel.order_id.label("order_id"),
+            func.bool_or(PaymentEventModel.event_type == "payment.captured").label("any_captured"),
+            func.bool_or(PaymentEventModel.event_type == "payment.failed").label("any_failed"),
+        )
+        .where(
+            PaymentEventModel.source_system == PAYPAL_SOURCE_SYSTEM,
+            PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
+            PaymentEventModel.order_id.isnot(None),
+        )
+        .group_by(PaymentEventModel.order_id)
+        .subquery()
+    )
+    final_status = case(
+        (captures.c.any_captured.is_(True), literal("captured")),
+        (captures.c.any_failed.is_(True), literal("failed")),
+        else_=PaymentEventModel.payment_status,
+    ).label("final_status")
+    latest_decision = InterventionDecisionModel.decision_id.in_(_latest_decision_ids())
+    latest_attribution = CounterfactualAttributionModel.attribution_id.in_(_latest_attribution_ids())
+
+    def joined(query):
+        return (
+            query.select_from(PaymentEventModel)
+            .outerjoin(captures, captures.c.order_id == PaymentEventModel.payment_id)
+            .outerjoin(
+                InterventionDecisionModel,
+                and_(
+                    InterventionDecisionModel.payment_attempt_id == literal(PAYPAL_ATTEMPT_PREFIX) + PaymentEventModel.payment_id,
+                    InterventionDecisionModel.source_system == PAYPAL_SOURCE_SYSTEM,
+                    latest_decision,
+                ),
+            )
+            .outerjoin(
+                CounterfactualAttributionModel,
+                and_(CounterfactualAttributionModel.decision_id == InterventionDecisionModel.decision_id, latest_attribution),
+            )
+            .where(PaymentEventModel.event_id.in_(canonical))
+        )
+
+    base_query = joined(select(
+        PaymentEventModel.payment_id, attempt_id, PaymentEventModel.timestamp, PaymentEventModel.amount_minor_units,
+        PaymentEventModel.currency, PaymentEventModel.payment_method, final_status,
+        InterventionDecisionModel.decision_type, InterventionDecisionModel.decision_id,
+        CounterfactualAttributionModel.attribution_id, CounterfactualAttributionModel.attributed_protected_gmv_minor_units,
+        CounterfactualAttributionModel.attribution_confidence, CounterfactualAttributionModel.attribution_status,
+        CounterfactualAttributionModel.is_simulated_execution, CounterfactualAttributionModel.is_synthetic_baseline,
+    ))
+    count_query = joined(select(func.count(PaymentEventModel.event_id)))
+    conditions = []
+    if search:
+        conditions.append(PaymentEventModel.payment_id.ilike(f"%{search.strip()}%"))
+    if filter_type and filter_type.upper() == "INTERVENED":
+        conditions.append(InterventionDecisionModel.decision_type.isnot(None))
+    elif filter_type and filter_type.upper() == "ATTRIBUTED":
+        conditions.append(CounterfactualAttributionModel.attribution_status == "ATTRIBUTED")
+    if status:
+        conditions.append(final_status == status.lower())
+    base_query, count_query = base_query.where(*conditions), count_query.where(*conditions)
+
+    total_count = await session.scalar(count_query) or 0
+    rows = (await session.execute(
+        base_query.order_by(desc(PaymentEventModel.timestamp)).offset(offset).limit(limit)
+    )).all()
+    items = []
+    for r in rows:
+        is_attr = r.attribution_id is not None and r.attribution_status == "ATTRIBUTED"
+        items.append({
+            "payment_id": r.payment_id,
+            "payment_attempt_id": r.payment_attempt_id,
+            "provider": PAYPAL_SOURCE_SYSTEM,
+            "source_system": PAYPAL_SOURCE_SYSTEM,
+            "timestamp": r.timestamp.isoformat(),
+            "amount_minor_units": r.amount_minor_units,
+            "currency": r.currency,
+            "payment_method": r.payment_method,
+            "bank": None,
+            "wallet": None,
+            "payment_status": r.final_status,
+            "decision_type": r.decision_type,
+            "decision_id": str(r.decision_id) if r.decision_id else None,
+            "is_intervened": r.decision_type is not None,
+            "is_attributed": is_attr,
+            "attributed_protected_gmv_minor_units": (r.attributed_protected_gmv_minor_units or 0) if is_attr else 0,
+            "attribution_confidence": float(r.attribution_confidence) if (is_attr and r.attribution_confidence is not None) else None,
+            "is_simulated_execution": r.is_simulated_execution if is_attr else None,
+            "is_synthetic_baseline": r.is_synthetic_baseline if is_attr else None,
+        })
+    return {
+        "scope": PAYPAL_SOURCE_SYSTEM, "provider_scope": PAYPAL_SOURCE_SYSTEM, "items": items,
+        "total_count": total_count, "limit": limit, "offset": offset,
+    }
+
+
 @router.get("/payments")
 async def get_payments_list(
     limit: int = Query(default=50, ge=1, le=200),
@@ -881,10 +990,9 @@ async def get_payments_list(
     Safe bounded read-only inspection endpoint.
     """
     prov_val, scope_label = _validate_provider(provider, default_scope=DEFAULT_PAYMENTS_SCOPE)
-    if prov_val == "paypal":
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported provider for payments list: 'paypal'. Payments inspector operates on 'razorpay' and 'synthetic' pipelines.",
+    if prov_val == PAYPAL_SOURCE_SYSTEM:
+        return await _paypal_payments_list(
+            session, limit=limit, offset=offset, search=search, filter_type=filter_type, status=status,
         )
 
     terminal_subq = (
@@ -995,6 +1103,7 @@ async def get_payments_list(
         is_attr = r.attribution_id is not None and r.attribution_status == "ATTRIBUTED"
         items.append({
             "payment_id": r.payment_id,
+            "payment_attempt_id": r.payment_id,
             "provider": r.source_system,
             "source_system": r.source_system,
             "timestamp": r.timestamp.isoformat(),
@@ -1023,6 +1132,21 @@ async def get_payments_list(
         "offset": offset,
     }
 
+def _recovery_checkout(execution) -> Optional[Dict[str, Any]]:
+    """The PayPal recovery checkout a real execution created, if any (never for simulated executions)."""
+    payload = execution.provider_response_payload or {}
+    if execution.is_simulation or "paypal_order_id" not in payload:
+        return None
+    return {
+        "order_id": payload.get("paypal_order_id"),
+        "order_status": payload.get("order_status"),
+        "approve_url": payload.get("approve_url"),
+        "environment": payload.get("environment"),
+        "amount": payload.get("amount"),
+        "delivery": payload.get("delivery"),
+    }
+
+
 @router.get("/timeline/{payment_id}")
 async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(get_db_session)) -> Dict[str, Any]:
     """
@@ -1031,17 +1155,22 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
     Preserves canonical payment identity strictly originating in PaymentEventModel.
     """
     clean_pid = payment_id.strip()
+    order_id = paypal_order_id(clean_pid)
 
     # 1. Canonical Payment Events Lookup:
-    # A payment's domain identity strictly originates in PaymentEventModel.payment_id.
-    events_stmt = (
-        select(PaymentEventModel)
-        .where(
+    # A Razorpay/synthetic payment is its payment_id. A PayPal attempt ("paypal-order:<order id>") is its
+    # order: the order's own events plus the captures that name it, PayPal rows only.
+    if order_id is not None:
+        event_filter = (
+            PaymentEventModel.source_system == PAYPAL_SOURCE_SYSTEM,
+            or_(PaymentEventModel.payment_id == order_id, PaymentEventModel.order_id == order_id),
+        )
+    else:
+        event_filter = (
             PaymentEventModel.payment_id == clean_pid,
             PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
         )
-        .order_by(PaymentEventModel.timestamp)
-    )
+    events_stmt = select(PaymentEventModel).where(*event_filter).order_by(PaymentEventModel.timestamp)
     events_res = await session.execute(events_stmt)
     events = events_res.scalars().all()
 
@@ -1051,8 +1180,10 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
             detail=f"Payment {payment_id} not found"
         )
 
-    first_event = events[0]
-    canonical_pid = first_event.payment_id
+    sizing = [e for e in events if e.event_type == PAYPAL_TRIGGER_EVENT_TYPE] if order_id is not None else []
+    first_event = sizing[0] if sizing else events[0]
+    canonical_pid = clean_pid if order_id is not None else first_event.payment_id
+    provider = first_event.source_system
     payment_info = {
         "provider": first_event.source_system,
         "source_system": first_event.source_system,
@@ -1067,7 +1198,7 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
     # 2. Prediction
     pred_stmt = (
         select(FailurePredictionModel)
-        .where(FailurePredictionModel.payment_attempt_id == clean_pid)
+        .where(FailurePredictionModel.payment_attempt_id == clean_pid, FailurePredictionModel.source_system == provider)
         .order_by(desc(FailurePredictionModel.prediction_version))
         .limit(1)
     )
@@ -1077,7 +1208,7 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
     # 3. Decision
     dec_stmt = (
         select(InterventionDecisionModel)
-        .where(InterventionDecisionModel.payment_attempt_id == clean_pid)
+        .where(InterventionDecisionModel.payment_attempt_id == clean_pid, InterventionDecisionModel.source_system == provider)
         .order_by(desc(InterventionDecisionModel.decision_version))
         .limit(1)
     )
@@ -1161,6 +1292,9 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
             "decided_at": decision.decided_at.isoformat(),
             "failure_probability": decision.failure_probability,
             "episode_id": decision.evaluation_audit_payload.get("upstream_context", {}).get("episode_id") if decision.evaluation_audit_payload else None,
+            "stage5_model_name": (decision.evaluation_audit_payload or {}).get("upstream_context", {}).get("stage5_model_name"),
+            "stage5_model_version": (decision.evaluation_audit_payload or {}).get("upstream_context", {}).get("stage5_model_version"),
+            "cost_schedule_currency": (decision.evaluation_audit_payload or {}).get("policy", {}).get("cost_schedule_currency"),
         } if decision else None,
         "command": {
             "command_id": str(command.command_id),
@@ -1179,13 +1313,18 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
             "executed_at": execution.completed_at.isoformat() if execution.completed_at else None,
             "executor_name": execution.executor_name,
             "is_simulation": execution.is_simulation,
+            "provider_response_code": execution.provider_response_code,
+            "recovery_checkout": _recovery_checkout(execution),
         } if execution else None,
         "observation": {
             "observation_id": str(observation.observation_id),
             "provider": getattr(observation, "source_system", None),
             "source_system": getattr(observation, "source_system", None),
             "outcome": observation.payment_outcome,
-            "observed_at": observation.observed_at.isoformat() if observation.observed_at else None
+            "observed_at": observation.observed_at.isoformat() if observation.observed_at else None,
+            "recovered_via_recovery_order": bool(
+                (observation.observation_audit_payload or {}).get("recovery", {}).get("recovered_via_recovery_order")
+            ),
         } if observation else None,
         "attribution": {
             "attribution_id": str(attribution.attribution_id),

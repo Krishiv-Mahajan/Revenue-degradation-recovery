@@ -54,8 +54,16 @@ export async function getHealth() {
 /**
  * Queries the executive summary metrics from /api/v1/summary.
  */
-export async function getSummary() {
-  return await fetchJSON('/api/v1/summary');
+export async function getSummary(provider = '') {
+  return await fetchJSON(`/api/v1/summary${providerQuery(provider, '?')}`);
+}
+
+/**
+ * Query-string fragment for an optional provider scope ('razorpay', 'synthetic', 'paypal').
+ * An empty provider means the endpoint's default scope.
+ */
+export function providerQuery(provider, prefix = '&') {
+  return provider ? `${prefix}provider=${encodeURIComponent(provider)}` : '';
 }
 
 /**
@@ -84,26 +92,26 @@ export async function getRCA(episodeId) {
  * @param {number} limit
  * @param {number} offset
  */
-export async function getRecovery(decisionType = null, limit = 50, offset = 0) {
+export async function getRecovery(decisionType = null, limit = 50, offset = 0, provider = '') {
   let url = `/api/v1/recovery?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`;
   if (decisionType) {
     url += `&decision_type=${encodeURIComponent(decisionType)}`;
   }
-  return await fetchJSON(url);
+  return await fetchJSON(url + providerQuery(provider));
 }
 
 /**
  * Queries recent Stage 8 counterfactual attributions from /api/v1/attributions.
  * @param {number} limit
  */
-export async function getAttributions(limit = 50) {
+export async function getAttributions(limit = 50, provider = '') {
   const boundedLimit = Math.max(1, Math.min(200, limit));
-  return await fetchJSON(`/api/v1/attributions?limit=${boundedLimit}`);
+  return await fetchJSON(`/api/v1/attributions?limit=${boundedLimit}${providerQuery(provider)}`);
 }
 
 /**
  * Queries payments list for the Payment Audit Inspector from /api/v1/payments.
- * @param {Object} options - { search, filterType, status, limit, offset }
+ * @param {Object} options - { search, filterType, status, limit, offset, provider }
  */
 export async function getPayments(options = {}) {
   const params = new URLSearchParams();
@@ -112,6 +120,7 @@ export async function getPayments(options = {}) {
   if (options.search) params.set('search', options.search.trim());
   if (options.filterType) params.set('filter_type', options.filterType);
   if (options.status) params.set('status', options.status);
+  if (options.provider) params.set('provider', options.provider);
   
   const queryStr = params.toString();
   return await fetchJSON(`/api/v1/payments${queryStr ? '?' + queryStr : ''}`);

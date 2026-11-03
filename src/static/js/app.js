@@ -20,6 +20,12 @@ import {
   formatCount,
   formatDateTime
 } from './api.js';
+import {
+  describeExecutionProvenance,
+  describeProtectedByProvider,
+  describeRecoveryCheckout,
+  describeScopes,
+} from './descriptions.js';
 
 // Application State
 const state = {
@@ -41,6 +47,8 @@ const state = {
 
   activeTab: 'overview',
   lastUpdated: null,
+  // '' = each endpoint's default scope; otherwise 'razorpay' | 'synthetic' | 'paypal'
+  provider: '',
 };
 
 // DOM Element References
@@ -49,6 +57,9 @@ const elements = {
   healthText: document.getElementById('db-health-text'),
   lastUpdatedText: document.getElementById('last-updated-time'),
   refreshButton: document.getElementById('btn-refresh'),
+  providerSelect: document.getElementById('provider-select'),
+  scopeLabel: document.getElementById('scope-label'),
+  kpiProtectedByProvider: document.getElementById('kpi-protected-by-provider'),
   navTabs: document.querySelectorAll('.nav-tab'),
   viewContainers: document.querySelectorAll('.view-container'),
   provenanceBanner: document.getElementById('provenance-banner'),
@@ -216,6 +227,14 @@ function bindNavigation() {
  * Binds header and workspace controls.
  */
 function bindControls() {
+  if (elements.providerSelect) {
+    elements.providerSelect.addEventListener('change', (e) => {
+      state.provider = e.target.value;
+      if (elements.paymentAuditDrawer) elements.paymentAuditDrawer.style.display = 'none';
+      loadAllData();
+    });
+  }
+
   if (elements.refreshButton) {
     elements.refreshButton.addEventListener('click', () => {
       loadAllData();
@@ -289,11 +308,14 @@ export async function loadAllData() {
 
   const [healthResult, summaryResult, episodesResult, recoveryResult, attributionsResult, paymentsResult] = await Promise.allSettled([
     getHealth(),
-    getSummary(),
+    getSummary(state.provider),
     getEpisodes(10),
-    getRecovery(state.recovery.filter),
-    getAttributions(50),
-    getPayments({ search: state.payments.search, filterType: state.payments.filterType, status: state.payments.status, limit: 50, offset: 0 })
+    getRecovery(state.recovery.filter, 50, 0, state.provider),
+    getAttributions(50, state.provider),
+    getPayments({
+      search: state.payments.search, filterType: state.payments.filterType, status: state.payments.status,
+      limit: 50, offset: 0, provider: state.provider,
+    })
   ]);
 
   // 1. Handle Health Check Result
@@ -424,14 +446,28 @@ function renderSummary() {
     elements.kpiProtectedRevenue.textContent = formatMoneyTotals(data.total_protected_gmv_by_currency);
   }
 
+  if (elements.kpiProtectedByProvider) {
+    elements.kpiProtectedByProvider.textContent = describeProtectedByProvider(data.protected_gmv_by_provider);
+  }
+  if (elements.scopeLabel) {
+    elements.scopeLabel.textContent = describeScopes(data);
+  }
+
+  const scopes = data.metric_scopes || {};
+  const notApplicable = 'Not applicable (no authorization events for this provider)';
+
   // 2. Processed Volume (Stage 1 Auth GMV), one figure per currency
   if (elements.kpiProcessedVolume) {
-    elements.kpiProcessedVolume.textContent = formatMoneyTotals(data.total_gmv_by_currency);
+    elements.kpiProcessedVolume.textContent = scopes.processed_gmv === 'not_applicable'
+      ? notApplicable
+      : formatMoneyTotals(data.total_gmv_by_currency);
   }
 
   // 3. Authorization Success Rate
   if (elements.kpiSuccessRate) {
-    elements.kpiSuccessRate.textContent = formatPercentage(data.overall_success_rate, 1);
+    elements.kpiSuccessRate.textContent = scopes.capture_success_rate === 'not_applicable'
+      ? notApplicable
+      : formatPercentage(data.overall_success_rate, 1);
   }
 
   // 4. Active Degradation Incidents
@@ -445,15 +481,16 @@ function renderSummary() {
   }
   if (elements.kpiInterventionsSubtext) {
     const total = data.total_successful_interventions || 0;
-    const simulated = data.simulated_successful_interventions || 0;
     elements.kpiInterventionsSubtext.textContent = total > 0
-      ? `${formatCount(simulated)} of ${formatCount(total)} executed by a simulator (no real gateway call)`
+      ? describeExecutionProvenance(data.execution_provenance, total)
       : 'No interventions have completed';
   }
 
   // 6. Authorization vs Capture Counts
   if (elements.kpiAuthCaptureVolume) {
-    elements.kpiAuthCaptureVolume.textContent = `${formatCount(data.total_auths)} / ${formatCount(data.total_captures)}`;
+    elements.kpiAuthCaptureVolume.textContent = data.total_auths === null || data.total_auths === undefined
+      ? notApplicable
+      : `${formatCount(data.total_auths)} / ${formatCount(data.total_captures)}`;
   }
 
   renderProvenance(data);
@@ -891,8 +928,8 @@ export async function loadRecoveryData() {
   if (elements.recAttrError) elements.recAttrError.style.display = 'none';
 
   const [recResult, attrResult] = await Promise.allSettled([
-    getRecovery(state.recovery.filter),
-    getAttributions(50)
+    getRecovery(state.recovery.filter, 50, 0, state.provider),
+    getAttributions(50, state.provider)
   ]);
 
   if (elements.recLedgerLoading) elements.recLedgerLoading.style.display = 'none';
@@ -1140,6 +1177,7 @@ export async function loadPaymentsData() {
       status: state.payments.status,
       limit: 50,
       offset: 0,
+      provider: state.provider,
     });
     state.payments.data = res.items || [];
     state.payments.total = res.total_count || 0;
@@ -1191,13 +1229,16 @@ function renderPayments(items, totalCount) {
       : '—';
 
     const methodStr = p.payment_method ? `${p.payment_method}${p.bank ? ' (' + p.bank + ')' : ''}` : '—';
+    // The timeline is keyed by the pipeline attempt (PayPal: "paypal-order:<order id>").
+    const traceId = p.payment_attempt_id || p.payment_id;
 
     return `
       <tr>
         <td>
-          <a href="#" class="payment-audit-link" data-payment-id="${escapeHTML(p.payment_id)}" style="font-family: var(--font-mono); font-weight: 600; color: var(--blue-text); text-decoration: none;">
+          <a href="#" class="payment-audit-link" data-payment-id="${escapeHTML(traceId)}" style="font-family: var(--font-mono); font-weight: 600; color: var(--blue-text); text-decoration: none;">
             ${escapeHTML(p.payment_id)}
           </a>
+          <div style="font-size: 0.7rem; color: var(--text-muted);">${escapeHTML(p.provider || '')}</div>
         </td>
         <td style="font-size: 0.75rem; color: var(--text-muted);">${formatDateTime(p.timestamp)}</td>
         <td class="text-right" style="font-weight: 700; font-family: var(--font-mono);">${escapeHTML(formatMoney(p.amount_minor_units, p.currency))}</td>
@@ -1207,7 +1248,7 @@ function renderPayments(items, totalCount) {
         <td class="text-right" style="font-weight: 700; font-family: var(--font-mono); color: ${p.attributed_protected_gmv_minor_units > 0 ? 'var(--emerald-text)' : 'inherit'};">${escapeHTML(gmvText)}</td>
         <td>${attrBadge}</td>
         <td class="text-center">
-          <button class="btn-inspect-link btn-audit-payment" data-payment-id="${escapeHTML(p.payment_id)}" type="button">Audit Trace</button>
+          <button class="btn-inspect-link btn-audit-payment" data-payment-id="${escapeHTML(traceId)}" type="button">Audit Trace</button>
         </td>
       </tr>
     `;
@@ -1432,6 +1473,8 @@ function renderPaymentAudit(timeline) {
         `Route Key: ${cmd?.route || '—'}`,
         exec ? `Executor: ${exec.executor_name || 'unknown'}` : null,
         isSimulated ? 'Simulated: no real gateway or customer action took place.' : null,
+        exec && !isSimulated ? `Real provider call; response: ${exec.provider_response_code || '—'}` : null,
+        ...describeRecoveryCheckout(exec?.recovery_checkout),
         exec?.duration_ms != null
           ? `${isSimulated ? 'Simulated duration' : 'Execution latency'}: ${exec.duration_ms}ms`
           : null,
@@ -1473,6 +1516,7 @@ function renderPaymentAudit(timeline) {
       details: [
         obs?.observation_id ? `Observation ID: ${obs.observation_id.slice(0, 8)}` : null,
         `Observed Outcome: ${finalOutcome.toUpperCase()}`,
+        obs?.recovered_via_recovery_order ? 'Recovered: the payer completed the PayPal recovery checkout (verified capture webhook).' : null,
         `Terminal Event: ${timeline.events ? timeline.events[timeline.events.length - 1].event_type : '—'}`,
       ].filter(Boolean)
     });

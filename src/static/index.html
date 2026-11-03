@@ -21,6 +21,14 @@
       </div>
 
       <div class="header-controls">
+        <label for="provider-select" class="last-updated-text">Provider</label>
+        <select id="provider-select" class="filter-select" aria-label="Provider scope">
+          <option value="">All providers (default scopes)</option>
+          <option value="razorpay">Razorpay</option>
+          <option value="synthetic">Synthetic (generated)</option>
+          <option value="paypal">PayPal</option>
+        </select>
+        <span id="scope-label" class="last-updated-text"></span>
         <div id="db-health-badge" class="status-badge connected">
           <span class="status-indicator-dot" aria-hidden="true"></span>
           <span id="db-health-text">Checking DB...</span>
@@ -116,6 +124,7 @@
             </div>
             <div id="kpi-protected-revenue" class="kpi-value protected-value">—</div>
             <div class="kpi-subtext">Risk-weighted Stage 8 counterfactual estimate per currency, not observed recovered revenue</div>
+            <div id="kpi-protected-by-provider" class="kpi-subtext"></div>
           </div>
 
           <!-- Card 2: Processed Volume -->

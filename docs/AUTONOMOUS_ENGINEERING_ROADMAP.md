@@ -103,7 +103,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | D | Done (sandbox calls blocked by credentials) | see D log | Real PayPal Orders v2 recovery checkout executor, recovery outcome observation, webhook routing |
 | E | Done | see E log | Transactional outbox, claim/lease, reconciler, idempotent capture replay |
 | F | Done | see F log | Z-score evidence on every signal; opt-in combined rule; hysteresis unchanged |
-| G | Not started | | |
+| G | Done | see G log | Provider selector, PayPal payments/timeline, scopes, real-vs-simulated execution, recovery checkout |
 | H | Not started | | |
 
 ### Milestone B log (2026-11-03)
@@ -225,6 +225,33 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Offline: 1,682 passed.
   - PostgreSQL integration + API: 692 passed.
   - Migration: see the commit message.
+
+### Milestone G log (2026-11-03)
+
+- **Backend** (`src/api/inspection_routes.py`):
+  - `/payments?provider=paypal` lists PayPal orders, one per approved order, identified by attempt id. It has captured/failed/approved status, provider-exact decision and attribution joins, and search, status and attribution filters. This replaces the previous 400.
+  - `/timeline/paypal-order:<id>` traces the order's own events and its captures.
+  - Timeline Stage 5–8 lookups are now provider-exact for every provider.
+  - Timeline payloads add the executor response code, the real `recovery_checkout` (order, status, approval URL, environment, amount, delivery note), `recovered_via_recovery_order`, and the decision's Stage 5 model and cost-schedule currency.
+  - Razorpay `/payments` rows carry `payment_attempt_id`.
+- **Frontend** (`src/static/`):
+  - A header provider selector drives `/summary`, `/recovery`, `/attributions` and `/payments`, and the API's scope labels are shown.
+  - Not-applicable PayPal metrics say so instead of showing 0%.
+  - Protected GMV is shown per provider and currency.
+  - The interventions KPI names each executor as real or simulated.
+  - Payment rows show the provider and open their attempt's trace.
+  - The audit drawer shows the real recovery checkout and approval link, and a recovered outcome.
+  - Pure text helpers live in `descriptions.js`. No mock data anywhere.
+- **Tests:**
+  - New API test `test_paypal_payments_are_listed_and_traced_by_their_attempt_id`.
+  - The real-recovery e2e test now also checks the timeline.
+  - `tests/frontend/dashboard_descriptions.test.mjs` (4 tests); the Node runner now runs every `tests/frontend/*.test.mjs`.
+  - The Checkpoint 4 contract test now expects a PayPal listing instead of 400.
+  - The emulated timeline test asserts the decision lookup is provider-exact.
+- **Results:**
+  - Offline: 1,688 passed.
+  - PostgreSQL integration + API: 693 passed.
+  - Frontend: 11/11.
 
 ## 4. External blockers
 
