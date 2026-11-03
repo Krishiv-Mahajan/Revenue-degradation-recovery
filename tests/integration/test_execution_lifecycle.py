@@ -26,7 +26,7 @@ from src.core.execution.simulator import SimulatorInterventionExecutor, Simulato
 from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.intervention_repository import InterventionRepository
 from src.infrastructure.models import Base, PaymentEventModel
-from tests.integration.attempt_registry import register_attempt
+from tests.integration.attempt_registry import record_prediction, register_attempt
 
 
 def add_payment_event(
@@ -72,7 +72,7 @@ async def create_stage6_decision(
         decision_type=decision_type,
         selected_route_id=route if decision_type == DecisionType.ACT else None,
         failure_probability=0.85,
-        stage5_prediction_id=uuid.uuid4(),
+        stage5_prediction_id=await record_prediction(inter_repo.session, attempt, now),
         diagnosis_confidence="STRONG",
         decision_confidence=0.9,
         gate_verdict=gate_verdict,

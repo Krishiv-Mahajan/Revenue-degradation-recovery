@@ -25,7 +25,7 @@ from src.infrastructure.models import (
     PaymentEventModel,
     PaymentOutcomeObservationModel,
 )
-from tests.integration.attempt_registry import register_attempt
+from tests.integration.attempt_registry import record_prediction, register_attempt
 
 
 def add_payment_event(
@@ -67,7 +67,7 @@ async def create_act_decision(
         decision_type=DecisionType.ACT,
         selected_route_id=InterventionRouteKey.RETRY_SECONDARY_GATEWAY,
         failure_probability=0.85,
-        stage5_prediction_id=uuid.uuid4(),
+        stage5_prediction_id=await record_prediction(inter_repo.session, attempt, decided_at),
         diagnosis_confidence="STRONG",
         decision_confidence=0.9,
         gate_verdict=GateVerdict.PASSED,

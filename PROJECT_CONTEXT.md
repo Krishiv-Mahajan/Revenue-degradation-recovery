@@ -614,20 +614,20 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
 ### Phase 3 Revision B — Provider Identity Contract Migration (2026-10-29, committed)
 
 - **Commit:** `cddb60c07d1483cc00dcb1e81527e672ee52b2e5` — `Enforce Phase 3 Revision B provider identity contract and composite database constraints`
-- **Migration:** `migrations/versions/e2d3c4b5a6f7_stage5_8_provider_identity_contract.py` (revision `e2d3c4b5a6f7`, revises `9d2e4f6a8b1c`; current Alembic head; the chain is linear across 12 revisions).
+- **Migration:** `migrations/versions/e2d3c4b5a6f7_stage5_8_provider_identity_contract.py` (revision `e2d3c4b5a6f7`, revises `9d2e4f6a8b1c`; the head until Revision C).
   - Preflight checks PF-B01..PF-B19 (NOT NULL, registry membership, inter-stage provider consistency, version uniqueness) fail closed before any change.
   - `source_system` becomes NOT NULL on all six Stage 5–8 tables; version unique constraints now include `source_system`.
   - Composite FKs `(payment_attempt_id, source_system) → payment_attempts` on predictions, decisions, commands, observations and attributions; `(command_id, source_system)` FKs from execution attempts, observations and attributions to commands; `(decision_id, source_system)` FKs from commands and attributions to decisions.
   - Downgrade restores the Revision A schema exactly (covered by `tests/migration/test_revision_b.py`).
 - **CI:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416), success — offline 1,552, PostgreSQL integration/API 664, migration 95; 0 failed, 0 skipped.
-- **Known constraint gaps (found in the 2026-11-02 audit, not fixed):**
+- **Known constraint gaps (found in the 2026-11-02 audit; both addressed by Revision C below, kept here as the historical record):**
   - `intervention_decisions.stage5_prediction_id` has no foreign key. The migration creates the target `uq_failure_prediction_provider (prediction_id, source_system)`, but nothing references it.
   - Only provider consistency is enforced between linked Stage 5–8 rows, not attempt consistency: a command's `payment_attempt_id` is not constrained to equal its decision's, nor an observation's or attribution's to equal its command's. Application code derives these values today; the database would not catch a bug.
 
 ### Phase 3 Checkpoint 4 — Provider-Scoped Dashboard Inspection (2026-11-02, committed; verified locally)
 
 - **Commit:** `b190213d6287a18848b947f6331a6fda5b631aef` — `feat: add provider-scoped dashboard inspection (Phase 3 Checkpoint 4)`
-- **Status:** verified against the disposable PostgreSQL test database; committed on `main` but **not yet pushed or run in CI**.
+- **Status:** verified against the disposable PostgreSQL test database; reviewed and approved; pushed to `origin/main` together with Revision C (CI result not yet recorded here).
 - **Files:** `src/api/inspection_routes.py`, `tests/api/test_inspection_routes.py`, `tests/integration/test_live_pipeline_e2e.py`.
 - **Scope:** read-only inspection endpoints only. No schema, migration, pipeline, frontend or Stage 1–8 behavior changes.
 - **API changes:**
@@ -650,13 +650,77 @@ Narrowly scoped changes to frozen stages made after the Stage 8 checkpoint with 
   - In the default `/payments` scope (Razorpay + synthetic), `DISTINCT ON (payment_id)` and the terminal-status subquery still merge Razorpay and synthetic rows that share a `payment_id`. `/timeline`'s Stage 5–8 lookups are keyed by `payment_attempt_id` only. Both are pre-existing and only matter on an identifier collision between those two sources.
   - The summary's `interventions` and `execution_provenance` default to all providers, while processed GMV and the capture rate default to the Razorpay pipeline; these are labeled scopes, not a coverage ratio.
 
+### Phase 3 Revision C — Same-Attempt Link Constraints (2026-11-03, committed; verified locally)
+
+- **Commit:** the commit that adds this section (`feat: add same-attempt link constraints for Stages 5-8 (Phase 3 Revision C)`).
+- **Status:** verified against the disposable PostgreSQL test database; reviewed and approved; committed separately from Checkpoint 4 and pushed to `origin/main` with it (CI result not yet recorded here).
+- **Migration:** `migrations/versions/f4a5b6c7d8e9_stage5_8_same_attempt_links.py`, revision `f4a5b6c7d8e9`, revises `e2d3c4b5a6f7`. It is the current Alembic head; the chain is linear across 13 revisions.
+  - Purely additive: no existing constraint is dropped or altered, and no row is inserted, updated or deleted.
+  - Downgrade drops exactly the constraints it added and restores the Revision B schema byte-for-byte (schema snapshot and data hashes compared in `tests/migration/test_revision_c.py`).
+  - Revision B is not an intermediate revision, so `ALEMBIC_INTERMEDIATE_REVISIONS` (Revision A only) is unchanged.
+- **Preflight (fails closed, reports the first 10 offending ids, changes nothing):**
+  - PF-C01: every decision's `stage5_prediction_id` must reference an existing prediction.
+  - PF-C02: a decision's prediction must belong to the decision's provider.
+  - PF-C03: a decision's prediction must belong to the decision's payment attempt.
+  - PF-C04: a command must belong to its decision's payment attempt.
+  - PF-C05: an observation must belong to its command's payment attempt.
+  - PF-C06: an attribution must belong to its command's payment attempt.
+  - PF-C07: an attribution must belong to its decision's payment attempt.
+- **Constraints added (all validated, not deferrable, default `NO ACTION`):**
+  - Unique targets:
+    - `uq_failure_prediction_attempt_link (prediction_id, payment_attempt_id, source_system)`
+    - `uq_intervention_decision_attempt_link (decision_id, payment_attempt_id, source_system)`
+    - `uq_cmd_attempt_link (command_id, payment_attempt_id, source_system)`
+  - `fk_decision_prediction`: `intervention_decisions (stage5_prediction_id, source_system) → failure_predictions (prediction_id, source_system)`. This is the provider-exact link. It is implied by the next key but kept, as specified, so a cross-provider reference is named explicitly.
+  - `fk_decision_prediction_attempt`: `(stage5_prediction_id, payment_attempt_id, source_system) → failure_predictions`.
+  - `fk_command_decision_attempt`: `intervention_commands (decision_id, payment_attempt_id, source_system) → intervention_decisions`.
+  - `fk_observation_command_attempt`: `payment_outcome_observations (command_id, payment_attempt_id, source_system) → intervention_commands`.
+  - `fk_attribution_command_attempt`: `counterfactual_attributions (command_id, payment_attempt_id, source_system) → intervention_commands`.
+  - `fk_attribution_decision_attempt`: `counterfactual_attributions (decision_id, payment_attempt_id, source_system) → intervention_decisions`. Attributions also store `decision_id`, which would otherwise remain the one unchecked cross-attempt link.
+  - The Revision B provider-level keys (`fk_command_decision`, `fk_observation_command`, `fk_attribution_command`, `fk_attribution_decision`, …) remain in place.
+- **Application impact:** none. The live write paths already produce same-attempt links:
+  - Stage 6 selects its prediction with `get_stage5_prediction_as_of(attempt, provider)`.
+  - Commands copy the decision's attempt and provider.
+  - Observations and attributions copy the command's.
+  - The live-pipeline end-to-end tests pass unchanged.
+- **Models:** `src/infrastructure/models.py` declares the same constraints, so offline (`tests/boundaries/test_schema_parity.py`) and live (`tests/integration/test_schema_parity_live.py`) parity hold.
+- **Tests added or changed:**
+  - New `tests/integration/test_stage5_8_same_attempt_constraints.py` (10 tests, PostgreSQL at head).
+    - Rows are written with raw SQL, so every rejection comes from the database. The rejecting constraint is identified by asyncpg's `constraint_name` (SQLSTATE 23503).
+    - Covers exact constraint definitions; a nonexistent prediction; another provider's prediction; another attempt's prediction of the same provider; a command, an observation or an attribution referencing another attempt's command or decision; valid linked traces for Razorpay, synthetic and PayPal; and a NULL `stage5_prediction_id` still being accepted.
+    - When one row violates both decision → prediction keys, each key is also proven alone, by dropping the other inside a transaction that is always rolled back.
+  - New `tests/migration/test_revision_c.py` (8 tests):
+    - Upgrade B → C → B → head round trip with exact schema and data-hash equality.
+    - One test per preflight check. Each shows Revision B accepted the inconsistent row, the upgrade is refused with the check's code and description, and the schema and data are unchanged.
+  - `tests/integration/attempt_registry.py`: new `record_prediction` helper that stores a real prediction for a registered attempt.
+  - Eight existing fixtures seeded ACT decisions with `stage5_prediction_id=uuid.uuid4()` (a prediction that never existed). The new key rejects these, so they now reference a real prediction of the same attempt; no assertion was changed. The fixtures are in `test_execution_lifecycle.py`, `test_execution_persistence.py`, `test_execution_temporal.py`, `test_execution_concurrency.py` (two sites) and `tests/api/test_inspection_routes.py` (three sites).
+  - Head pins updated with intent preserved:
+    - `tests/unit/test_alembic_destination_resolution.py`: `head` is Revision C, and `head-2` replaces `head-1` for "ends at Revision A". New cases cover upgrades ending at Revision C and downgrades back to Revision B, which emit no intermediate-revision assertion.
+    - `tests/migration/test_revision_b.py`: the round trip re-upgrades to Revision B explicitly instead of `head`.
+    - `tests/boundaries/test_schema_parity.py`: the FK name set includes the six new keys.
+- **Validation (2026-11-03, local):**
+  - Environment: Docker `db_test` only (PostgreSQL 15.19, tmpfs, `localhost:5434/payment_recovery_test`, validated by `assert_disposable_test_target` and `current_database()`), with `DATABASE_URL` pointed at unreachable `127.0.0.1:1`. The development container `paymentrecovery-db-1` stayed exited, with unchanged timestamps.
+  - Before the fixture fix, the new keys rejected exactly those 8 fixture sites (17 failing tests, all `fk_decision_prediction`); nothing else in the suites was rejected.
+  - Against PostgreSQL: `tests/integration` + `tests/api` **680 passed, 0 failed, 0 skipped**; `RUN_MIGRATION_TESTS=1 tests/migration` **103 passed, 0 skipped**.
+  - Without a database: `tests/unit` + `tests/boundaries` **1,567 passed, 0 skipped** (9 new Alembic destination cases, and 6 automatic safety checks over the new test files); `node --test tests/frontend/dashboard_formatters.test.mjs` **7 passed**.
+- **Remaining database integrity risks (not addressed):**
+  - **Development database not checked:** it was deliberately not connected to. Upgrading it runs the preflight, which refuses (and changes nothing) if existing rows violate PF-C01..PF-C07; any such rows must be resolved explicitly, never deleted silently.
+  - A NULL `stage5_prediction_id` is not checked (`MATCH SIMPLE`), so a decision may legitimately have no prediction.
+  - An attribution's `decision_id` must be a decision of the same attempt, but is not required to be its command's own decision (for example, another decision version of that attempt).
+  - Execution attempts carry no `payment_attempt_id`; their attempt follows only through `(command_id, source_system)`.
+  - Temporal order (a decision's prediction made before the decision, and similar) is not enforced by the database.
+  - Append-only semantics (no UPDATE or DELETE) are application conventions, not database-enforced (no triggers or revoked privileges).
+  - The keys are created with immediate validation, which locks the tables while it scans them. That is fine at current volumes; large production tables would need `NOT VALID` followed by `VALIDATE CONSTRAINT`.
+  - Three new unique indexes add some write overhead.
+
 ## Current State
 
-The repository is at **Phase 3 Checkpoint 4 committed (`b190213`, verified locally; not yet pushed)** on top of Revision B (`cddb60c`, CI green).
+The repository is at **Phase 3 Revision C**, committed after Checkpoint 4 (`b190213`) on top of Revision B (`cddb60c`, CI green). Both milestones were reviewed, approved and pushed to `origin/main` together.
 
-- **Branch:** `main`, ahead of `origin/main` (`cddb60c`) by the unpushed Checkpoint 4 commit and this documentation update.
-- **Latest Checkpoint Commit:** `b190213` (`feat: add provider-scoped dashboard inspection (Phase 3 Checkpoint 4)`).
-- **CI Status:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416) green on `cddb60c`; Checkpoint 4 has not run in CI.
+- **Branch:** `main`.
+- **Checkpoint commits:** `b190213` (Checkpoint 4) and the Revision C commit that adds its section above.
+- **Alembic head:** `f4a5b6c7d8e9` (Revision C); single head, 13 linear revisions.
+- **CI Status:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416) green on `cddb60c`. The CI result for the pushed Checkpoint 4 and Revision C commits is not yet recorded here.
 - **Working Tree:** Clean.
 
 ### What is real versus simulated (2026-11-02 audit)
@@ -671,9 +735,9 @@ The repository is at **Phase 3 Checkpoint 4 committed (`b190213`, verified local
 ### Remaining work (prioritized)
 
 - **P0:**
-  1. Push Checkpoint 4 (`b190213`) after approval and confirm CI.
-  2. Add the missing `stage5_prediction_id` foreign key.
-  3. Enforce attempt consistency between linked Stage 5–8 rows.
+  1. Confirm CI for the pushed Checkpoint 4 and Revision C commits and record the result here.
+  2. Before upgrading any non-test database, run the Revision C preflight there and resolve any reported rows explicitly.
+  - Done locally (Revision C): the `stage5_prediction_id` foreign key and same-attempt links between Stage 5–8 rows.
 - **P1:**
   - Real executor for one route (not started; explicitly deferred).
   - Multi-currency route costs.

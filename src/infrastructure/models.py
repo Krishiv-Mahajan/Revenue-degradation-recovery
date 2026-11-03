@@ -358,6 +358,9 @@ class FailurePredictionModel(Base):
             name="uq_failure_prediction_version",
         ),
         UniqueConstraint("prediction_id", "source_system", name="uq_failure_prediction_provider"),
+        UniqueConstraint(
+            "prediction_id", "payment_attempt_id", "source_system", name="uq_failure_prediction_attempt_link"
+        ),
         ForeignKeyConstraint(
             ["payment_attempt_id", "source_system"],
             ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
@@ -434,10 +437,28 @@ class InterventionDecisionModel(Base):
             name="uq_intervention_decision_version",
         ),
         UniqueConstraint("decision_id", "source_system", name="uq_intervention_decision_provider"),
+        UniqueConstraint(
+            "decision_id", "payment_attempt_id", "source_system", name="uq_intervention_decision_attempt_link"
+        ),
         ForeignKeyConstraint(
             ["payment_attempt_id", "source_system"],
             ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
             name="fk_intervention_decisions_payment_attempt",
+        ),
+        # A NULL stage5_prediction_id (no Stage 5 prediction) is not checked (MATCH SIMPLE).
+        ForeignKeyConstraint(
+            ["stage5_prediction_id", "source_system"],
+            ["failure_predictions.prediction_id", "failure_predictions.source_system"],
+            name="fk_decision_prediction",
+        ),
+        ForeignKeyConstraint(
+            ["stage5_prediction_id", "payment_attempt_id", "source_system"],
+            [
+                "failure_predictions.prediction_id",
+                "failure_predictions.payment_attempt_id",
+                "failure_predictions.source_system",
+            ],
+            name="fk_decision_prediction_attempt",
         ),
         Index("ix_intervention_decisions_attempt_lookup", "payment_attempt_id", "decision_version"),
         Index("ix_intervention_decisions_fingerprint", "input_fingerprint"),
@@ -484,6 +505,7 @@ class InterventionCommandModel(Base):
             name="uq_cmd_attempt_version",
         ),
         UniqueConstraint("command_id", "source_system", name="uq_cmd_provider"),
+        UniqueConstraint("command_id", "payment_attempt_id", "source_system", name="uq_cmd_attempt_link"),
         ForeignKeyConstraint(
             ["payment_attempt_id", "source_system"],
             ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
@@ -493,6 +515,15 @@ class InterventionCommandModel(Base):
             ["decision_id", "source_system"],
             ["intervention_decisions.decision_id", "intervention_decisions.source_system"],
             name="fk_command_decision",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "payment_attempt_id", "source_system"],
+            [
+                "intervention_decisions.decision_id",
+                "intervention_decisions.payment_attempt_id",
+                "intervention_decisions.source_system",
+            ],
+            name="fk_command_decision_attempt",
         ),
         Index("ix_cmd_status_expiry", "command_status", "expires_at"),
         Index("ix_cmd_attempt_lookup", "payment_attempt_id", "created_at"),
@@ -581,6 +612,15 @@ class PaymentOutcomeObservationModel(Base):
             ["intervention_commands.command_id", "intervention_commands.source_system"],
             name="fk_observation_command",
         ),
+        ForeignKeyConstraint(
+            ["command_id", "payment_attempt_id", "source_system"],
+            [
+                "intervention_commands.command_id",
+                "intervention_commands.payment_attempt_id",
+                "intervention_commands.source_system",
+            ],
+            name="fk_observation_command_attempt",
+        ),
         Index("ix_obs_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
     )
 
@@ -646,6 +686,24 @@ class CounterfactualAttributionModel(Base):
             ["decision_id", "source_system"],
             ["intervention_decisions.decision_id", "intervention_decisions.source_system"],
             name="fk_attribution_decision",
+        ),
+        ForeignKeyConstraint(
+            ["command_id", "payment_attempt_id", "source_system"],
+            [
+                "intervention_commands.command_id",
+                "intervention_commands.payment_attempt_id",
+                "intervention_commands.source_system",
+            ],
+            name="fk_attribution_command_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "payment_attempt_id", "source_system"],
+            [
+                "intervention_decisions.decision_id",
+                "intervention_decisions.payment_attempt_id",
+                "intervention_decisions.source_system",
+            ],
+            name="fk_attribution_decision_attempt",
         ),
         Index("ix_attr_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
         Index("ix_attr_status", "attribution_status", "attributed_at"),

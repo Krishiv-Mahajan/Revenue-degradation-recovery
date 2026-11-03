@@ -173,4 +173,10 @@ def test_foreign_keys_declared_on_models(model_ddl):
         "fk_command_decision",
         "fk_exec_attempt_command",
         "fk_observation_command",
+        "fk_decision_prediction",
+        "fk_decision_prediction_attempt",
+        "fk_command_decision_attempt",
+        "fk_observation_command_attempt",
+        "fk_attribution_command_attempt",
+        "fk_attribution_decision_attempt",
     }

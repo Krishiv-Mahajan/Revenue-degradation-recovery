@@ -24,7 +24,7 @@ from src.infrastructure.models import (
     InterventionExecutionAttemptModel,
     PaymentEventModel,
 )
-from tests.integration.attempt_registry import register_attempt
+from tests.integration.attempt_registry import record_prediction, register_attempt
 
 
 @pytest.mark.asyncio
@@ -68,7 +68,7 @@ async def test_duplicate_command_creation_idempotent(db_engine):
             decision_type=DecisionType.ACT,
             selected_route_id=InterventionRouteKey.RETRY_SECONDARY_GATEWAY,
             failure_probability=0.85,
-            stage5_prediction_id=uuid.uuid4(),
+            stage5_prediction_id=await record_prediction(session, attempt, now),
             diagnosis_confidence="STRONG",
             decision_confidence=0.9,
             gate_verdict=GateVerdict.PASSED,
@@ -137,7 +137,7 @@ async def test_concurrent_execution_race_condition_safe(db_engine):
             decision_type=DecisionType.ACT,
             selected_route_id=InterventionRouteKey.RETRY_SECONDARY_GATEWAY,
             failure_probability=0.85,
-            stage5_prediction_id=uuid.uuid4(),
+            stage5_prediction_id=await record_prediction(session, attempt, now),
             diagnosis_confidence="STRONG",
             decision_confidence=0.9,
             gate_verdict=GateVerdict.PASSED,

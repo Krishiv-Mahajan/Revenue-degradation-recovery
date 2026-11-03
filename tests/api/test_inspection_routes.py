@@ -9,6 +9,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.main import app
 from src.api.dependencies import get_db_session
+from src.core.domain.payment_attempts import AttemptRef
+from tests.integration.attempt_registry import record_prediction
 
 from src.infrastructure.models import (
     CounterfactualAttributionModel,
@@ -830,7 +832,10 @@ async def test_payments_list_canonical_events(client, db_engine):
         session.add(InterventionDecisionModel(
             decision_id=dec_id, payment_attempt_id=pid_success, source_system="razorpay", decision_version=1,
             decided_at=now - timedelta(minutes=4, seconds=30), decision_type="ACT",
-            selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=uuid.uuid4(),
+            selected_route_id="ROUTE_A", failure_probability=0.8,
+            stage5_prediction_id=await record_prediction(
+                session, AttemptRef.for_key("razorpay", pid_success), now - timedelta(minutes=5)
+            ),
             diagnosis_confidence="HIGH", decision_confidence=0.9,
             gate_verdict="PASSED", policy_id="P1", policy_version="1.0",
             input_fingerprint="sha256:0", evaluation_audit_payload={}, created_at=now
@@ -979,7 +984,10 @@ async def test_timeline_excludes_paypal_events(client, db_engine):
         session.add(InterventionDecisionModel(
             decision_id=dec_id, payment_attempt_id=razorpay_pid, source_system="razorpay", decision_version=1,
             decided_at=now - timedelta(minutes=4, seconds=30), decision_type="ACT",
-            selected_route_id="ROUTE_A", failure_probability=0.8, stage5_prediction_id=uuid.uuid4(),
+            selected_route_id="ROUTE_A", failure_probability=0.8,
+            stage5_prediction_id=await record_prediction(
+                session, AttemptRef.for_key("razorpay", razorpay_pid), now - timedelta(minutes=5)
+            ),
             diagnosis_confidence="HIGH", decision_confidence=0.9,
             gate_verdict="PASSED", policy_id="P1", policy_version="1.0",
             input_fingerprint="sha256:0", evaluation_audit_payload={}, created_at=now
@@ -1304,12 +1312,13 @@ async def test_payments_list_uses_only_the_latest_decision_version(client, db_en
             registered_at=now,
         ))
         await session.flush()
+        prediction_id = await record_prediction(session, AttemptRef.for_key("razorpay", pid), now)
         for version, decision_type in ((1, "MONITOR"), (2, "ACT")):
             session.add(InterventionDecisionModel(
                 decision_id=uuid.uuid4(), payment_attempt_id=pid, source_system="razorpay", decision_version=version,
                 decided_at=now + timedelta(seconds=version), decision_type=decision_type,
                 selected_route_id="FALLBACK_PAYMENT_LINK" if decision_type == "ACT" else None,
-                failure_probability=0.8, stage5_prediction_id=uuid.uuid4(), diagnosis_confidence="STRONG",
+                failure_probability=0.8, stage5_prediction_id=prediction_id, diagnosis_confidence="STRONG",
                 decision_confidence=0.9, gate_verdict="PASSED", policy_id="P1", policy_version="1.0",
                 input_fingerprint=f"sha256:{version}", evaluation_audit_payload={}, created_at=now,
             ))

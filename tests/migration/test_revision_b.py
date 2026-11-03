@@ -247,8 +247,8 @@ async def test_upgrade_to_revision_b_and_downgrade_roundtrip(migration_db):
         for r in fks:
             assert "source_system" not in r.cdef
 
-    # 6. Re-upgrade to Revision B (head)
-    await alembic.ok("upgrade", "head")
+    # 6. Re-upgrade to Revision B
+    await alembic.ok("upgrade", REVISION_B)
     assert await version(engine) == REVISION_B
     assert await schema_snapshot(engine) == schema_b
     assert await data_hashes(engine, columns_by_table(schema_b)) == data_hashes_b
