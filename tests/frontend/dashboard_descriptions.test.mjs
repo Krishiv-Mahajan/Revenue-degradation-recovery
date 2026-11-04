@@ -4,10 +4,16 @@ import { test } from 'node:test';
 
 import { formatMoney } from '../../src/static/js/api.js';
 import {
+  describeAnalyticsScope,
   describeExecutionProvenance,
   describeProtectedByProvider,
+  describeProviderHealth,
   describeRecoveryCheckout,
+  describeRoute,
   describeScopes,
+  describeSwitchOffer,
+  describeSwitchOfferStatus,
+  describeSwitchOffers,
 } from '../../src/static/js/descriptions.js';
 
 test('names real and simulated executors separately', () => {
@@ -51,4 +57,47 @@ test('repeats the API scope labels, including not-applicable metrics', () => {
   } });
   assert.equal(text, 'Scope: processed not_applicable, protected paypal, episodes global');
   assert.equal(describeScopes({}), '');
+});
+
+test('names gateway retry and the customer-approved switch as different interventions', () => {
+  assert.equal(describeRoute('RETRY_SECONDARY_GATEWAY'), 'Gateway retry (RETRY_SECONDARY_GATEWAY)');
+  assert.equal(
+    describeRoute('PROMPT_PAYMENT_METHOD_SWITCH'),
+    'Customer-approved PayPal switch (PROMPT_PAYMENT_METHOD_SWITCH)',
+  );
+  assert.equal(describeRoute('SOMETHING_NEW'), 'SOMETHING_NEW');
+  assert.equal(describeRoute(null), '—');
+});
+
+test('reports each analytics scope as healthy or degraded', () => {
+  assert.deepEqual(describeProviderHealth([
+    { provider_scope: 'razorpay_pipeline', status: 'HEALTHY', active_episodes: 0, worst_severity: null },
+    { provider_scope: 'paypal', status: 'DEGRADED', active_episodes: 2, worst_severity: 'CRITICAL' },
+  ]), [
+    { label: 'Razorpay + synthetic', status: 'HEALTHY', detail: 'No active degradation' },
+    { label: 'PayPal', status: 'DEGRADED', detail: '2 active episodes, worst CRITICAL' },
+  ]);
+  assert.equal(describeAnalyticsScope(undefined), 'unknown scope');
+  assert.deepEqual(describeProviderHealth(null), []);
+});
+
+test('separates offers awaiting the customer from accepted and PayPal-verified paid offers', () => {
+  assert.equal(
+    describeSwitchOffers({ OFFERED: 1, ACCEPTED: 1, COMPLETED: 2, DECLINED: 0, EXPIRED: 1 }),
+    '5 offers: 1 awaiting customer · 1 accepted at PayPal, not yet paid · 2 paid (PayPal-verified) · 1 expired unanswered',
+  );
+  assert.equal(describeSwitchOffers({ OFFERED: 0 }), 'No payment switch offers yet');
+  assert.equal(describeSwitchOfferStatus('ABANDONED'), 'abandoned after accepting');
+});
+
+test('describes a switch offer in the audit trail without implying the engine charged anyone', () => {
+  const lines = describeSwitchOffer({
+    offer_id: '0123456789abcdef', status: 'OFFERED', expires_at: '2026-11-04T10:30:00+00:00',
+  });
+  assert.deepEqual(lines, [
+    'Payment switch offer 01234567: awaiting customer',
+    'Requires the customer to approve at PayPal; this engine never captures or switches methods itself',
+    'Customer response deadline: 2026-11-04T10:30:00+00:00',
+  ]);
+  assert.deepEqual(describeSwitchOffer(null), []);
 });

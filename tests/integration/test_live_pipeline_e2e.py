@@ -694,6 +694,8 @@ async def test_paypal_order_approval_and_capture_attribute_a_simulated_intervent
         ("USD", 16200),
     ]
     assert summary["total_gmv_by_currency"] == []  # processed volume stays Razorpay-only
+    # A simulated execution is never verified recovered money, whatever the observed outcome.
+    assert summary["verified_recovered_gmv_by_currency"] == []
 
 
 @pytest.mark.asyncio
@@ -1237,3 +1239,7 @@ async def test_real_paypal_recovery_checkout_is_executed_observed_and_attributed
     )
     assert (timeline["observation"]["outcome"], timeline["observation"]["recovered_via_recovery_order"]) == ("CAPTURED", True)
     assert (timeline["attribution"]["status"], timeline["attribution"]["is_simulated_execution"]) == ("ATTRIBUTED", False)
+
+    # The PayPal-verified capture through the real recovery checkout is verified recovered money.
+    summary = (await e2e.client.get("/api/v1/summary", auth=("e2e-dashboard-user", "e2e-dashboard-password"))).json()
+    assert summary["verified_recovered_gmv_by_currency"] == [{"currency": "USD", "amount_minor_units": 50000, "payment_count": 1}]

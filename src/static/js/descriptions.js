@@ -46,3 +46,80 @@ export function describeScopes(data) {
   if (!scopes) return '';
   return `Scope: processed ${scopes.processed_gmv}, protected ${scopes.protected_gmv}, episodes ${scopes.active_degradation_episodes}`;
 }
+
+const ROUTE_LABELS = {
+  RETRY_SECONDARY_GATEWAY: 'Gateway retry',
+  PROMPT_PAYMENT_METHOD_SWITCH: 'Customer-approved PayPal switch',
+  DYNAMIC_RETRY_BACKOFF: 'Retry with backoff',
+  DEGRADATION_CIRCUIT_BYPASS: 'Degradation circuit bypass',
+  FALLBACK_PAYMENT_LINK: 'Fallback payment link',
+};
+
+/**
+ * "Customer-approved PayPal switch (PROMPT_PAYMENT_METHOD_SWITCH)"; unknown keys are shown as they are.
+ */
+export function describeRoute(routeKey) {
+  if (!routeKey) return '—';
+  return ROUTE_LABELS[routeKey] ? `${ROUTE_LABELS[routeKey]} (${routeKey})` : routeKey;
+}
+
+const SCOPE_LABELS = { razorpay_pipeline: 'Razorpay + synthetic', paypal: 'PayPal' };
+
+/**
+ * The provider population a Stage 2-4 analytics scope covers.
+ */
+export function describeAnalyticsScope(scope) {
+  return SCOPE_LABELS[scope] || scope || 'unknown scope';
+}
+
+/**
+ * One entry per analytics scope: { label, status: 'HEALTHY' | 'DEGRADED', detail }.
+ */
+export function describeProviderHealth(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => ({
+    label: describeAnalyticsScope(r.provider_scope),
+    status: r.status,
+    detail: r.status === 'DEGRADED'
+      ? `${formatCount(r.active_episodes)} active episode${r.active_episodes === 1 ? '' : 's'}, worst ${r.worst_severity}`
+      : 'No active degradation',
+  }));
+}
+
+const OFFER_STATUS_ORDER = ['OFFERED', 'ACCEPTED', 'COMPLETED', 'DECLINED', 'EXPIRED', 'ABANDONED', 'PAYMENT_FAILED'];
+const OFFER_STATUS_LABELS = {
+  OFFERED: 'awaiting customer',
+  ACCEPTED: 'accepted at PayPal, not yet paid',
+  COMPLETED: 'paid (PayPal-verified)',
+  DECLINED: 'declined by customer',
+  EXPIRED: 'expired unanswered',
+  ABANDONED: 'abandoned after accepting',
+  PAYMENT_FAILED: 'PayPal payment failed',
+};
+
+export function describeSwitchOfferStatus(status) {
+  return OFFER_STATUS_LABELS[status] || status || '—';
+}
+
+/**
+ * "3 offers: 1 awaiting customer · 1 paid (PayPal-verified) · 1 declined by customer"; zero counts are omitted.
+ */
+export function describeSwitchOffers(counts) {
+  const entries = OFFER_STATUS_ORDER.map((s) => [s, (counts && counts[s]) || 0]).filter(([, n]) => n > 0);
+  const total = entries.reduce((sum, [, n]) => sum + n, 0);
+  if (total === 0) return 'No payment switch offers yet';
+  return `${formatCount(total)} offer${total === 1 ? '' : 's'}: `
+    + entries.map(([s, n]) => `${formatCount(n)} ${describeSwitchOfferStatus(s)}`).join(' · ');
+}
+
+/**
+ * Audit lines for the payment switch offer an execution created (none when there is no offer).
+ */
+export function describeSwitchOffer(offer) {
+  if (!offer) return [];
+  return [
+    `Payment switch offer ${String(offer.offer_id).slice(0, 8)}: ${describeSwitchOfferStatus(offer.status)}`,
+    'Requires the customer to approve at PayPal; this engine never captures or switches methods itself',
+    offer.expires_at ? `Customer response deadline: ${offer.expires_at}` : null,
+  ].filter(Boolean);
+}

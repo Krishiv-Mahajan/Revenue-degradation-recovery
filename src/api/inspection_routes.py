@@ -8,7 +8,9 @@ import uuid
 from src.api.dependencies import get_db_session
 from src.api.security import require_dashboard_auth
 from src.core.attribution.attribution_service import classify_model_provenance
+from src.core.domain.analytics_scopes import ANALYTICS_SCOPES
 from src.core.domain.payment_attempts import PAYPAL_ATTEMPT_PREFIX, PAYPAL_TRIGGER_EVENT_TYPE, paypal_order_id
+from src.core.domain.switch_offer_models import OfferStatus
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.core.intervention.policy import get_default_policy
 from src.infrastructure.models import (
@@ -283,6 +285,74 @@ async def _prediction_models(
     ]
 
 
+_SEVERITY_ORDER = {"MODERATE": 1, "HIGH": 2, "CRITICAL": 3}
+
+
+async def _provider_health(session: AsyncSession) -> List[Dict[str, Any]]:
+    """DEGRADED or HEALTHY per Stage 2-4 analytics scope, from its ACTIVE degradation episodes."""
+    rows = (await session.execute(
+        select(DegradationEpisodeModel.provider_scope, DegradationEpisodeModel.severity, func.count())
+        .where(DegradationEpisodeModel.status == "ACTIVE")
+        .group_by(DegradationEpisodeModel.provider_scope, DegradationEpisodeModel.severity)
+    )).all()
+    health = []
+    for scope in ANALYTICS_SCOPES:
+        severities = {severity: count for s, severity, count in rows if s == scope}
+        worst = max(severities, key=lambda sev: _SEVERITY_ORDER.get(sev, 0)) if severities else None
+        health.append({
+            "provider_scope": scope,
+            "status": "DEGRADED" if severities else "HEALTHY",
+            "active_episodes": sum(severities.values()),
+            "worst_severity": worst,
+        })
+    return health
+
+
+async def _switch_offer_counts(session: AsyncSession, provider: Optional[str]) -> Dict[str, int]:
+    """Payment method switch offers per lifecycle status, by the original attempt's provider."""
+    stmt = select(PaymentMethodSwitchOfferModel.status, func.count()).group_by(PaymentMethodSwitchOfferModel.status)
+    if provider is not None:
+        stmt = stmt.where(PaymentMethodSwitchOfferModel.source_system == provider)
+    counts = dict((await session.execute(stmt)).all())
+    return {status.value: counts.get(status.value, 0) for status in OfferStatus}
+
+
+async def _verified_recovered_by_currency(session: AsyncSession, provider: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    Money PayPal verifiably captured through a real recovery checkout or an accepted switch offer: the
+    captured amounts of the latest observations resolved by a recovery order, per currency. Unlike protected
+    GMV this is observed money, not an estimate; it never includes simulated executions.
+    """
+    recovered = PaymentOutcomeObservationModel.observation_audit_payload["recovery"]["recovered_via_recovery_order"]
+    stmt = (
+        select(PaymentEventModel.currency, func.sum(PaymentEventModel.amount_minor_units), func.count())
+        .select_from(PaymentOutcomeObservationModel)
+        .join(PaymentEventModel, PaymentEventModel.event_id == PaymentOutcomeObservationModel.terminal_event_id)
+        .join(
+            InterventionExecutionAttemptModel,
+            and_(
+                InterventionExecutionAttemptModel.command_id == PaymentOutcomeObservationModel.command_id,
+                InterventionExecutionAttemptModel.attempt_id.in_(_latest_attempt_ids()),
+            ),
+        )
+        .where(
+            PaymentOutcomeObservationModel.observation_id.in_(_latest_observation_ids()),
+            PaymentOutcomeObservationModel.payment_outcome == "CAPTURED",
+            recovered.as_string() == "true",
+            InterventionExecutionAttemptModel.is_simulation.is_(False),
+            PaymentEventModel.event_type == "payment.captured",
+        )
+        .group_by(PaymentEventModel.currency)
+        .order_by(PaymentEventModel.currency)
+    )
+    if provider is not None:
+        stmt = stmt.where(PaymentOutcomeObservationModel.source_system == provider)
+    return [
+        {"currency": currency, "amount_minor_units": int(amount or 0), "payment_count": count}
+        for currency, amount, count in (await session.execute(stmt)).all()
+    ]
+
+
 @router.get("/summary")
 async def get_executive_summary(
     session: AsyncSession = Depends(get_db_session),
@@ -333,6 +403,10 @@ async def get_executive_summary(
     active_episodes_stmt = select(func.count(DegradationEpisodeModel.episode_id)).where(DegradationEpisodeModel.status == 'ACTIVE')
     active_episodes_res = await session.execute(active_episodes_stmt)
     active_episodes = active_episodes_res.scalar_one_or_none() or 0
+
+    provider_health = await _provider_health(session)
+    switch_offer_counts = await _switch_offer_counts(session, prov_val)
+    verified_recovered_by_currency = await _verified_recovered_by_currency(session, prov_val)
 
     # Total interventions executed
     interventions_stmt = select(func.count(InterventionCommandModel.command_id)).where(
@@ -403,6 +477,9 @@ async def get_executive_summary(
             "interventions": interventions_scope,
             "capture_success_rate": rates_scope,
             "active_degradation_episodes": "global",
+            "provider_health": "per_analytics_scope",
+            "switch_offers": interventions_scope,
+            "verified_recovered_gmv": interventions_scope,
         },
         "processed_gmv_scope": processed_scope,
         "protected_gmv_scope": protected_scope,
@@ -415,6 +492,9 @@ async def get_executive_summary(
         "total_protected_gmv_by_currency": total_protected_gmv_by_currency,
         "protected_gmv_by_provider": protected_gmv_by_provider,
         "active_degradation_episodes": active_episodes,
+        "provider_health": provider_health,
+        "switch_offers_by_status": switch_offer_counts,
+        "verified_recovered_gmv_by_currency": verified_recovered_by_currency,
         "total_successful_interventions": total_interventions,
         "simulated_successful_interventions": simulated_interventions,
         "execution_provenance": execution_provenance,
@@ -781,6 +861,8 @@ async def get_recovery_workspace(
             InterventionExecutionAttemptModel.executor_name,
             InterventionExecutionAttemptModel.is_simulation,
             ledger_currency.c.currency,
+            PaymentMethodSwitchOfferModel.offer_id,
+            PaymentMethodSwitchOfferModel.status.label("switch_offer_status"),
         )
         .select_from(InterventionDecisionModel)
         .outerjoin(InterventionCommandModel, InterventionCommandModel.decision_id == InterventionDecisionModel.decision_id)
@@ -798,6 +880,9 @@ async def get_recovery_workspace(
             and_(InterventionExecutionAttemptModel.command_id == InterventionCommandModel.command_id, latest_attempt),
         )
         .outerjoin(ledger_currency, ledger_currency.c.payment_id == InterventionDecisionModel.payment_attempt_id)
+        .outerjoin(
+            PaymentMethodSwitchOfferModel, PaymentMethodSwitchOfferModel.command_id == InterventionCommandModel.command_id,
+        )
     )
 
     count_query = select(func.count(InterventionDecisionModel.decision_id))
@@ -852,6 +937,7 @@ async def get_recovery_workspace(
             "attribution_status": attr_status,
             "is_simulated_execution": r.is_simulated_execution,
             "is_synthetic_baseline": r.is_synthetic_baseline,
+            "switch_offer": {"offer_id": str(r.offer_id), "status": r.switch_offer_status} if r.offer_id else None,
         })
 
     return {

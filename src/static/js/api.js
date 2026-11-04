@@ -110,6 +110,14 @@ export async function getAttributions(limit = 50, provider = '') {
 }
 
 /**
+ * Queries payment method switch offers from /api/v1/offers (counts per status and the latest offers).
+ */
+export async function getSwitchOffers(limit = 50) {
+  const boundedLimit = Math.max(1, Math.min(1000, limit));
+  return await fetchJSON(`/api/v1/offers?limit=${boundedLimit}`);
+}
+
+/**
  * Queries payments list for the Payment Audit Inspector from /api/v1/payments.
  * @param {Object} options - { search, filterType, status, limit, offset, provider }
  */

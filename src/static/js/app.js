@@ -14,6 +14,7 @@ import {
   getAttributions,
   getPayments,
   getPaymentTimeline,
+  getSwitchOffers,
   formatMoney,
   formatMoneyTotals,
   formatPercentage,
@@ -21,10 +22,16 @@ import {
   formatDateTime
 } from './api.js';
 import {
+  describeAnalyticsScope,
   describeExecutionProvenance,
   describeProtectedByProvider,
+  describeProviderHealth,
   describeRecoveryCheckout,
+  describeRoute,
   describeScopes,
+  describeSwitchOffer,
+  describeSwitchOfferStatus,
+  describeSwitchOffers,
 } from './descriptions.js';
 
 // Application State
@@ -73,6 +80,10 @@ const elements = {
   kpiInterventions: document.getElementById('kpi-interventions'),
   kpiInterventionsSubtext: document.getElementById('kpi-interventions-subtext'),
   kpiAuthCaptureVolume: document.getElementById('kpi-auth-capture-volume'),
+  kpiVerifiedRecovered: document.getElementById('kpi-verified-recovered'),
+  kpiSwitchOffers: document.getElementById('kpi-switch-offers'),
+  kpiSwitchOffersSub: document.getElementById('kpi-switch-offers-sub'),
+  providerHealthStrip: document.getElementById('provider-health-strip'),
   summaryErrorBanner: document.getElementById('summary-error-banner'),
   summaryErrorMessage: document.getElementById('summary-error-message'),
 
@@ -150,6 +161,10 @@ const elements = {
   recAttrError: document.getElementById('rec-attr-error'),
   recAttrErrorMsg: document.getElementById('rec-attr-error-msg'),
   attributionLedgerBody: document.getElementById('attribution-ledger-body'),
+  switchOffersBody: document.getElementById('switch-offers-body'),
+  switchOffersSummary: document.getElementById('switch-offers-summary'),
+  switchOffersError: document.getElementById('switch-offers-error'),
+  switchOffersErrorMsg: document.getElementById('switch-offers-error-msg'),
 
   // Phase 7C: Payments Elements
   refreshPaymentsBtn: document.getElementById('refresh-payments-btn'),
@@ -306,7 +321,7 @@ export async function loadAllData() {
   state.loading = true;
   updateLoadingState(true);
 
-  const [healthResult, summaryResult, episodesResult, recoveryResult, attributionsResult, paymentsResult] = await Promise.allSettled([
+  const [healthResult, summaryResult, episodesResult, recoveryResult, attributionsResult, paymentsResult, offersResult] = await Promise.allSettled([
     getHealth(),
     getSummary(state.provider),
     getEpisodes(10),
@@ -315,8 +330,10 @@ export async function loadAllData() {
     getPayments({
       search: state.payments.search, filterType: state.payments.filterType, status: state.payments.status,
       limit: 50, offset: 0, provider: state.provider,
-    })
+    }),
+    getSwitchOffers(50),
   ]);
+  renderSwitchOffersResult(offersResult);
 
   // 1. Handle Health Check Result
   if (healthResult.status === 'fulfilled') {
@@ -497,7 +514,39 @@ function renderSummary() {
       : `${formatCount(data.total_auths)} / ${formatCount(data.total_captures)}`;
   }
 
+  // 7. Verified recovered payments (observed PayPal captures through a real recovery), per currency
+  if (elements.kpiVerifiedRecovered) {
+    elements.kpiVerifiedRecovered.textContent = formatMoneyTotals(data.verified_recovered_gmv_by_currency, 'None verified');
+  }
+
+  // 8. Payment switch offers by lifecycle status
+  const offerCounts = data.switch_offers_by_status || {};
+  const offerTotal = Object.values(offerCounts).reduce((sum, n) => sum + (n || 0), 0);
+  if (elements.kpiSwitchOffers) {
+    elements.kpiSwitchOffers.textContent = `${formatCount(offerTotal)} offered / ${formatCount(offerCounts.COMPLETED || 0)} paid`;
+  }
+  if (elements.kpiSwitchOffersSub) elements.kpiSwitchOffersSub.textContent = describeSwitchOffers(offerCounts);
+
+  renderProviderHealth(data.provider_health);
   renderProvenance(data);
+}
+
+/**
+ * Healthy versus degraded per Stage 2-4 analytics scope (Razorpay + synthetic, PayPal).
+ */
+function renderProviderHealth(rows) {
+  if (!elements.providerHealthStrip) return;
+  elements.providerHealthStrip.replaceChildren(...describeProviderHealth(rows).map((h) => {
+    const pill = document.createElement('div');
+    pill.className = `provider-health-pill ${h.status === 'DEGRADED' ? 'degraded' : 'healthy'}`;
+    const label = document.createElement('span');
+    label.className = 'provider-health-label';
+    label.textContent = `${h.label}: ${h.status}`;
+    const detail = document.createElement('span');
+    detail.textContent = h.detail;
+    pill.append(label, detail);
+    return pill;
+  }));
 }
 
 /**
@@ -633,6 +682,7 @@ function renderEpisodes() {
             <div class="incident-badges">
               <span class="severity-pill ${severityLower}">${escapeHTML(ep.severity)}</span>
               <span class="status-pill">${escapeHTML(ep.status)}</span>
+              <span class="scope-pill" title="Stage 2-4 analytics scope">${escapeHTML(describeAnalyticsScope(ep.provider_scope))}</span>
             </div>
             <div class="incident-segment">
               ${escapeHTML(ep.segment_dimension)} : ${escapeHTML(ep.segment_value)}
@@ -687,6 +737,7 @@ function renderEpisodes() {
           <div class="item-top-row">
             <span class="severity-pill ${severityLower}">${escapeHTML(ep.severity)}</span>
             <span class="item-segment">${escapeHTML(ep.segment_dimension)} : ${escapeHTML(ep.segment_value)}</span>
+            <span class="scope-pill">${escapeHTML(describeAnalyticsScope(ep.provider_scope))}</span>
           </div>
           <div class="item-bottom-row">
             <span>${formatDateTime(ep.started_at_window)}</span>
@@ -931,10 +982,12 @@ export async function loadRecoveryData() {
   if (elements.recLedgerError) elements.recLedgerError.style.display = 'none';
   if (elements.recAttrError) elements.recAttrError.style.display = 'none';
 
-  const [recResult, attrResult] = await Promise.allSettled([
+  const [recResult, attrResult, offersResult] = await Promise.allSettled([
     getRecovery(state.recovery.filter, 50, 0, state.provider),
-    getAttributions(50, state.provider)
+    getAttributions(50, state.provider),
+    getSwitchOffers(50),
   ]);
+  renderSwitchOffersResult(offersResult);
 
   if (elements.recLedgerLoading) elements.recLedgerLoading.style.display = 'none';
   if (elements.recAttrLoading) elements.recAttrLoading.style.display = 'none';
@@ -959,6 +1012,50 @@ export async function loadRecoveryData() {
       if (elements.recAttrErrorMsg) elements.recAttrErrorMsg.textContent = attrResult.reason?.message || 'Failed to load attributions.';
     }
   }
+}
+
+/**
+ * Renders the payment switch offers table (offers versus accepted versus paid), or its error.
+ */
+function renderSwitchOffersResult(result) {
+  if (!elements.switchOffersBody) return;
+  if (result.status !== 'fulfilled') {
+    if (elements.switchOffersError) elements.switchOffersError.style.display = 'block';
+    if (elements.switchOffersErrorMsg) elements.switchOffersErrorMsg.textContent = result.reason?.message || 'Failed to load offers.';
+    return;
+  }
+  if (elements.switchOffersError) elements.switchOffersError.style.display = 'none';
+  const { counts_by_status: counts, items } = result.value;
+  if (elements.switchOffersSummary) elements.switchOffersSummary.textContent = describeSwitchOffers(counts);
+  const offers = (items || []).filter((o) => !state.provider || o.source_system === state.provider);
+  if (offers.length === 0) {
+    elements.switchOffersBody.innerHTML = '<tr><td colspan="7" class="empty-cell">No payment switch offers recorded.</td></tr>';
+    return;
+  }
+  elements.switchOffersBody.innerHTML = offers.map((o) => `
+    <tr>
+      <td style="font-family: var(--font-mono);" title="${escapeHTML(o.offer_id)}">${escapeHTML(o.offer_id.slice(0, 8))}</td>
+      <td>
+        <a href="#" class="payment-link" data-payment-id="${escapeHTML(o.payment_attempt_id)}" style="font-family: var(--font-mono);">${escapeHTML(o.payment_attempt_id)}</a>
+        <div style="font-size: 0.7rem; color: var(--text-muted);">${escapeHTML(o.source_system)} → ${escapeHTML(o.alternative_provider)} (${escapeHTML(o.environment)})</div>
+      </td>
+      <td>${escapeHTML(describeSwitchOfferStatus(o.status))}</td>
+      <td class="text-right">${escapeHTML(formatMoney(o.amount_minor_units, o.currency))}</td>
+      <td>${formatDateTime(o.offered_at)}</td>
+      <td>${formatDateTime(o.expires_at)}</td>
+      <td>${o.checkout.actionable ? 'Open (awaiting the customer)' : 'Withdrawn'}</td>
+    </tr>
+  `).join('');
+  elements.switchOffersBody.querySelectorAll('.payment-link').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const pid = el.getAttribute('data-payment-id');
+      if (pid) {
+        switchToTab('payments');
+        selectPayment(pid);
+      }
+    });
+  });
 }
 
 /**
@@ -1051,7 +1148,10 @@ function renderRecoveryLedger(ledger, totalCount) {
             </a>
           ` : '—'}
         </td>
-        <td style="font-family: var(--font-mono); font-size: 0.75rem;">${escapeHTML(row.intervention_route || '—')}</td>
+        <td style="font-size: 0.75rem;">
+          <div>${escapeHTML(describeRoute(row.intervention_route))}</div>
+          ${row.switch_offer ? `<div style="color: var(--text-muted);">Offer: ${escapeHTML(describeSwitchOfferStatus(row.switch_offer.status))}</div>` : ''}
+        </td>
         <td>${verdictBadge}</td>
         <td>${execBadge}</td>
         <td>${outcomeBadge}</td>
@@ -1474,11 +1574,12 @@ function renderPaymentAudit(timeline) {
       details: [
         `Command ID: ${cmd?.command_id ? cmd.command_id.slice(0, 8) : '—'}`,
         `Attempt ID: ${exec?.attempt_id ? exec.attempt_id.slice(0, 8) : '—'}`,
-        `Route Key: ${cmd?.route || '—'}`,
+        `Route: ${describeRoute(cmd?.route)}`,
         exec ? `Executor: ${exec.executor_name || 'unknown'}` : null,
         isSimulated ? 'Simulated: no real gateway or customer action took place.' : null,
         exec && !isSimulated ? `Real provider call; response: ${exec.provider_response_code || '—'}` : null,
         ...describeRecoveryCheckout(exec?.recovery_checkout),
+        ...describeSwitchOffer(exec?.switch_offer),
         exec?.duration_ms != null
           ? `${isSimulated ? 'Simulated duration' : 'Execution latency'}: ${exec.duration_ms}ms`
           : null,

@@ -285,6 +285,19 @@ async def test_outage_diagnosis_offer_consent_checkout_verified_payment_and_attr
     assert timeline["execution"]["switch_offer"]["status"] == "COMPLETED"
     assert timeline["execution"]["recovery_checkout"]["approve_url"] is None
 
+    # The overview separates verified recovered money from the estimate, and reports provider health.
+    summary = (await e2e.client.get("/api/v1/summary", auth=AUTH)).json()
+    assert summary["verified_recovered_gmv_by_currency"] == [{"currency": "USD", "amount_minor_units": AMOUNT, "payment_count": 1}]
+    assert [(g["currency"], g["amount_minor_units"]) for g in summary["total_protected_gmv_by_currency"]] == [("USD", 842)]
+    assert summary["switch_offers_by_status"]["COMPLETED"] == 1
+    health = {h["provider_scope"]: h for h in summary["provider_health"]}
+    assert (health["razorpay_pipeline"]["status"], health["razorpay_pipeline"]["worst_severity"]) == ("DEGRADED", "CRITICAL")
+    assert health["paypal"]["status"] == "HEALTHY"
+    paypal_only = (await e2e.client.get("/api/v1/summary?provider=paypal", auth=AUTH)).json()
+    assert (paypal_only["verified_recovered_gmv_by_currency"], paypal_only["switch_offers_by_status"]["COMPLETED"]) == ([], 0)
+    [row] = [r for r in (await e2e.client.get("/api/v1/recovery", auth=AUTH)).json()["ledger"] if r["payment_attempt_id"] == payment_id]
+    assert row["switch_offer"] == {"offer_id": str(offer.offer_id), "status": "COMPLETED"}
+
 
 # --- unchanged behaviour ---------------------------------------------------------------------------------
 

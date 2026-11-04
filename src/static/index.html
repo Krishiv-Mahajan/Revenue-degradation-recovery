@@ -113,6 +113,9 @@
           </div>
         </div>
 
+        <!-- Provider health per Stage 2-4 analytics scope -->
+        <div id="provider-health-strip" class="provider-health-strip" aria-label="Provider health"></div>
+
         <!-- Primary KPI Cards Grid -->
         <div class="kpi-grid">
 
@@ -175,6 +178,26 @@
             </div>
             <div id="kpi-auth-capture-volume" class="kpi-value">—</div>
             <div class="kpi-subtext">Authorized attempts vs successfully settled transactions</div>
+          </div>
+
+          <!-- Card 7: Verified Recovered Payments -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Verified Recovered Payments</span>
+              <span class="kpi-tag protected">PayPal-verified</span>
+            </div>
+            <div id="kpi-verified-recovered" class="kpi-value">—</div>
+            <div class="kpi-subtext">Money PayPal captured through a real recovery checkout or accepted switch offer; never simulated, never estimated</div>
+          </div>
+
+          <!-- Card 8: Payment Switch Offers -->
+          <div class="kpi-card">
+            <div class="kpi-label-row">
+              <span class="kpi-label">Payment Switch Offers</span>
+              <span class="kpi-tag neutral">Customer consent</span>
+            </div>
+            <div id="kpi-switch-offers" class="kpi-value">—</div>
+            <div id="kpi-switch-offers-sub" class="kpi-subtext">PayPal checkouts offered as an alternative method; only the customer can accept</div>
           </div>
 
         </div>
@@ -582,6 +605,43 @@
         </section>
 
         <!-- Section 2: Counterfactual Attribution Ledger (Model Estimates) -->
+        <!-- Section: Customer-approved payment method switch offers -->
+        <section class="recovery-section" aria-label="Payment Switch Offers">
+          <div class="section-header-bar">
+            <div>
+              <h3 class="section-heading">Customer-Approved Payment Switch Offers</h3>
+              <p class="section-subheading">
+                PayPal sandbox checkouts offered when a diagnosed payment-method outage makes the customer's method unsuitable.
+                An offer is not revenue: it is accepted only by the customer's approval at PayPal and counts as recovered only after PayPal's verified capture.
+              </p>
+            </div>
+            <span id="switch-offers-summary" class="section-hint"></span>
+          </div>
+          <div id="switch-offers-error" class="panel-error-banner" style="display: none;">
+            <span id="switch-offers-error-msg"></span>
+          </div>
+          <div class="table-responsive">
+            <table id="switch-offers-table" class="data-table dense-table">
+              <thead>
+                <tr>
+                  <th>Offer</th>
+                  <th>Original Payment</th>
+                  <th>Status</th>
+                  <th class="text-right">Amount</th>
+                  <th>Offered</th>
+                  <th>Response Deadline</th>
+                  <th>Checkout Link</th>
+                </tr>
+              </thead>
+              <tbody id="switch-offers-body">
+                <tr>
+                  <td colspan="7" class="empty-cell">Loading payment switch offers...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="recovery-section attribution-proof-section" aria-label="Counterfactual Attribution Ledger">
           <div class="section-header-bar">
             <div>

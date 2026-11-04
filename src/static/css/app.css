@@ -2016,3 +2016,41 @@ body {
   }
 }
 
+/* Provider health per analytics scope */
+.provider-health-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.provider-health-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--emerald-border);
+  background: var(--emerald-bg);
+  color: var(--emerald-text);
+  font-size: 0.8rem;
+}
+
+.provider-health-pill.degraded {
+  border-color: #f5b5b5;
+  background: #fdecec;
+  color: #a12626;
+}
+
+.provider-health-pill .provider-health-label {
+  font-weight: 700;
+}
+
+.scope-pill {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-color, #d0d5dd);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
