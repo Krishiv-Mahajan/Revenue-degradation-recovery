@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric, ForeignKey, Index, CheckConstraint, ForeignKeyConstraint
+from sqlalchemy import Column, String, Integer, DateTime, JSON, UniqueConstraint, Boolean, Float, Numeric, ForeignKey, Index, CheckConstraint, ForeignKeyConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -764,6 +764,153 @@ class CounterfactualAttributionModel(Base):
         ),
         Index("ix_attr_attempt_lookup", "payment_attempt_id", "as_of_timestamp"),
         Index("ix_attr_status", "attribution_status", "attributed_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 — Customer-approved payment method switch offers (src/core/domain/switch_offer_models.py)
+# ---------------------------------------------------------------------------
+
+SWITCH_OFFER_STATUSES = ("OFFERED", "ACCEPTED", "DECLINED", "EXPIRED", "ABANDONED", "COMPLETED", "PAYMENT_FAILED")
+SWITCH_OFFER_ACCEPTED_STATUSES = ("ACCEPTED", "COMPLETED", "PAYMENT_FAILED", "ABANDONED")
+SWITCH_OFFER_TERMINAL_STATUSES = ("DECLINED", "EXPIRED", "ABANDONED", "COMPLETED", "PAYMENT_FAILED")
+SWITCH_OFFER_EVENT_TYPES = (
+    "OFFER_CREATED", "CUSTOMER_ACCEPTED", "CUSTOMER_DECLINED", "OFFER_EXPIRED", "OFFER_ABANDONED",
+    "PAYMENT_COMPLETED", "PAYMENT_FAILED", "PAYMENT_OUTCOME_HELD", "EVENT_IGNORED",
+)
+SWITCH_OFFER_EVENT_SOURCES = ("EXECUTOR", "PAYPAL_WEBHOOK", "MERCHANT_CHANNEL", "EXPIRY_SWEEP")
+
+
+def _sql_in(column: str, values) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
+
+class PaymentMethodSwitchOfferModel(Base):
+    """
+    A PayPal checkout offered to the customer as an alternative payment method. One per command, created only
+    from a real (never simulated) sandbox execution. Status changes only through the offer lifecycle; the
+    append-only offer events hold the full trail.
+    """
+    __tablename__ = "payment_method_switch_offers"
+
+    offer_id = Column(UUID(as_uuid=True), primary_key=True)
+    command_id = Column(UUID(as_uuid=True), nullable=False)
+    decision_id = Column(UUID(as_uuid=True), nullable=False)
+    execution_attempt_id = Column(UUID(as_uuid=True), nullable=False)
+    # The original payment attempt and its provider.
+    payment_attempt_id = Column(String(255), nullable=False)
+    source_system = Column(String(50), nullable=False)
+    # The diagnosis the decision acted on.
+    episode_id = Column(UUID(as_uuid=True), nullable=True)
+    diagnosis_dimension = Column(String(50), nullable=True)
+    diagnosis_value = Column(String(255), nullable=True)
+    diagnosis_strength = Column(String(20), nullable=True)
+    alternative_provider = Column(String(20), nullable=False)
+    environment = Column(String(20), nullable=False)
+    checkout_order_id = Column(String(128), nullable=False)
+    approve_url = Column(String(1024), nullable=False)
+    amount_minor_units = Column(Integer, nullable=False)
+    currency = Column(String(3), nullable=False)
+    status = Column(String(20), nullable=False)
+    offered_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    completion_deadline = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    completion_event_id = Column(UUID(as_uuid=True), nullable=True)
+    presentation = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_switch_offer_command"),
+        UniqueConstraint("checkout_order_id", name="uq_switch_offer_checkout_order"),
+        ForeignKeyConstraint(
+            ["payment_attempt_id", "source_system"],
+            ["payment_attempts.payment_attempt_id", "payment_attempts.source_system"],
+            name="fk_switch_offer_payment_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["command_id", "payment_attempt_id", "source_system"],
+            [
+                "intervention_commands.command_id",
+                "intervention_commands.payment_attempt_id",
+                "intervention_commands.source_system",
+            ],
+            name="fk_switch_offer_command_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["decision_id", "payment_attempt_id", "source_system"],
+            [
+                "intervention_decisions.decision_id",
+                "intervention_decisions.payment_attempt_id",
+                "intervention_decisions.source_system",
+            ],
+            name="fk_switch_offer_decision_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["execution_attempt_id"], ["intervention_execution_attempts.attempt_id"],
+            name="fk_switch_offer_execution_attempt",
+        ),
+        ForeignKeyConstraint(
+            ["completion_event_id"], ["payment_events.event_id"], name="fk_switch_offer_completion_event",
+        ),
+        CheckConstraint(_sql_in("status", SWITCH_OFFER_STATUSES), name="ck_switch_offer_status"),
+        CheckConstraint("alternative_provider = 'paypal'", name="ck_switch_offer_alternative_provider"),
+        CheckConstraint("source_system <> alternative_provider", name="ck_switch_offer_changes_provider"),
+        CheckConstraint("environment = 'sandbox'", name="ck_switch_offer_sandbox_only"),
+        CheckConstraint("amount_minor_units > 0", name="ck_switch_offer_amount_positive"),
+        CheckConstraint("expires_at > offered_at", name="ck_switch_offer_expiry_after_offer"),
+        CheckConstraint(
+            f"({_sql_in('status', SWITCH_OFFER_ACCEPTED_STATUSES)}) = "
+            "(accepted_at IS NOT NULL AND completion_deadline IS NOT NULL)",
+            name="ck_switch_offer_acceptance",
+        ),
+        CheckConstraint(
+            "(status = 'COMPLETED') = (completion_event_id IS NOT NULL)", name="ck_switch_offer_completion_event",
+        ),
+        CheckConstraint(
+            f"({_sql_in('status', SWITCH_OFFER_TERMINAL_STATUSES)}) = (resolved_at IS NOT NULL)",
+            name="ck_switch_offer_resolution",
+        ),
+        Index("ix_switch_offer_status_expiry", "status", "expires_at"),
+        Index("ix_switch_offer_attempt", "payment_attempt_id", "source_system"),
+    )
+
+
+class PaymentMethodSwitchOfferEventModel(Base):
+    """Append-only audit trail of a switch offer: creation, customer responses, deadlines and payment outcomes."""
+    __tablename__ = "payment_method_switch_offer_events"
+
+    offer_event_id = Column(UUID(as_uuid=True), primary_key=True)
+    offer_id = Column(UUID(as_uuid=True), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    event_type = Column(String(30), nullable=False)
+    source = Column(String(20), nullable=False)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), nullable=False)
+    # The canonical PayPal event behind a webhook-sourced entry.
+    payment_event_id = Column(UUID(as_uuid=True), nullable=True)
+    reason = Column(String(512), nullable=True)
+    details = Column(JSON, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("offer_id", "sequence", name="uq_switch_offer_event_sequence"),
+        ForeignKeyConstraint(
+            ["offer_id"], ["payment_method_switch_offers.offer_id"], name="fk_switch_offer_event_offer",
+        ),
+        ForeignKeyConstraint(
+            ["payment_event_id"], ["payment_events.event_id"], name="fk_switch_offer_event_payment_event",
+        ),
+        CheckConstraint(_sql_in("event_type", SWITCH_OFFER_EVENT_TYPES), name="ck_switch_offer_event_type"),
+        CheckConstraint(_sql_in("source", SWITCH_OFFER_EVENT_SOURCES), name="ck_switch_offer_event_source"),
+        CheckConstraint(_sql_in("to_status", SWITCH_OFFER_STATUSES), name="ck_switch_offer_event_to_status"),
+        Index(
+            "uq_switch_offer_event_payment_event", "offer_id", "payment_event_id", "event_type", unique=True,
+            postgresql_where=text("payment_event_id IS NOT NULL"),
+        ),
     )
 
 

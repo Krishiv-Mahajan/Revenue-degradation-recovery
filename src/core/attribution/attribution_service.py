@@ -25,6 +25,8 @@ from src.core.domain.payment_attempts import AttemptRef, recorded_provider
 from src.infrastructure.attribution_repository import AttributionRepository
 from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
 
+SWITCH_OFFER_ROUTE = "PROMPT_PAYMENT_METHOD_SWITCH"
+
 # Stage 5 development models; their predictions are never empirical evidence.
 DEVELOPMENT_MODEL_NAMES = frozenset({"DeterministicBaselineModel"})
 
@@ -159,6 +161,28 @@ class CounterfactualAttributionService:
             else:
                 treatment_status = TreatmentStatus.TREATED
 
+        # 5b. A real payment method switch offer treats the payment only once the customer takes it up: an
+        # offer that was never accepted, or a payment completed some other way, is not credited to the offer.
+        switch_offer_audit = None
+        if (
+            command.route_key == SWITCH_OFFER_ROUTE
+            and treatment_status == TreatmentStatus.TREATED
+            and attempt is not None
+            and attempt.is_simulation is False
+            and isinstance(self.repo, AttributionRepository)
+        ):
+            evidence = await self.repo.get_switch_offer_evidence(command.command_id, as_of)
+            treatment_status, reason = switch_offer_treatment(evidence, observation)
+            switch_offer_audit = {
+                "offer_id": str(evidence["offer_id"]) if evidence else None,
+                "checkout_order_id": evidence["checkout_order_id"] if evidence else None,
+                "customer_accepted_as_of": bool(evidence and evidence["accepted_as_of"]),
+                "verified_completion_event_id": (
+                    str(evidence["completion_event_id"]) if evidence and evidence["completion_event_id"] else None
+                ),
+                "treatment_reason": reason,
+            }
+
         # 6. Evaluate Outcome
         if observation is None:
             observed_outcome = "UNKNOWN_IN_FLIGHT"
@@ -223,6 +247,7 @@ class CounterfactualAttributionService:
                 "conflicting_events": observation.observation_audit_payload.get("conflicting_events", []) if observation else [],
             },
             "evidence_score_components": calc_result.audit_details,
+            **({"switch_offer": switch_offer_audit} if switch_offer_audit is not None else {}),
             "timing_delta_seconds": delta_seconds,
             "timestamps": {
                 "t_decided": decision.decided_at.isoformat() if decision else None,
@@ -271,3 +296,17 @@ class CounterfactualAttributionService:
         )
 
         return await self.repo.append_attribution(attribution)
+
+
+def switch_offer_treatment(evidence: Optional[dict], observation) -> tuple:
+    """(treatment status, reason) for a real payment method switch offer, given its evidence as-of the cutoff."""
+    if evidence is None:
+        return TreatmentStatus.UNTREATED, "NO_SWITCH_OFFER_RECORDED"
+    if observation is not None and observation.payment_outcome == "CAPTURED":
+        completion = evidence["completion_event_id"]
+        if completion is not None and observation.terminal_event_id == completion:
+            return TreatmentStatus.TREATED, "PAID_THROUGH_THE_ACCEPTED_OFFER"
+        return TreatmentStatus.UNTREATED, "PAYMENT_COMPLETED_WITHOUT_THE_OFFER"
+    if evidence["accepted_as_of"]:
+        return TreatmentStatus.TREATED, "CUSTOMER_ACCEPTED_THE_OFFER"
+    return TreatmentStatus.UNTREATED, "CUSTOMER_HAS_NOT_ACCEPTED_THE_OFFER"

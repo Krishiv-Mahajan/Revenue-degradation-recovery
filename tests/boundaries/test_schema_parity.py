@@ -180,4 +180,11 @@ def test_foreign_keys_declared_on_models(model_ddl):
         "fk_attribution_command_attempt",
         "fk_attribution_decision_attempt",
         "fk_pipeline_run_event",
+        "fk_switch_offer_payment_attempt",
+        "fk_switch_offer_command_attempt",
+        "fk_switch_offer_decision_attempt",
+        "fk_switch_offer_execution_attempt",
+        "fk_switch_offer_completion_event",
+        "fk_switch_offer_event_offer",
+        "fk_switch_offer_event_payment_event",
     }

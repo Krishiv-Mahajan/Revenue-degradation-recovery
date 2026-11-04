@@ -18,6 +18,9 @@ _STAGE7_FILES = [
     "src/core/execution/execution_service.py",
     "src/core/execution/observation_service.py",
     "src/infrastructure/execution_repository.py",
+    "src/core/domain/switch_offer_models.py",
+    "src/core/execution/switch_offer_service.py",
+    "src/infrastructure/switch_offer_repository.py",
 ]
 
 
@@ -71,6 +74,8 @@ def test_stage7_no_provider_sdk_in_core_execution():
         "src/core/execution/executor.py",
         "src/core/execution/execution_service.py",
         "src/core/execution/observation_service.py",
+        "src/core/domain/switch_offer_models.py",
+        "src/core/execution/switch_offer_service.py",
     ]
     forbidden_clients = [
         "razorpay.client",
@@ -101,3 +106,11 @@ def test_stage7_no_upstream_mutation():
     for table in upstream_tables:
         assert f"update {table}" not in content, f"Forbidden UPDATE on upstream table {table}"
         assert f"delete from {table}" not in content, f"Forbidden DELETE on upstream table {table}"
+
+
+def test_no_paypal_capture_or_refund_call_exists():
+    """Static assertion: the engine only creates and reads PayPal orders; capturing an order is the merchant's step."""
+    for fname in ["src/infrastructure/paypal_client.py", "src/infrastructure/paypal_recovery_executor.py"]:
+        content = _read_src(fname)
+        for path in ["/capture", "/authorize", "/refund", "/v2/payments"]:
+            assert path not in content, f"PayPal money-movement endpoint '{path}' found in {fname}"

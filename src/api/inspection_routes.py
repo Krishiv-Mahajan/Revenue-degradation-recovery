@@ -22,7 +22,8 @@ from src.infrastructure.models import (
     InterventionCommandModel,
     InterventionExecutionAttemptModel,
     PaymentOutcomeObservationModel,
-    CounterfactualAttributionModel
+    CounterfactualAttributionModel,
+    PaymentMethodSwitchOfferModel,
 )
 
 # Router-level so every inspection route, including future ones, requires dashboard credentials.
@@ -1134,15 +1135,19 @@ async def get_payments_list(
         "offset": offset,
     }
 
-def _recovery_checkout(execution) -> Optional[Dict[str, Any]]:
-    """The PayPal recovery checkout a real execution created, if any (never for simulated executions)."""
+def _recovery_checkout(execution, switch_offer=None) -> Optional[Dict[str, Any]]:
+    """
+    The PayPal recovery checkout a real execution created, if any (never for simulated executions). A
+    payment method switch offer's link is withheld once the offer no longer awaits the customer.
+    """
     payload = execution.provider_response_payload or {}
     if execution.is_simulation or "paypal_order_id" not in payload:
         return None
+    withheld = switch_offer is not None and switch_offer.status != "OFFERED"
     return {
         "order_id": payload.get("paypal_order_id"),
         "order_status": payload.get("order_status"),
-        "approve_url": payload.get("approve_url"),
+        "approve_url": None if withheld else payload.get("approve_url"),
         "environment": payload.get("environment"),
         "amount": payload.get("amount"),
         "delivery": payload.get("delivery"),
@@ -1259,6 +1264,12 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
             attr_res = await session.execute(attr_stmt)
             attribution = attr_res.scalar_one_or_none()
 
+    switch_offer = None
+    if command is not None:
+        switch_offer = (await session.execute(
+            select(PaymentMethodSwitchOfferModel).where(PaymentMethodSwitchOfferModel.command_id == command.command_id)
+        )).scalar_one_or_none()
+
     return {
         "payment_id": canonical_pid,
         "payment_info": payment_info,
@@ -1316,7 +1327,12 @@ async def get_payment_timeline(payment_id: str, session: AsyncSession = Depends(
             "executor_name": execution.executor_name,
             "is_simulation": execution.is_simulation,
             "provider_response_code": execution.provider_response_code,
-            "recovery_checkout": _recovery_checkout(execution),
+            "recovery_checkout": _recovery_checkout(execution, switch_offer),
+            "switch_offer": {
+                "offer_id": str(switch_offer.offer_id),
+                "status": switch_offer.status,
+                "expires_at": switch_offer.expires_at.isoformat(),
+            } if switch_offer else None,
         } if execution else None,
         "observation": {
             "observation_id": str(observation.observation_id),

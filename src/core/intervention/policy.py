@@ -26,6 +26,10 @@ class RoutePolicyDefinition:
     requires_diagnosis: bool
     requires_strong_rca: bool
     enabled: bool = True
+    # A route that offers the customer another provider's payment method names that provider; it is never
+    # eligible for an attempt already paying with it, or in a currency whose payments with that provider
+    # this engine cannot verify.
+    alternative_payment_provider: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,8 @@ def get_default_policy() -> InterventionPolicy:
       other currency are not cost-scored
     - Global rate limit: 100 ACT decisions per minute
     Version 1.1.0 added the USD schedule; INR costs and every threshold are unchanged from 1.0.0.
+    Version 1.2.0 names PayPal as the alternative payment method PROMPT_PAYMENT_METHOD_SWITCH offers; costs,
+    recovery rates, thresholds and every other route are unchanged from 1.1.0.
     """
     routes: Dict[InterventionRouteKey, RoutePolicyDefinition] = {
         InterventionRouteKey.RETRY_SECONDARY_GATEWAY: RoutePolicyDefinition(
@@ -103,6 +109,7 @@ def get_default_policy() -> InterventionPolicy:
             requires_diagnosis=True,
             requires_strong_rca=True,
             enabled=True,
+            alternative_payment_provider="paypal",
         ),
         InterventionRouteKey.DYNAMIC_RETRY_BACKOFF: RoutePolicyDefinition(
             route_key=InterventionRouteKey.DYNAMIC_RETRY_BACKOFF,
@@ -149,7 +156,7 @@ def get_default_policy() -> InterventionPolicy:
 
     return InterventionPolicy(
         policy_id="default-recovery-v1",
-        policy_version="1.1.0",
+        policy_version="1.2.0",
         kill_switch_enabled=False,
         act_risk_threshold=0.70,
         monitor_risk_threshold=0.35,

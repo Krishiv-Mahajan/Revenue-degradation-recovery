@@ -15,7 +15,7 @@ def test_default_policy_catalogue_integrity():
     policy = get_default_policy()
 
     assert policy.policy_id == "default-recovery-v1"
-    assert policy.policy_version == "1.1.0"
+    assert policy.policy_version == "1.2.0"
     assert policy.kill_switch_enabled is False
     assert 0.0 < policy.act_risk_threshold <= 1.0
     assert 0.0 < policy.monitor_risk_threshold < policy.act_risk_threshold

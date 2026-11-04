@@ -4,7 +4,8 @@ Stage 7 — Payment Outcome Observation Service.
 Orchestrates Phase 7B:
 1. Queries Stage 1 canonical payment_events strictly as-of declared as_of_timestamp boundary
 2. Evaluates canonical terminal events (payment.captured, payment.failed), including verified capture
-   outcomes of PayPal recovery checkout orders created by a real execution of the command
+   outcomes of PayPal recovery checkout orders created by a real execution of the command; for a payment
+   method switch offer, only the capture the offer lifecycle verified as its completion counts
 3. Maps to PaymentOutcome (CAPTURED, FAILED, UNKNOWN_IN_FLIGHT); a captured recovery order is CAPTURED
 4. Preserves conflicting source facts in audit payload with explicit conflict_detected flag
 5. Appends immutable, versioned PaymentOutcomeObservation records
@@ -23,6 +24,7 @@ from src.core.domain.execution_models import (
     PaymentOutcomeObservation,
     make_observation_id,
 )
+from src.core.domain.intervention_models import InterventionRouteKey
 from src.core.domain.payment_attempts import AttemptRef
 from src.infrastructure.execution_repository import ExecutionRepository
 from src.infrastructure.payment_attempt_repository import PaymentAttemptRepository
@@ -75,7 +77,14 @@ class PaymentOutcomeObservationService:
         # their verified capture outcomes as-of the same boundary.
         recovery_order_ids = await self.execution_repo.get_recovery_order_ids(command_id)
         recovery_events = await self.execution_repo.get_recovery_terminal_events(recovery_order_ids, as_of)
-        recovery_capture = next((e for e in recovery_events if e.event_type == "payment.captured"), None)
+        switch_completion_id = None
+        if cmd.route_key is InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH:
+            # The customer must have accepted the offer in time and PayPal captured the offered amount; any
+            # other capture of the order (after expiry, a decline, or for another amount) is not a completion.
+            switch_completion_id = await self.execution_repo.get_switch_offer_completion_event_id(command_id, as_of)
+            recovery_capture = next((e for e in recovery_events if e.event_id == switch_completion_id), None)
+        else:
+            recovery_capture = next((e for e in recovery_events if e.event_type == "payment.captured"), None)
 
         now = datetime.now(timezone.utc)
 
@@ -148,6 +157,10 @@ class PaymentOutcomeObservationService:
                 "terminal_events": _event_list(recovery_events),
                 "original_attempt_events": _event_list(terminal_events),
             }
+            if cmd.route_key is InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH:
+                audit_payload["recovery"]["verified_switch_completion_event_id"] = (
+                    str(switch_completion_id) if switch_completion_id else None
+                )
 
         # 4. Version allocation and deterministic observation ID
         max_ver = await self.execution_repo.get_max_observation_version(command_id)

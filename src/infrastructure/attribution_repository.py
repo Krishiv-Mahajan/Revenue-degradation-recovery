@@ -30,6 +30,8 @@ from src.infrastructure.models import (
     InterventionDecisionModel,
     InterventionExecutionAttemptModel,
     PaymentEventModel,
+    PaymentMethodSwitchOfferEventModel,
+    PaymentMethodSwitchOfferModel,
     PaymentOutcomeObservationModel,
 )
 
@@ -236,6 +238,40 @@ class AttributionRepository:
         )
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
+
+    async def get_switch_offer_evidence(self, command_id: uuid.UUID, as_of_timestamp: datetime) -> Optional[dict]:
+        """
+        A payment method switch offer's customer response as known at as_of_timestamp: whether PayPal's
+        approval (the customer's acceptance) and the offer's verified completion had been ingested by then.
+        """
+        offer = (await self.session.execute(
+            select(PaymentMethodSwitchOfferModel).where(PaymentMethodSwitchOfferModel.command_id == command_id)
+        )).scalar_one_or_none()
+        if offer is None:
+            return None
+        accepted = (await self.session.execute(
+            select(PaymentMethodSwitchOfferEventModel.offer_event_id)
+            .join(PaymentEventModel, PaymentEventModel.event_id == PaymentMethodSwitchOfferEventModel.payment_event_id)
+            .where(
+                PaymentMethodSwitchOfferEventModel.offer_id == offer.offer_id,
+                PaymentMethodSwitchOfferEventModel.event_type == "CUSTOMER_ACCEPTED",
+                PaymentEventModel.ingested_at <= as_of_timestamp,
+            )
+            .limit(1)
+        )).scalar_one_or_none() is not None
+        completion_event_id = None
+        if offer.completion_event_id is not None and accepted:
+            completion_ingested = (await self.session.execute(
+                select(PaymentEventModel.ingested_at).where(PaymentEventModel.event_id == offer.completion_event_id)
+            )).scalar_one_or_none()
+            if completion_ingested is not None and completion_ingested <= as_of_timestamp:
+                completion_event_id = offer.completion_event_id
+        return {
+            "offer_id": offer.offer_id,
+            "checkout_order_id": offer.checkout_order_id,
+            "accepted_as_of": accepted,
+            "completion_event_id": completion_event_id,
+        }
 
     async def get_latest_outcome_observation(
         self, command_id: uuid.UUID, as_of_timestamp: datetime

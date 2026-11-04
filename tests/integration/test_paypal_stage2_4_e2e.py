@@ -204,7 +204,7 @@ async def test_paypal_outage_flows_from_webhooks_to_an_act_decision_with_the_rea
 
     # Stage 6: ACT under the default policy and gates, tied to the PayPal episode.
     decision = await _for_payment(e2e.Session, InterventionDecisionModel, attempt_id)
-    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.1.0")
+    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.2.0")
     assert decision.stage5_prediction_id == prediction.prediction_id
     # The SYSTEMIC diagnosis makes the diagnosis-backed gateway retry eligible, and it has the highest utility.
     assert decision.selected_route_id == "RETRY_SECONDARY_GATEWAY"

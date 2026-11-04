@@ -391,7 +391,7 @@ async def _assert_attributed_simulated_intervention(Session, payment_id, capture
     assert prediction.model_name == "SyntheticFixedProbabilityTestModel"
 
     decision = await _for_payment(Session, InterventionDecisionModel, payment_id)
-    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.1.0")
+    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.2.0")
     assert decision.selected_route_id in NO_DIAGNOSIS_ROUTES
     assert decision.stage5_prediction_id == prediction.prediction_id
 
@@ -805,7 +805,7 @@ async def test_default_policy_scores_a_usd_paypal_attempt_against_its_usd_schedu
 
     _assert_runs_succeeded(e2e.caplog, [approval_id])
     decision = await _for_payment(e2e.Session, InterventionDecisionModel, paypal_attempt_id(order_id))
-    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.1.0")
+    assert (decision.decision_type, decision.gate_verdict, decision.policy_version) == ("ACT", "PASSED", "1.2.0")
     assert decision.selected_route_id in NO_DIAGNOSIS_ROUTES
     gate = decision.evaluation_audit_payload["gates"]["policy_cost_currency"]
     assert gate == {"passed": True, "details": {

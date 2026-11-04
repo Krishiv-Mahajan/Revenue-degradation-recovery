@@ -37,6 +37,8 @@ from src.infrastructure.models import (
     InterventionExecutionAttemptModel,
     PaymentAttemptModel,
     PaymentEventModel,
+    PaymentMethodSwitchOfferEventModel,
+    PaymentMethodSwitchOfferModel,
     PaymentOutcomeObservationModel,
 )
 from src.infrastructure.paypal_attempt_queries import paypal_terminal_events
@@ -407,6 +409,26 @@ class ExecutionRepository:
             .order_by(PaymentEventModel.ingested_at.asc(), PaymentEventModel.event_id.asc())
         )
         return list((await self.session.execute(stmt)).scalars().all())
+
+    async def get_switch_offer_completion_event_id(self, command_id: uuid.UUID, as_of: datetime) -> Optional[uuid.UUID]:
+        """
+        The PayPal capture a payment method switch offer verified as its completion, provided the customer's
+        acceptance (PayPal's approval) had been ingested by as_of; the capture's own as-of filter is the caller's.
+        """
+        accepted_by = (
+            select(PaymentMethodSwitchOfferEventModel.offer_id)
+            .join(PaymentEventModel, PaymentEventModel.event_id == PaymentMethodSwitchOfferEventModel.payment_event_id)
+            .where(
+                PaymentMethodSwitchOfferEventModel.event_type == "CUSTOMER_ACCEPTED",
+                PaymentEventModel.ingested_at <= as_of,
+            )
+        )
+        stmt = select(PaymentMethodSwitchOfferModel.completion_event_id).where(
+            PaymentMethodSwitchOfferModel.command_id == command_id,
+            PaymentMethodSwitchOfferModel.status == "COMPLETED",
+            PaymentMethodSwitchOfferModel.offer_id.in_(accepted_by),
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def find_command_for_recovery_order(self, order_id: str) -> Optional[uuid.UUID]:
         """The command whose real, successful execution created this PayPal recovery order, if any."""

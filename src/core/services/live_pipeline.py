@@ -28,6 +28,7 @@ from src.core.domain.payment_attempts import (
     resolve_pipeline_attempt,
 )
 from src.core.domain.analytics_scopes import SCOPE_CONFIG, scope_for_source
+from src.core.domain.intervention_models import InterventionRouteKey
 from src.core.domain.source_systems import PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.models import (
     CounterfactualAttributionModel,
@@ -57,6 +58,7 @@ from src.core.domain.degradation_models import DegradationEpisode, EpisodeStatus
 from src.core.execution.execution_service import InterventionExecutionService
 from src.core.execution.observation_service import PaymentOutcomeObservationService
 from src.core.execution.simulator import SimulatorInterventionExecutor, SimulatorMode
+from src.core.execution.switch_offer_service import SwitchOfferService
 from src.core.intervention.policy import get_default_policy
 from src.core.intervention.service import InterventionDecisionService
 from src.core.ml.model import get_development_model
@@ -158,6 +160,7 @@ async def _execute_live_pipeline(
         # results are recorded with is_simulation=False and the PayPal executor's name.
         executor = build_intervention_executor(SimulatorInterventionExecutor(SimulatorMode.ALWAYS_SUCCEED))
         inter_exec_svc = InterventionExecutionService(session, exec_repo, executor)
+        switch_offer_svc = SwitchOfferService(session)
         outcome_obs_svc = PaymentOutcomeObservationService(session, exec_repo)
         attr_svc = CounterfactualAttributionService(attr_repo)
 
@@ -280,7 +283,12 @@ async def _execute_live_pipeline(
             current_stage = "STAGE_7_RECOVERY_LOOKUP"
             recovery_command_id = await exec_repo.find_command_for_recovery_order(attempt.ref.provider_reference)
         if recovery_command_id is not None:
-            if attempt.role is PipelineRole.TERMINAL:
+            # A payment method switch offer learns the customer's acceptance and the payment outcome from
+            # PayPal's verified events for its checkout order, before the attempt's outcome is observed.
+            current_stage = "STAGE_7_SWITCH_OFFER"
+            applied = await switch_offer_svc.apply_paypal_event(payment_event)
+            # An approval can complete an offer whose capture arrived first; its outcome is then resolved here.
+            if attempt.role is PipelineRole.TERMINAL or applied.completed_now:
                 cmd_model = await session.get(InterventionCommandModel, recovery_command_id)
                 as_of_recovery = _utc(payment_event.ingested_at)
                 if cmd_model is not None and cmd_model.updated_at is not None:
@@ -321,6 +329,10 @@ async def _execute_live_pipeline(
                 await inter_exec_svc.execute_command(
                     command.command_id, context=execution_context(decision, attempt.ref), t_claim=t_eval
                 )
+                if command.route_key is InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH:
+                    # Only a real sandbox checkout becomes an offer; a simulated execution never does.
+                    current_stage = "STAGE_7_SWITCH_OFFER"
+                    await switch_offer_svc.open_offer(command.command_id)
 
                 # Note: Stage 7B observation and Stage 8 attribution are NOT performed here.
                 # An authorized payment is still in flight and must not be prematurely observed/attributed.

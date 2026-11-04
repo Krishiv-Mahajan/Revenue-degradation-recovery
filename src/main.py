@@ -15,6 +15,7 @@ from sqlalchemy import text
 from src.api import dependencies
 from src.api.routes import router as ingestion_router
 from src.api.inspection_routes import router as inspection_router
+from src.api.offer_routes import router as offer_router
 from src.api.security import (
     AuthenticatedStaticFiles,
     ConfiguredTrustedHostMiddleware,
@@ -72,6 +73,7 @@ app.add_middleware(ConfiguredTrustedHostMiddleware)
 # Primary API routers
 app.include_router(ingestion_router)
 app.include_router(inspection_router)
+app.include_router(offer_router)
 
 API_DOCS_GUARDS = [Depends(require_api_docs_enabled), Depends(require_dashboard_auth)]
 

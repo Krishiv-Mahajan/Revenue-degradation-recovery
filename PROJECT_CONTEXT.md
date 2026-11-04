@@ -735,7 +735,7 @@ The detailed plan, logs, test results and blockers live in `docs/AUTONOMOUS_ENGI
   - Real PayPal sandbox calls (no credentials configured).
   - CI for these commits (not pushed).
 
-### PayPal Stages 2–4: Provider-Scoped Analytics, Revision F (2026-11-03, uncommitted; verified locally)
+### PayPal Stages 2–4: Provider-Scoped Analytics, Revision F (2026-11-03, committed locally as `8bbd414`; not pushed)
 
 - **Problem:** Stages 2–4 ran on Razorpay and synthetic events only. PayPal attempts therefore never carried degradation or RCA context, and the real heuristic could never take them past p ≈ 0.525.
 - **Design:** Stages 2–4 are partitioned by **analytics scope** (`src/core/domain/analytics_scopes.py`):
@@ -785,6 +785,65 @@ The detailed plan, logs, test results and blockers live in `docs/AUTONOMOUS_ENGI
   - RCA's GLOBAL historical query matches segment value `GLOBAL`, while Stage 2 stores `ALL`. This is pre-existing and unchanged.
   - The overview's `active_degradation_episodes` count is labelled `global` and now includes PayPal-scope episodes.
   - Before upgrading a non-test database, note that its existing rows all become `razorpay_pipeline`.
+
+### Milestone J — Customer-Approved Payment Method Switch, Revision G (2026-11-04, committed locally; not pushed)
+
+- **Goal:** when a diagnosed payment-method outage makes the customer's own method unsuitable, offer a PayPal sandbox checkout as an alternative payment method. The offer requires explicit customer action. The engine never captures, charges or switches anything itself.
+- **Policy 1.2.0:** `PROMPT_PAYMENT_METHOD_SWITCH` names `paypal` as its `alternative_payment_provider`. Costs, recovery rates, thresholds, gates and the other routes are unchanged.
+  - The route is still eligible only for a SEGMENT_SPECIFIC diagnosis on PAYMENT_METHOD, with STRONG or MODERATE evidence, that matches the payment.
+  - It is now also ineligible when the attempt already pays with PayPal.
+  - It is also ineligible in a currency whose PayPal payments this engine cannot verify (the PayPal webhook normalizer's currencies). INR is excluded: PayPal INR webhooks are not ingested here, and PayPal takes INR only for India in-country accounts.
+- **Execution:** the PayPal sandbox executor (`PAYPAL_ORDERS_V2_SANDBOX`) now also implements the switch route, with action type `PAYPAL_PAYMENT_METHOD_SWITCH_OFFER`.
+  - Guards are unchanged: sandbox only, kill switch, and `PayPal-Request-Id` = command idempotency key.
+  - It refuses an original attempt that is already PayPal.
+  - The payload states that customer approval is required and that the engine never captures.
+  - Without `PAYPAL_RECOVERY_EXECUTION_ENABLED=true` the route stays simulated (`SIMULATOR_V1`), and a simulation never creates an offer.
+- **Offers** (`src/core/domain/switch_offer_models.py`, `src/core/execution/switch_offer_service.py`): one offer per command (UUID5), created only from a real successful sandbox execution.
+  - Lifecycle: OFFERED → ACCEPTED (PayPal's verified approval of the offer's order before `expires_at`, 30 minutes) → COMPLETED (PayPal's verified capture of the offered amount and currency before the completion deadline, 1 hour after acceptance).
+  - Other outcomes: DECLINED (explicit, reported by the merchant channel), EXPIRED, ABANDONED (accepted but not paid in time), PAYMENT_FAILED (capture declined).
+  - Deadlines are applied before any signal. Terminal offers record later events as `EVENT_IGNORED` and never change.
+  - A capture delivered before the approval is held (`PAYMENT_OUTCOME_HELD`) and applied once acceptance is recorded.
+  - Every step is an append-only offer event linked to the PayPal event behind it, which makes replays no-ops.
+  - `scripts/expire_switch_offers.py` applies the deadlines (cron).
+- **Observation and attribution:**
+  - For a switch command, a recovery-order capture counts only if the offer verified it as completion and the customer's acceptance had been ingested by the as-of boundary.
+  - Stage 8 treats a real switch offer as treatment only once the customer accepted it. A payment completed without the offer is not credited to it (`UNATTRIBUTED_UNTREATED`).
+  - Attribution goes to the original (for example Razorpay) attempt, as real execution. An offer or a checkout creation is never revenue.
+- **Schema (Revision G, `d0e1f2a3b4c5`, revises `c9d0e1f2a3b4`; single head, 17 linear revisions):** new tables `payment_method_switch_offers` and `payment_method_switch_offer_events`. Existing rows are untouched. Constraints:
+  - Composite foreign keys to the attempt, the decision and the command (same attempt and provider), to the execution attempt and to the completion event.
+  - One offer per command and per checkout order.
+  - CHECKs: sandbox only, provider must change, PayPal only, positive amount, status vocabulary, and acceptance, completion and resolution invariants.
+  - A partial unique index on (offer, PayPal event, event type).
+  - Downgrade refuses while any offer or offer event exists.
+- **API** (dashboard credentials):
+  - `GET /api/v1/offers` returns offers with per-status counts.
+  - `GET /api/v1/offers/{id}` returns the full trail: attempt, diagnosis, decision, command, execution, events, checkout, observation and attribution.
+  - `POST /api/v1/offers/{id}/decline` takes a JSON body. A repeat is idempotent; after acceptance or another terminal state it returns 409.
+  - The checkout link and the customer presentation are returned only while OFFERED. The timeline adds `execution.switch_offer` and withholds a finished offer's link.
+- **Verified end to end** (`tests/integration/test_payment_method_switch_e2e.py`; real webhook routes and pipeline, real heuristic, PayPal's HTTP API mocked in-process):
+  - Scenario: a card outage (STRONG RCA on PAYMENT_METHOD=card) and a USD 20.00 Razorpay card authorization, under a merchant policy with the circuit bypass disabled.
+  - Stage 5: p = 0.825. Stage 6: ACT on the switch. One sandbox order is created and an OFFERED offer is recorded.
+  - The card payment fails: `UNATTRIBUTED_UNTREATED`.
+  - PayPal approval: ACCEPTED, with no attribution yet.
+  - PayPal capture: COMPLETED. The observation is CAPTURED through the verified completion, and attribution is ATTRIBUTED 842 (1,650 × 0.51), real execution, on the Razorpay attempt.
+  - The recovery order is never registered or predicted.
+  - Also covered: decline, decline after acceptance, expiry with a late approval, abandonment with a late capture, a declined capture, duplicate webhooks and full pipeline replays, capture-before-approval, cross-attempt isolation (including a wrong-amount capture), an unrelated PayPal order, simulated execution, and the unchanged default-policy choice.
+- **Other tests:**
+  - `tests/unit/test_payment_method_switch.py` (57): lifecycle, eligibility, ranking and execution.
+  - `tests/migration/test_revision_g.py` (12).
+  - A static check that no PayPal capture, authorize or refund endpoint exists in the client or executor.
+  - New Stage 7 files added to the boundary tests; the foreign-key inventory and Alembic head pins updated.
+- **Final local results** (disposable `db_test`, port 5434):
+  - Offline unit + boundaries: 1,783 passed.
+  - Integration + API: 707 passed, 0 skipped.
+  - Migration: 121 passed, 0 skipped.
+  - Frontend: 11 passed.
+- **Known limits:**
+  - Under the unchanged default policy, for the same payment-method diagnosis, `DEGRADATION_CIRCUIT_BYPASS` outscores the switch except for very small amounts (in USD below about 0.60 at p = 0.825). The default policy therefore selects the switch only rarely. Changing that ranking is a product decision and was not made.
+  - INR payments are never offered a PayPal switch.
+  - The offer is not delivered to the customer by this engine; the merchant channel presents it and reports declines.
+  - Expiry and abandonment need the sweep script (or a later event) to run.
+  - Real PayPal sandbox calls remain unverified (no credentials).
 
 ## Current State
 

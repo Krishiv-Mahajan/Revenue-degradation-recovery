@@ -1,9 +1,12 @@
 """
 Real PayPal recovery execution (sandbox only).
 
-Recovery action: for an ACT decision on the FALLBACK_PAYMENT_LINK route, create a PayPal Orders v2
-checkout for the at-risk amount (the amount and currency Stage 6 recorded) and record its approval
-link. This is a fallback payment link:
+Recovery actions: for an ACT decision on FALLBACK_PAYMENT_LINK or PROMPT_PAYMENT_METHOD_SWITCH, create a
+PayPal Orders v2 checkout for the at-risk amount (the amount and currency Stage 6 recorded) and record its
+approval link. FALLBACK_PAYMENT_LINK is a fallback payment link; PROMPT_PAYMENT_METHOD_SWITCH offers the
+same kind of checkout as an alternative payment method the customer may accept or decline (see
+src/core/domain/switch_offer_models.py), and is refused for an attempt already paying with PayPal.
+In both cases:
 - creating the order moves no money; the payer must approve it at PayPal;
 - capturing an approved order is a separate merchant step this engine never performs;
 - the link is NOT delivered to the payer by this engine; delivery needs a merchant channel (email, SMS,
@@ -43,11 +46,25 @@ logger = logging.getLogger(__name__)
 
 EXECUTOR_NAME = "PAYPAL_ORDERS_V2_SANDBOX"
 ACTION_TYPE = "PAYPAL_RECOVERY_CHECKOUT"
+SWITCH_OFFER_ACTION_TYPE = "PAYPAL_PAYMENT_METHOD_SWITCH_OFFER"
 RECOVERY_EXECUTION_ENABLED_ENV = "PAYPAL_RECOVERY_EXECUTION_ENABLED"
-SUPPORTED_ROUTES = frozenset({InterventionRouteKey.FALLBACK_PAYMENT_LINK})
+SUPPORTED_ROUTES = frozenset({
+    InterventionRouteKey.FALLBACK_PAYMENT_LINK, InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH,
+})
+ACTION_TYPES = {
+    InterventionRouteKey.FALLBACK_PAYMENT_LINK: ACTION_TYPE,
+    InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH: SWITCH_OFFER_ACTION_TYPE,
+}
+ORDER_DESCRIPTIONS = {
+    InterventionRouteKey.FALLBACK_PAYMENT_LINK: "Payment recovery checkout",
+    InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH: "Pay with PayPal instead",
+}
 SUCCESS_ORDER_STATUSES = frozenset({"CREATED", "PAYER_ACTION_REQUIRED", "APPROVED", "COMPLETED"})
 DELIVERY_NOTE = "NOT_DELIVERED: approve_url must reach the payer through a merchant channel"
-ORDER_DESCRIPTION = "Payment recovery checkout"
+SWITCH_OFFER_TERMS = {
+    "consent": "CUSTOMER_APPROVAL_REQUIRED: only the customer's approval at PayPal accepts the offer",
+    "capture": "NEVER_BY_THIS_ENGINE: capturing an approved order is the merchant's step",
+}
 
 
 def recovery_execution_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -81,13 +98,16 @@ class PayPalRecoveryCheckoutExecutor(InterventionExecutor):
             "route_key": command.route_key.value,
             "payment_attempt_id": command.payment_attempt_id,
         }
+        switch_offer = command.route_key is InterventionRouteKey.PROMPT_PAYMENT_METHOD_SWITCH
+        if switch_offer:
+            payload["switch_offer"] = dict(SWITCH_OFFER_TERMS)
 
         def result(status, code, error=None, **extra):
             return ExecutionResult(
                 status=status,
                 executor_name=EXECUTOR_NAME,
                 is_simulation=False,
-                provider_action_type=ACTION_TYPE,
+                provider_action_type=ACTION_TYPES.get(command.route_key, ACTION_TYPE),
                 provider_response_code=code,
                 provider_response_payload={**payload, **extra},
                 error_message=error,
@@ -100,6 +120,11 @@ class PayPalRecoveryCheckoutExecutor(InterventionExecutor):
             return result(ExecutionResultStatus.FAILURE, "LIVE_ENVIRONMENT_REFUSED", "Live PayPal execution is refused")
         if not self.enabled():
             return result(ExecutionResultStatus.FAILURE, "KILL_SWITCH_ACTIVE", "PayPal recovery execution is disabled")
+        if switch_offer and context.get("source_system") in (None, "paypal"):
+            return result(
+                ExecutionResultStatus.FAILURE, "ALTERNATIVE_METHOD_UNAVAILABLE",
+                "A PayPal switch offer needs an original attempt with another provider",
+            )
 
         amount, currency = context.get("amount_minor_units"), context.get("currency")
         try:
@@ -115,7 +140,7 @@ class PayPalRecoveryCheckoutExecutor(InterventionExecutor):
                 request_id=command.idempotency_key,
                 custom_id=str(command.command_id),
                 reference_id=command.payment_attempt_id,
-                description=ORDER_DESCRIPTION,
+                description=ORDER_DESCRIPTIONS[command.route_key],
                 retry_delays=self.retry_delays,
                 sleep=self.sleep,
             )

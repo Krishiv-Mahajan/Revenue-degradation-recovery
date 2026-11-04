@@ -269,6 +269,8 @@ class InterventionDecisionService:
                 payment_method=payment_method,
                 bank=bank,
                 is_on_cooldown=is_on_cooldown,
+                source_system=attempt.source_system,
+                currency=currency,
             )
             if is_eligible and route_cost is None:
                 is_eligible, eligibility_reason = False, f"Policy defines no {currency} cost for route {route_key.value}"

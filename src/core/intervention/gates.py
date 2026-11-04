@@ -10,6 +10,11 @@ from typing import Any, Dict, Optional, Tuple
 from src.core.domain.failure_prediction_models import FailurePrediction
 from src.core.domain.intervention_models import GateEvaluationResult, GateVerdict
 from src.core.intervention.policy import InterventionPolicy, RoutePolicyDefinition
+from src.core.normalizers.paypal import PAYPAL_CURRENCY_EXPONENTS
+
+# Currencies in which an alternative provider's payment outcomes can be ingested and verified here (PayPal:
+# the webhook normalizer's currencies). An offer whose completion could never be verified is not made.
+ALTERNATIVE_PROVIDER_CURRENCIES = {"paypal": frozenset(PAYPAL_CURRENCY_EXPONENTS)}
 
 
 def evaluate_kill_switch(policy: InterventionPolicy) -> GateEvaluationResult:
@@ -152,12 +157,23 @@ def evaluate_route_eligibility(
     payment_method: Optional[str],
     bank: Optional[str],
     is_on_cooldown: bool,
+    source_system: Optional[str] = None,
+    currency: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
     Evaluates whether a specific permitted route is eligible for the transaction context.
+    source_system and currency are the attempt's provider and currency; a route offering an alternative
+    payment provider needs both.
     """
     if not route.enabled:
         return False, "Route is disabled in policy"
+
+    alternative = route.alternative_payment_provider
+    if alternative is not None:
+        if source_system is None or source_system == alternative:
+            return False, f"The customer is already paying with {alternative}; there is no alternative method to offer"
+        if currency not in ALTERNATIVE_PROVIDER_CURRENCIES.get(alternative, frozenset()):
+            return False, f"{alternative} payments in {currency} cannot be verified by this engine"
 
     if is_on_cooldown:
         return False, f"Route {route.route_key.value} is on cooldown for this payment attempt"

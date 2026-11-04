@@ -105,7 +105,8 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | F | Done | see F log | Z-score evidence on every signal; opt-in combined rule; hysteresis unchanged |
 | G | Done | see G log | Provider selector, PayPal payments/timeline, scopes, real-vs-simulated execution, recovery checkout |
 | H | Done (PayPal step blocked, see below) | see H log | `scripts/demo_end_to_end.py`: webhook-driven Stage 1–8 run with a provenance report |
-| I | Done (uncommitted) | see I log | PayPal Stages 2–4: provider-scoped analytics (Revision F `c9d0e1f2a3b4`); PayPal outages drive PayPal decisions |
+| I | Done | `8bbd414` | PayPal Stages 2–4: provider-scoped analytics (Revision F `c9d0e1f2a3b4`); PayPal outages drive PayPal decisions |
+| J | Done | see J log | Customer-approved payment method switch: consent-based PayPal sandbox offers (Revision G `d0e1f2a3b4c5`), verified-completion attribution |
 
 ### Milestone B log (2026-11-03)
 
@@ -306,6 +307,28 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Razorpay and synthetic still share one scope.
   - RCA's GLOBAL historical query matches `GLOBAL` while Stage 2 stores `ALL`. This is pre-existing and unchanged.
 
+### Milestone J log (2026-11-04): Customer-approved payment method switch
+
+- **Decision:** `PROMPT_PAYMENT_METHOD_SWITCH` is now a real, consent-based PayPal sandbox checkout offer (resolving item 3 below for execution, not for ranking).
+  - Policy 1.2.0 only names PayPal as the route's alternative provider.
+  - It refuses attempts already on PayPal, and currencies whose PayPal payments cannot be verified here (INR included).
+- **Offer lifecycle** (Revision G `d0e1f2a3b4c5`):
+  - Customer outcomes: OFFERED, then ACCEPTED (PayPal approval), DECLINED (merchant-reported), EXPIRED (30 min), or ABANDONED (accepted, not paid within 1 h).
+  - Payment outcomes: COMPLETED (verified capture of the offered amount) or PAYMENT_FAILED.
+  - Terminal offers never change. The append-only event trail links every step to its PayPal event. Captures arriving before the approval are held.
+- **Money:**
+  - The engine never captures; the merchant does, and PayPal's capture webhook is the only completion evidence.
+  - Observation counts a switch capture only when the offer verified it and acceptance was known as-of.
+  - Attribution treats the offer only when the customer took it up; offers and checkout creation are never revenue.
+- **Idempotency:** one offer per command and per order. Retries and re-executions reuse `PayPal-Request-Id`. Duplicate webhooks and pipeline replays add no order, offer, event, observation or attribution.
+- **Verified:** the full outage → diagnosis → offer → consent → checkout → verified payment → attribution flow (ATTRIBUTED 842 on a USD 20.00 Razorpay attempt, real execution), plus decline, expiry, abandonment, failure, duplicate, ordering, isolation, simulation and unchanged-default cases.
+- **Results:** offline 1,783 passed; integration + API 707 passed (0 skipped); migration 121 passed (0 skipped); frontend 11 passed.
+- **Limits:**
+  - With the default ranking the circuit bypass usually wins, so the switch is selected for tiny amounts or by merchants without a bypass.
+  - No customer delivery channel.
+  - Deadline sweep is a cron script.
+  - No sandbox credentials.
+
 ## 5. Final status and remaining work (2026-11-03)
 
 **Completed:** all eight stages are integrated through the real webhook routes. The work delivered:
@@ -321,9 +344,9 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 **Remaining, in priority order:**
 1. **Provide sandbox credentials** and run `scripts/paypal_sandbox_recovery_smoke.py`, then the pipeline with `PAYPAL_RECOVERY_EXECUTION_ENABLED=true`. This needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and a public webhook URL (or tunnel) for PayPal events.
 2. ~~**Provider-partitioned Stages 2–4**~~: done in Milestone I (uncommitted). PayPal degradation now drives PayPal decisions.
-3. **Route policy review:** whether the PayPal checkout should also execute PROMPT_PAYMENT_METHOD_SWITCH (offering PayPal *is* a method switch). This is a product decision, so it is not made unilaterally.
+3. **Route policy review:** the PayPal checkout now executes PROMPT_PAYMENT_METHOD_SWITCH as a consent-based offer (Milestone J). Still open, as a product decision: whether a payment-method diagnosis should prefer the switch over DEGRADATION_CIRCUIT_BYPASS, which outscores it under the default policy except for very small amounts.
 4. **Provider-trained Stage 5 model** evaluated on genuine traffic, then registered in `VERIFIED_EMPIRICAL_MODELS` after review.
-5. **Push and CI:** commits `d40a857`…(H) are local and need approval to push. Milestone I is uncommitted and needs approval to commit.
+5. **Push and CI:** commits `d40a857`…(H), `8bbd414` (I) and Milestone J are local and need approval to push.
 6. **Pre-existing test isolation issue:** `tests/unit` + `tests/api` in one process fail 2 route tests; CI runs them separately.
 
 ## 4. External blockers

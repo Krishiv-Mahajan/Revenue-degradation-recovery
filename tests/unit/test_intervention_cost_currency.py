@@ -27,10 +27,10 @@ def test_default_policy_base_costs_are_inr():
     assert get_default_policy().cost_currency == "INR"
 
 
-def test_default_policy_inr_costs_are_unchanged_and_the_version_records_the_usd_schedule():
+def test_default_policy_inr_costs_are_unchanged_since_the_usd_schedule_and_the_switch_provider():
     policy = get_default_policy()
     assert (policy.policy_id, policy.policy_version, policy.min_policy_utility_threshold) == (
-        "default-recovery-v1", "1.1.0", 50,
+        "default-recovery-v1", "1.2.0", 50,
     )
     assert {key.value: route.policy_cost_minor_units for key, route in policy.routes.items()} == {
         "RETRY_SECONDARY_GATEWAY": 150, "PROMPT_PAYMENT_METHOD_SWITCH": 300, "DYNAMIC_RETRY_BACKOFF": 50,
@@ -167,7 +167,7 @@ async def test_unsupported_cost_currency_audit_explains_why_no_route_was_selecte
     audit = decision.evaluation_audit_payload
     assert set(audit) == {"gates", "extra", "policy", "stage5_model"}
     assert audit["policy"] == {
-        "policy_id": "default-recovery-v1", "policy_version": "1.1.0", "cost_currency": "INR",
+        "policy_id": "default-recovery-v1", "policy_version": "1.2.0", "cost_currency": "INR",
         "supported_cost_currencies": ["INR", "USD"],
     }
     assert audit["stage5_model"] == {"name": "DeterministicBaselineModel", "version": "untrained-heuristic-v2"}
