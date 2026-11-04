@@ -48,3 +48,33 @@ def test_default_policy_catalogue_integrity():
         assert route_def.policy_cost_minor_units >= 0
         assert route_def.cooldown_seconds > 0
         assert len(route_def.target_dimensions) > 0
+
+
+def test_route_configuration_is_the_default_policy_when_nothing_is_disabled():
+    from src.core.intervention.policy import apply_route_configuration
+    policy = get_default_policy()
+    assert apply_route_configuration(policy, env={}) is policy
+    assert apply_route_configuration(policy, env={"RECOVERY_DISABLED_ROUTES": " , "}) is policy
+
+
+def test_disabling_a_route_changes_only_that_route_and_names_the_variant():
+    import dataclasses
+    import pytest
+    from src.core.intervention.policy import apply_route_configuration
+
+    policy = get_default_policy()
+    variant = apply_route_configuration(policy, env={"RECOVERY_DISABLED_ROUTES": "DEGRADATION_CIRCUIT_BYPASS"})
+    bypass = InterventionRouteKey.DEGRADATION_CIRCUIT_BYPASS
+
+    assert variant.routes[bypass].enabled is False
+    assert dataclasses.replace(variant.routes[bypass], enabled=True) == policy.routes[bypass]
+    assert {k: r for k, r in variant.routes.items() if k is not bypass} == {
+        k: r for k, r in policy.routes.items() if k is not bypass
+    }
+    assert variant.policy_id.startswith("default-recovery-v1~disabled-") and len(variant.policy_id) <= 50
+    assert dataclasses.replace(variant, policy_id=policy.policy_id, routes=policy.routes) == policy
+    same = apply_route_configuration(policy, env={"RECOVERY_DISABLED_ROUTES": " DEGRADATION_CIRCUIT_BYPASS,"})
+    assert same.policy_id == variant.policy_id
+
+    with pytest.raises(ValueError, match="Unknown intervention routes"):
+        apply_route_configuration(policy, env={"RECOVERY_DISABLED_ROUTES": "CAPTURE_EVERYTHING"})

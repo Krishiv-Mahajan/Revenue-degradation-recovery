@@ -59,7 +59,7 @@ from src.core.execution.execution_service import InterventionExecutionService
 from src.core.execution.observation_service import PaymentOutcomeObservationService
 from src.core.execution.simulator import SimulatorInterventionExecutor, SimulatorMode
 from src.core.execution.switch_offer_service import SwitchOfferService
-from src.core.intervention.policy import get_default_policy
+from src.core.intervention.policy import apply_route_configuration, get_default_policy
 from src.core.intervention.service import InterventionDecisionService
 from src.core.ml.model import get_development_model
 from src.core.ml.selection import select_live_model
@@ -153,7 +153,7 @@ async def _execute_live_pipeline(
         feat_svc = FeatureReconstructionService(feat_repo)
         pred_svc = FailurePredictionService(session, feat_svc, pred_repo, model)
 
-        demo_policy = get_default_policy()
+        demo_policy = apply_route_configuration(get_default_policy())
         inter_decision_svc = InterventionDecisionService(session, inter_repo, feat_repo, demo_policy)
 
         # Stage 7: SIMULATOR_V1 unless real PayPal sandbox recovery is enabled and configured; real

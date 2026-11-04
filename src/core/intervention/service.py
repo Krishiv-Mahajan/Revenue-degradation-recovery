@@ -415,6 +415,7 @@ class InterventionDecisionService:
                 "cost_schedule_currency": currency if cost_schedule else None,
                 "supported_cost_currencies": list(self.policy.supported_cost_currencies),
                 "global_rate_limit_per_minute": self.policy.global_rate_limit_per_minute,
+                "disabled_routes": sorted(k.value for k, r in self.policy.routes.items() if not r.enabled),
             },
         }
 

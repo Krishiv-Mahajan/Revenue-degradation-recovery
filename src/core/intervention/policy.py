@@ -6,9 +6,11 @@ business policy assumptions. They must NOT be tuned against synthetic Stage 5 me
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import os
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 from src.core.domain.intervention_models import InterventionRouteKey
 
@@ -166,3 +168,32 @@ def get_default_policy() -> InterventionPolicy:
         cost_currency="INR",
         additional_cost_schedules={"USD": usd_schedule},
     )
+
+
+# A merchant may switch off routes its stack cannot perform (for example a circuit bypass). Disabling only
+# removes candidate routes: thresholds, costs, gates and every other route are unchanged.
+DISABLED_ROUTES_ENV = "RECOVERY_DISABLED_ROUTES"
+
+
+def with_disabled_routes(policy: InterventionPolicy, route_keys: Iterable[str]) -> InterventionPolicy:
+    """
+    The policy with these routes disabled, under a distinct, deterministic policy id so every decision
+    records which variant it used. Unknown route keys are refused.
+    """
+    keys = sorted({key.strip() for key in route_keys if key.strip()})
+    if not keys:
+        return policy
+    unknown = [key for key in keys if key not in {route.value for route in policy.routes}]
+    if unknown:
+        raise ValueError(f"Unknown intervention routes in {DISABLED_ROUTES_ENV}: {', '.join(unknown)}")
+    routes = {
+        key: replace(route, enabled=False) if key.value in keys else route for key, route in policy.routes.items()
+    }
+    digest = hashlib.sha256(",".join(keys).encode()).hexdigest()[:8]
+    return replace(policy, policy_id=f"{policy.policy_id}~disabled-{digest}", routes=routes)
+
+
+def apply_route_configuration(policy: InterventionPolicy, env: Optional[Mapping[str, str]] = None) -> InterventionPolicy:
+    """The live policy: the given policy with the routes named in RECOVERY_DISABLED_ROUTES disabled."""
+    env = os.environ if env is None else env
+    return with_disabled_routes(policy, (env.get(DISABLED_ROUTES_ENV) or "").split(","))
