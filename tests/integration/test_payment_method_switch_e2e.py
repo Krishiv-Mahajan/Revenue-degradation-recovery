@@ -345,6 +345,15 @@ async def test_a_declined_offer_is_never_reused_or_attributed(e2e, monkeypatch):
     now = datetime.now(timezone.utc)
     payment_id, _, offer, _ = await _offered_switch(e2e, monkeypatch, now)
 
+    # A cross-site form cannot submit a decline: only a JSON body is accepted.
+    for content_type in ("text/plain", "application/x-www-form-urlencoded"):
+        forged = await e2e.client.post(
+            f"/api/v1/offers/{offer.offer_id}/decline", content=b'{"reason": "x"}',
+            headers={"Content-Type": content_type}, auth=AUTH,
+        )
+        assert forged.status_code == 422
+    assert (await _offer_for(e2e, payment_id)).status == "OFFERED"
+
     first = await e2e.client.post(f"/api/v1/offers/{offer.offer_id}/decline", json={"reason": "prefers card"}, auth=AUTH)
     again = await e2e.client.post(f"/api/v1/offers/{offer.offer_id}/decline", json={}, auth=AUTH)
     assert (first.status_code, first.json()["status"], first.json()["applied"]) == (200, "DECLINED", True)

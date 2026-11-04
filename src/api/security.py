@@ -151,7 +151,16 @@ class ConfiguredTrustedHostMiddleware:
 
 
 class AuthenticatedStaticFiles(StaticFiles):
-    """Static files served only to requests that pass require_dashboard_auth."""
+    """
+    Static files served only to requests that pass require_dashboard_auth. Responses must be revalidated
+    (ETag) on every load, so an upgraded dashboard never runs stale scripts, and are never stored by
+    shared caches.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, private"
+        return response
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:

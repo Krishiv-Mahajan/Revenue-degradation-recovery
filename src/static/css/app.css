@@ -2037,9 +2037,9 @@ body {
 }
 
 .provider-health-pill.degraded {
-  border-color: #f5b5b5;
-  background: #fdecec;
-  color: #a12626;
+  border-color: var(--crimson-border);
+  background: var(--crimson-bg);
+  color: var(--crimson-text);
 }
 
 .provider-health-pill .provider-health-label {
@@ -2050,7 +2050,8 @@ body {
   display: inline-block;
   padding: 0.1rem 0.45rem;
   border-radius: 999px;
-  border: 1px solid var(--border-color, #d0d5dd);
+  border: 1px solid var(--border-prominent);
+  color: var(--text-secondary);
   font-size: 0.7rem;
   font-weight: 600;
 }

@@ -118,4 +118,4 @@ if os.path.exists(STATIC_DIR):
         "/", methods=["GET", "HEAD"], include_in_schema=False, dependencies=[Depends(require_dashboard_auth)]
     )
     async def serve_dashboard():
-        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache, private"})

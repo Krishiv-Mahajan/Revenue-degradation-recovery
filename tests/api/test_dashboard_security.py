@@ -139,9 +139,11 @@ def test_correct_credentials_reach_dashboard_static_assets_and_inspection_routes
 
     dashboard = client.get("/", auth=auth)
     assert dashboard.status_code == 200 and "Payment Recovery Engine" in dashboard.text
+    assert dashboard.headers["Cache-Control"] == "no-cache, private"
     assert client.head("/", auth=auth).status_code == 200
     assert client.get("/static/js/app.js", auth=auth).status_code == 200
     assert client.get("/static/css/app.css", auth=auth).status_code == 200
+    assert client.get("/static/js/app.js", auth=auth).headers["Cache-Control"] == "no-cache, private"
 
     episodes = client.get("/api/v1/episodes", auth=auth)
     assert (episodes.status_code, episodes.json()) == (200, [])
