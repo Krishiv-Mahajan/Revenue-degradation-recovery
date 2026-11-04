@@ -5,6 +5,7 @@ from sqlalchemy import select, and_, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.domain.payment_attempts import paypal_order_id
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE, scope_for_source
 from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES, PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.paypal_attempt_queries import paypal_trigger_events
 from src.infrastructure.models import (
@@ -102,7 +103,10 @@ class FeatureReconstructionRepository:
         failures = row.failures or 0
         return total, failures
 
-    async def get_active_episode_context(self, segment_dimension: str, segment_value: str, t: datetime) -> Optional[EpisodeStateHistoryModel]:
+    async def get_active_episode_context(
+        self, segment_dimension: str, segment_value: str, t: datetime,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
+    ) -> Optional[EpisodeStateHistoryModel]:
         """
         Implements the strict 2-step Stage 3 historical reconstruction algorithm.
         1. Find latest reconciliation_run_id <= T
@@ -115,7 +119,8 @@ class FeatureReconstructionRepository:
                 and_(
                     func.upper(EpisodeStateHistoryModel.segment_dimension) == segment_dimension.upper(),
                     EpisodeStateHistoryModel.segment_value == segment_value,
-                    EpisodeStateHistoryModel.evaluation_timestamp <= t
+                    EpisodeStateHistoryModel.evaluation_timestamp <= t,
+                    EpisodeStateHistoryModel.provider_scope == provider_scope,
                 )
             )
             .order_by(EpisodeStateHistoryModel.evaluation_timestamp.desc())
@@ -136,7 +141,8 @@ class FeatureReconstructionRepository:
                     EpisodeStateHistoryModel.reconciliation_run_id == run_id,
                     func.upper(EpisodeStateHistoryModel.segment_dimension) == segment_dimension.upper(),
                     EpisodeStateHistoryModel.segment_value == segment_value,
-                    EpisodeStateHistoryModel.status == 'ACTIVE'
+                    EpisodeStateHistoryModel.status == 'ACTIVE',
+                    EpisodeStateHistoryModel.provider_scope == provider_scope,
                 )
             )
             .limit(1)
@@ -188,34 +194,33 @@ class FeatureReconstructionRepository:
         """
         Deterministically resolves the most severe active episode applicable to the payment.
         Prioritizes by canonical severity, then older start window, then UUID.
-        PayPal events get none: Stages 2-4 are Razorpay-only, so their episodes say nothing about PayPal.
+        Only episodes of the payment's own analytics scope apply: a PayPal payment sees PayPal episodes,
+        a Razorpay/synthetic payment sees the original pipeline's episodes, never the other's.
         """
-        if auth_event.source_system == PAYPAL_SOURCE_SYSTEM:
-            return None
-
+        scope = scope_for_source(auth_event.source_system)
         candidates = []
         
-        ep_global = await self.get_active_episode_context("GLOBAL", "ALL", t)
+        ep_global = await self.get_active_episode_context("GLOBAL", "ALL", t, scope)
         if ep_global:
             candidates.append(ep_global)
             
         if auth_event.currency:
-            ep_curr = await self.get_active_episode_context("CURRENCY", auth_event.currency, t)
+            ep_curr = await self.get_active_episode_context("CURRENCY", auth_event.currency, t, scope)
             if ep_curr:
                 candidates.append(ep_curr)
             
         if auth_event.payment_method:
-            ep_pm = await self.get_active_episode_context("PAYMENT_METHOD", auth_event.payment_method, t)
+            ep_pm = await self.get_active_episode_context("PAYMENT_METHOD", auth_event.payment_method, t, scope)
             if ep_pm:
                 candidates.append(ep_pm)
             
         if auth_event.bank:
-            ep_bank = await self.get_active_episode_context("BANK", auth_event.bank, t)
+            ep_bank = await self.get_active_episode_context("BANK", auth_event.bank, t, scope)
             if ep_bank:
                 candidates.append(ep_bank)
             
         if auth_event.wallet:
-            ep_wallet = await self.get_active_episode_context("WALLET", auth_event.wallet, t)
+            ep_wallet = await self.get_active_episode_context("WALLET", auth_event.wallet, t, scope)
             if ep_wallet:
                 candidates.append(ep_wallet)
             

@@ -55,6 +55,8 @@ class DegradationSignal:
     # Statistical evidence (see src/core/degradation/zscore.py); None for signals recorded before it existed.
     z_score: Optional[float] = None
     z_score_status: Optional[str] = None
+    # Stage 2-4 analytics scope (src/core/domain/analytics_scopes.py)
+    provider_scope: str = "razorpay_pipeline"
 
 @dataclass
 class DegradationEpisode:
@@ -67,3 +69,4 @@ class DegradationEpisode:
     affected_window_count: int
     severity: Severity
     ended_at_window: Optional[datetime] = None
+    provider_scope: str = "razorpay_pipeline"

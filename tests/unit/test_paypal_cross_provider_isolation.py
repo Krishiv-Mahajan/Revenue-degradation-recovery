@@ -457,10 +457,19 @@ async def test_live_prediction_trigger_is_not_entered_by_other_paypal_events(eve
     prediction_service.orchestrate_prediction.assert_not_awaited()
 
 
-def _assert_stages_2_to_4_skipped():
-    live_pipeline.PaymentHealthAnalyticsService.return_value.calculate_and_save_window.assert_not_awaited()
-    live_pipeline.DegradationService.return_value.process_snapshots.assert_not_awaited()
-    live_pipeline.RCAService.return_value.evaluate_episode.assert_not_awaited()
+def _assert_stages_2_to_4_ran_in_paypal_scope(session):
+    """
+    Stages 2-4 run for PayPal events in the PayPal analytics scope only: Stage 2 recalculates the event's
+    window there, and the snapshot and active-episode queries are bound to that scope. Returns the
+    session queries that followed them.
+    """
+    analytics = live_pipeline.PaymentHealthAnalyticsService.return_value.calculate_and_save_window
+    analytics.assert_awaited_once()
+    assert analytics.await_args.args[2] == "paypal"
+    snapshot_query, episode_query, *rest = session.execute.await_args_list
+    assert "provider_scope = :scope" in str(snapshot_query.args[0]) and snapshot_query.args[1]["scope"] == "paypal"
+    assert "provider_scope = :scope" in str(episode_query.args[0]) and episode_query.args[1] == {"scope": "paypal"}
+    return rest
 
 
 async def test_paypal_order_approval_enters_prediction_as_its_own_paypal_attempt(monkeypatch):
@@ -476,9 +485,8 @@ async def test_paypal_order_approval_enters_prediction_as_its_own_paypal_attempt
         AttemptRef("paypal", PAYPAL_ATTEMPT_ID, samples.ORDER_ID),
     )
     live_pipeline.PaymentAttemptRepository.return_value.register.assert_awaited_once_with(event)
-    _assert_stages_2_to_4_skipped()
-    # The only query is the recovery-order check, keyed by this order's id.
-    [recovery_lookup] = session.execute.await_args_list
+    # After the PayPal-scoped Stages 2-4, the only query is the recovery-order check for this order.
+    [recovery_lookup] = _assert_stages_2_to_4_ran_in_paypal_scope(session)
     _assert_recovery_order_lookup(recovery_lookup, samples.ORDER_ID)
 
 
@@ -497,8 +505,7 @@ async def test_paypal_capture_outcomes_look_up_commands_of_their_order_attempt_o
     assert outcome["status"] == "success"
     assert outcome["payment_attempt_id"] == PAYPAL_ATTEMPT_ID
     prediction_service.orchestrate_prediction.assert_not_awaited()
-    _assert_stages_2_to_4_skipped()
-    recovery_lookup, call = session.execute.await_args_list
+    recovery_lookup, call = _assert_stages_2_to_4_ran_in_paypal_scope(session)
     _assert_recovery_order_lookup(recovery_lookup, samples.ORDER_ID)
     command_lookup = call.args[0]
     assert command_lookup.get_final_froms() == [InterventionCommandModel.__table__]
@@ -523,7 +530,7 @@ async def test_razorpay_payment_id_in_the_paypal_namespace_runs_no_stage_5_to_8(
     assert any(r.getMessage().startswith("[LivePipelineAttemptRefused]") for r in caplog.records)
 
 
-async def test_paypal_capture_without_a_related_order_runs_no_stage(monkeypatch):
+async def test_paypal_capture_without_a_related_order_runs_no_stage_5_to_8(monkeypatch):
     session, prediction_service = _stub_live_pipeline_services(monkeypatch)
     event = _paypal_event(samples.capture_completed).model_copy(update={"order_id": None})
 
@@ -531,7 +538,8 @@ async def test_paypal_capture_without_a_related_order_runs_no_stage(monkeypatch)
 
     assert (outcome["status"], outcome["payment_attempt_id"]) == ("success", None)
     prediction_service.orchestrate_prediction.assert_not_awaited()
-    session.execute.assert_not_awaited()
+    # The capture still counts in PayPal health analytics; nothing else is queried.
+    assert _assert_stages_2_to_4_ran_in_paypal_scope(session) == []
 
 
 async def test_live_prediction_trigger_is_entered_by_a_real_razorpay_authorization(monkeypatch):
@@ -559,7 +567,7 @@ async def test_live_prediction_trigger_checks_the_provider_as_well_as_the_event_
 
     assert (outcome["status"], outcome["payment_attempt_id"]) == ("success", None)
     prediction_service.orchestrate_prediction.assert_not_awaited()
-    _assert_stages_2_to_4_skipped()
+    assert _assert_stages_2_to_4_ran_in_paypal_scope(session) == []
 
 
 # --- guarantees: Stage 6 sizing and Stage 8 amount lookup ---------------------------------------

@@ -7,18 +7,21 @@ from sqlalchemy.dialects.postgresql import insert
 
 from src.core.domain.models import PaymentEvent
 from src.core.domain.analytics_models import PaymentHealthSnapshot
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE
+from src.infrastructure.analytics_scope_queries import scope_event_filter
 from src.infrastructure.models import PaymentEventModel, PaymentHealthSnapshotModel
 
 class AnalyticsRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get_events_in_window(self, window_start: datetime, window_end: datetime) -> List[PaymentEvent]:
+    async def get_events_in_window(
+        self, window_start: datetime, window_end: datetime, provider_scope: str = RAZORPAY_PIPELINE_SCOPE
+    ) -> List[PaymentEvent]:
         stmt = select(PaymentEventModel).where(
             PaymentEventModel.timestamp >= window_start,
             PaymentEventModel.timestamp < window_end,
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
+            scope_event_filter(provider_scope),
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()
@@ -48,10 +51,12 @@ class AnalyticsRepository:
             ))
         return events
 
-    async def get_events_ingested_after(self, ingested_after: datetime) -> List[PaymentEvent]:
+    async def get_events_ingested_after(
+        self, ingested_after: datetime, provider_scope: str = RAZORPAY_PIPELINE_SCOPE
+    ) -> List[PaymentEvent]:
         stmt = select(PaymentEventModel).where(
             PaymentEventModel.ingested_at > ingested_after,
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES)
+            scope_event_filter(provider_scope),
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()
@@ -87,7 +92,8 @@ class AnalyticsRepository:
         target_window_end: datetime,
         segment_dimension: str,
         segment_value: str,
-        weeks_back: int = 4
+        weeks_back: int = 4,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> List[PaymentHealthSnapshot]:
         """
         Retrieves matching windows from the past N weeks for the same day of week and time of day.
@@ -102,7 +108,8 @@ class AnalyticsRepository:
         stmt = select(PaymentHealthSnapshotModel).where(
             PaymentHealthSnapshotModel.window_start.in_(historical_starts),
             PaymentHealthSnapshotModel.segment_dimension == segment_dimension,
-            PaymentHealthSnapshotModel.segment_value == segment_value
+            PaymentHealthSnapshotModel.segment_value == segment_value,
+            PaymentHealthSnapshotModel.provider_scope == provider_scope,
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()
@@ -128,7 +135,8 @@ class AnalyticsRepository:
                 baseline_stddev_success_rate=m.baseline_stddev_success_rate,
                 baseline_sample_count=m.baseline_sample_count,
                 insufficient_volume=m.insufficient_volume,
-                calculated_at=m.calculated_at
+                calculated_at=m.calculated_at,
+                provider_scope=m.provider_scope,
             ))
         return snapshots
 
@@ -156,12 +164,13 @@ class AnalyticsRepository:
                 baseline_stddev_success_rate=snapshot.baseline_stddev_success_rate,
                 baseline_sample_count=snapshot.baseline_sample_count,
                 insufficient_volume=snapshot.insufficient_volume,
-                calculated_at=snapshot.calculated_at
+                calculated_at=snapshot.calculated_at,
+                provider_scope=snapshot.provider_scope,
             )
 
             # Upsert logic based on the unique constraint uq_snapshot_identity
             stmt = stmt.on_conflict_do_update(
-                index_elements=['window_start', 'window_end', 'segment_dimension', 'segment_value'],
+                index_elements=['window_start', 'window_end', 'segment_dimension', 'segment_value', 'provider_scope'],
                 set_={
                     'transaction_count': stmt.excluded.transaction_count,
                     'successful_transaction_count': stmt.excluded.successful_transaction_count,

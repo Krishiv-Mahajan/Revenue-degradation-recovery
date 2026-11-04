@@ -5,8 +5,10 @@ Connects newly ingested PaymentEvents to the existing frozen recovery pipeline.
 Reuses canonical services, models, and repositories without altering any validated
 mathematical behavior, thresholds, or domain logic.
 
-Razorpay (and synthetic) events run Stages 2-8 as before. PayPal events run only Stages 5-8, for
-their order-level attempt (see src/core/domain/payment_attempts.py); Stages 2-4 stay Razorpay-only.
+Every event runs Stages 2-4 in its own analytics scope (src/core/domain/analytics_scopes.py): Razorpay
+and synthetic events in the original pipeline scope, PayPal events in the PayPal scope. Stages 5-8 run
+per payment attempt: one per Razorpay/synthetic payment, one per PayPal order (see
+src/core/domain/payment_attempts.py).
 """
 import logging
 from collections import defaultdict
@@ -25,6 +27,7 @@ from src.core.domain.payment_attempts import (
     pipeline_attempt_refusal,
     resolve_pipeline_attempt,
 )
+from src.core.domain.analytics_scopes import SCOPE_CONFIG, scope_for_source
 from src.core.domain.source_systems import PAYPAL_SOURCE_SYSTEM
 from src.infrastructure.models import (
     CounterfactualAttributionModel,
@@ -162,8 +165,10 @@ async def _execute_live_pipeline(
         if event_ts.tzinfo is None:
             event_ts = event_ts.replace(tzinfo=timezone.utc)
 
-        # Stages 2-4 are Razorpay-only: PayPal events neither feed nor re-evaluate them.
-        if not paypal:
+        # Stages 2-4 run in the event's own analytics scope: PayPal and the Razorpay/synthetic pipeline
+        # never share snapshots, baselines, signals, episodes or RCA.
+        analytics_scope = scope_for_source(payment_event.source_system)
+        if analytics_scope in SCOPE_CONFIG:
             # Determine 5-minute tumbling window for Stage 2
             minute = event_ts.minute
             window_start_minute = (minute // 5) * 5
@@ -174,7 +179,7 @@ async def _execute_live_pipeline(
             # Stage 2: Payment Health Analytics
             # -------------------------------------------------------------------
             current_stage = "STAGE_2_ANALYTICS"
-            await analytics_svc.calculate_and_save_window(window_start, window_end)
+            await analytics_svc.calculate_and_save_window(window_start, window_end, analytics_scope)
 
             # -------------------------------------------------------------------
             # Stage 3: Degradation Detection
@@ -188,10 +193,12 @@ async def _execute_live_pipeline(
                        failed_gmv_minor_units, baseline_success_rate, baseline_mean_success_rate,
                        baseline_stddev_success_rate, baseline_sample_count, insufficient_volume, calculated_at
                 FROM payment_health_snapshots
-                WHERE window_start >= :w_start AND window_end <= :w_end
+                WHERE window_start >= :w_start AND window_end <= :w_end AND provider_scope = :scope
                 """
             )
-            snap_res = await session.execute(snap_stmt, {"w_start": window_start, "w_end": window_end})
+            snap_res = await session.execute(
+                snap_stmt, {"w_start": window_start, "w_end": window_end, "scope": analytics_scope}
+            )
             snapshots = [
                 PaymentHealthSnapshot(
                     snapshot_id=row.snapshot_id,
@@ -213,6 +220,7 @@ async def _execute_live_pipeline(
                     baseline_sample_count=row.baseline_sample_count,
                     insufficient_volume=row.insufficient_volume,
                     calculated_at=row.calculated_at,
+                    provider_scope=analytics_scope,
                 )
                 for row in snap_res.fetchall()
             ]
@@ -231,10 +239,10 @@ async def _execute_live_pipeline(
                 """
                 SELECT episode_id, segment_dimension, segment_value, started_at_window, ended_at_window, status, peak_absolute_drop, affected_window_count, severity
                 FROM degradation_episodes
-                WHERE status = 'ACTIVE'
+                WHERE status = 'ACTIVE' AND provider_scope = :scope
                 """
             )
-            ep_res = await session.execute(ep_stmt)
+            ep_res = await session.execute(ep_stmt, {"scope": analytics_scope})
             for row in ep_res.fetchall():
                 ep = DegradationEpisode(
                     episode_id=row.episode_id,
@@ -246,6 +254,7 @@ async def _execute_live_pipeline(
                     peak_absolute_drop=row.peak_absolute_drop,
                     affected_window_count=row.affected_window_count,
                     severity=Severity(row.severity),
+                    provider_scope=analytics_scope,
                 )
                 await rca_svc.evaluate_episode(ep)
 

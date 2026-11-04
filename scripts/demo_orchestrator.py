@@ -333,7 +333,7 @@ async def run_pipeline(engine) -> None:
                        failed_gmv_minor_units, baseline_success_rate, baseline_mean_success_rate,
                        baseline_stddev_success_rate, baseline_sample_count, insufficient_volume, calculated_at
                 FROM payment_health_snapshots 
-                WHERE window_start >= :w_start AND window_end <= :w_end
+                WHERE window_start >= :w_start AND window_end <= :w_end AND provider_scope = 'razorpay_pipeline'
                 """
             )
             snap_res = await session.execute(snap_stmt, {"w_start": current_window, "w_end": window_end})
@@ -368,7 +368,7 @@ async def run_pipeline(engine) -> None:
                 """
                 SELECT episode_id, segment_dimension, segment_value, started_at_window, ended_at_window, status, peak_absolute_drop, affected_window_count, severity
                 FROM degradation_episodes
-                WHERE status = 'ACTIVE'
+                WHERE status = 'ACTIVE' AND provider_scope = 'razorpay_pipeline'
                 """
             )
             ep_res = await session.execute(ep_stmt)

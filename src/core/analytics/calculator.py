@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Tuple
 from uuid import uuid4
 import statistics
 
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE, SCOPE_CONFIG
 from src.core.domain.models import PaymentEvent
 from src.core.domain.analytics_models import PaymentHealthSnapshot
 
@@ -18,10 +19,11 @@ def calculate_health_metrics_for_window(
     events: List[PaymentEvent],
     window_start: datetime,
     window_end: datetime,
-    threshold: int = MIN_TRANSACTION_THRESHOLD
+    threshold: int = MIN_TRANSACTION_THRESHOLD,
+    provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
 ) -> List[PaymentHealthSnapshot]:
 
-    dimensions = ['GLOBAL', 'currency', 'payment_method', 'bank', 'wallet', 'error_source']
+    dimensions = list(SCOPE_CONFIG[provider_scope].stage2_dimensions)
 
     snapshots = []
 
@@ -83,7 +85,8 @@ def calculate_health_metrics_for_window(
                 failed_gmv_minor_units=failed_gmv,
                 baseline_success_rate=None, # Populated later
                 insufficient_volume=insufficient_volume,
-                calculated_at=datetime.now(timezone.utc)
+                calculated_at=datetime.now(timezone.utc),
+                provider_scope=provider_scope,
             )
             snapshots.append(snapshot)
 

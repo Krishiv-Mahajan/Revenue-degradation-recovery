@@ -25,6 +25,7 @@ REVISION_B = "e2d3c4b5a6f7"
 REVISION_C = "f4a5b6c7d8e9"
 REVISION_D = "a7b8c9d0e1f2"
 REVISION_E = "b8c9d0e1f2a3"
+REVISION_F = "c9d0e1f2a3b4"
 
 
 def render(*args, config_path=PROJECT_ROOT / "alembic.ini"):
@@ -55,8 +56,8 @@ class TestDestinationArgumentIsNotReliable:
         return ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
 
     def test_symbolic_and_full_ids_resolve(self, script):
-        assert script.as_revision_number("head") == REVISION_E
-        assert script.as_revision_number("heads") == (REVISION_E,)
+        assert script.as_revision_number("head") == REVISION_F
+        assert script.as_revision_number("heads") == (REVISION_F,)
         assert script.as_revision_number(REVISION_A) == REVISION_A
         assert script.as_revision_number(REVISION_B) == REVISION_B
         assert script.as_revision_number(REVISION_C) == REVISION_C
@@ -68,7 +69,7 @@ class TestDestinationArgumentIsNotReliable:
 
 
 class TestFinalStateGuardOnRealMigrations:
-    """DF-2 on the real chain, where Revision E is currently the head and Revision A is intermediate."""
+    """DF-2 on the real chain, where Revision F is currently the head and Revision A is intermediate."""
 
     @pytest.mark.parametrize(
         "args",
@@ -78,7 +79,7 @@ class TestFinalStateGuardOnRealMigrations:
             ("upgrade", f"{BASE_REVISION}:{REVISION_A}"),
             ("upgrade", f"{BASE_REVISION}:+1"),
             ("upgrade", "8b9c:9d2e"),
-            ("upgrade", f"{BASE_REVISION}:head-4"),
+            ("upgrade", f"{BASE_REVISION}:head-5"),
         ],
         ids=["full", "partial", "range", "relative", "partial-range", "relative-head"],
     )
@@ -135,8 +136,9 @@ class TestFinalStateGuardOnRealMigrations:
         [
             ("upgrade", "head"), ("upgrade", REVISION_D), ("upgrade", f"{REVISION_C}:{REVISION_D}"),
             ("downgrade", f"{REVISION_D}:{REVISION_C}"), ("upgrade", REVISION_E), ("downgrade", f"{REVISION_E}:{REVISION_D}"),
+            ("upgrade", REVISION_F), ("downgrade", f"{REVISION_F}:{REVISION_E}"),
         ],
-        ids=["head", "full-d", "c-to-d", "d-to-c", "full-e", "e-to-d"],
+        ids=["head", "full-d", "c-to-d", "d-to-c", "full-e", "e-to-d", "full-f", "f-to-e"],
     )
     def test_runs_ending_at_revision_c_d_or_e_emit_no_assertion(self, args):
         assert not ends_with_assertion(render(*args))

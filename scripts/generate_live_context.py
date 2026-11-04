@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.core.analytics.service import PaymentHealthAnalyticsService
 from src.core.degradation.service import DegradationService
 from src.core.domain.analytics_models import PaymentHealthSnapshot
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE
 from src.core.domain.degradation_models import DegradationEpisode, EpisodeStatus, Severity
 from src.core.normalizers.razorpay import generate_deterministic_hash
 from src.core.rca.service import RCAService
@@ -121,8 +122,9 @@ async def seed_historical_baselines(
                 baseline_success_rate=0.85,
                 insufficient_volume=False,
                 calculated_at=now,
+                provider_scope=RAZORPAY_PIPELINE_SCOPE,
             ).on_conflict_do_update(
-                index_elements=["window_start", "window_end", "segment_dimension", "segment_value"],
+                index_elements=["window_start", "window_end", "segment_dimension", "segment_value", "provider_scope"],
                 set_={
                     "transaction_count": 200,
                     "successful_transaction_count": 170,
@@ -353,7 +355,7 @@ async def run_stage3_degradation(
                failed_gmv_minor_units, baseline_success_rate, baseline_mean_success_rate,
                baseline_stddev_success_rate, baseline_sample_count, insufficient_volume, calculated_at
         FROM payment_health_snapshots 
-        WHERE window_start >= :w_start AND window_end <= :w_end
+        WHERE window_start >= :w_start AND window_end <= :w_end AND provider_scope = 'razorpay_pipeline'
         """
     )
 
@@ -398,7 +400,7 @@ async def run_stage3_degradation(
         """
         SELECT episode_id, segment_dimension, segment_value, started_at_window, ended_at_window, status, peak_absolute_drop, affected_window_count, severity
         FROM degradation_episodes
-        WHERE status = 'ACTIVE'
+        WHERE status = 'ACTIVE' AND provider_scope = 'razorpay_pipeline'
         """
     )
     ep_res = await session.execute(ep_stmt)

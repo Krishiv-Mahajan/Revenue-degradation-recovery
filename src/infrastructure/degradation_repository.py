@@ -5,17 +5,22 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE
 from src.infrastructure.models import DegradationSignalModel, DegradationEpisodeModel, EpisodeStateHistoryModel
 from src.core.domain.degradation_models import DegradationSignal, DegradationEpisode, SignalType, EpisodeStatus, Severity
 
 class DegradationRepository:
+    """Stage 3 persistence. Every read is confined to one analytics scope; every write records it."""
+
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get_latest_signals_for_segment(self, segment_dimension: str, segment_value: str) -> List[DegradationSignal]:
+    async def get_latest_signals_for_segment(
+        self, segment_dimension: str, segment_value: str, provider_scope: str = RAZORPAY_PIPELINE_SCOPE
+    ) -> List[DegradationSignal]:
         stmt = (
             select(DegradationSignalModel)
-            .filter_by(segment_dimension=segment_dimension, segment_value=segment_value)
+            .filter_by(segment_dimension=segment_dimension, segment_value=segment_value, provider_scope=provider_scope)
             .order_by(
                 DegradationSignalModel.window_start,
                 DegradationSignalModel.evaluation_version.desc()
@@ -26,12 +31,16 @@ class DegradationRepository:
         models = result.scalars().all()
         return [self._map_to_domain_signal(m) for m in models]
 
-    async def get_max_evaluation_version(self, segment_dimension: str, segment_value: str, window_start: datetime) -> int:
+    async def get_max_evaluation_version(
+        self, segment_dimension: str, segment_value: str, window_start: datetime,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
+    ) -> int:
         stmt = select(func.max(DegradationSignalModel.evaluation_version)).where(
             and_(
                 DegradationSignalModel.segment_dimension == segment_dimension,
                 DegradationSignalModel.segment_value == segment_value,
-                DegradationSignalModel.window_start == window_start
+                DegradationSignalModel.window_start == window_start,
+                DegradationSignalModel.provider_scope == provider_scope,
             )
         )
         result = await self.session.execute(stmt)
@@ -52,6 +61,7 @@ class DegradationRepository:
             evaluation_timestamp=signal.evaluation_timestamp,
             z_score=signal.z_score,
             z_score_status=signal.z_score_status,
+            provider_scope=signal.provider_scope,
         )
         self.session.add(model)
         await self.session.flush()
@@ -66,7 +76,8 @@ class DegradationRepository:
             status=episode.status.value,
             peak_absolute_drop=episode.peak_absolute_drop,
             affected_window_count=episode.affected_window_count,
-            severity=episode.severity.value
+            severity=episode.severity.value,
+            provider_scope=episode.provider_scope,
         ).on_conflict_do_update(
             index_elements=['episode_id'],
             set_={
@@ -87,16 +98,20 @@ class DegradationRepository:
             status=episode.status.value,
             severity=episode.severity.value,
             effective_start_window=episode.started_at_window,
-            evaluation_timestamp=evaluation_timestamp
+            evaluation_timestamp=evaluation_timestamp,
+            provider_scope=episode.provider_scope,
         )
         self.session.add(history_model)
         await self.session.flush()
         
-    async def get_episodes_for_segment(self, segment_dimension: str, segment_value: str) -> List[DegradationEpisode]:
+    async def get_episodes_for_segment(
+        self, segment_dimension: str, segment_value: str, provider_scope: str = RAZORPAY_PIPELINE_SCOPE
+    ) -> List[DegradationEpisode]:
         stmt = select(DegradationEpisodeModel).where(
             and_(
                 DegradationEpisodeModel.segment_dimension == segment_dimension,
-                DegradationEpisodeModel.segment_value == segment_value
+                DegradationEpisodeModel.segment_value == segment_value,
+                DegradationEpisodeModel.provider_scope == provider_scope,
             )
         )
         result = await self.session.execute(stmt)
@@ -118,6 +133,7 @@ class DegradationRepository:
             evaluation_timestamp=model.evaluation_timestamp,
             z_score=model.z_score,
             z_score_status=model.z_score_status,
+            provider_scope=model.provider_scope,
         )
 
     def _map_to_domain_episode(self, model: DegradationEpisodeModel) -> DegradationEpisode:
@@ -130,5 +146,6 @@ class DegradationRepository:
             peak_absolute_drop=model.peak_absolute_drop,
             affected_window_count=model.affected_window_count,
             severity=Severity(model.severity),
-            ended_at_window=model.ended_at_window
+            ended_at_window=model.ended_at_window,
+            provider_scope=model.provider_scope,
         )

@@ -221,7 +221,8 @@ async def test_canonical_resolver_severity_and_tie_breaking():
         evaluation_timestamp=t_eval,
     )
 
-    async def mock_get_context(dim, val, t):
+    async def mock_get_context(dim, val, t, provider_scope):
+        assert provider_scope == "razorpay_pipeline"  # a Razorpay payment only sees its own scope
         d_upper = dim.upper()
         if d_upper == "GLOBAL":
             return ep_global

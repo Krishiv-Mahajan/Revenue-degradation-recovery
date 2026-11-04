@@ -75,4 +75,5 @@ def evaluate_snapshot(
         evaluation_timestamp=evaluation_timestamp,
         z_score=evidence.z_score,
         z_score_status=evidence.status.value,
+        provider_scope=snapshot.provider_scope,
     )

@@ -50,6 +50,8 @@ SUPPORTING_DIMENSION_FIELD_MAP: dict = {
     "ERROR_CODE": "error_code",
     "ERROR_SOURCE": "error_source",
     "ERROR_STEP": "error_step",
+    # PayPal capture decline reason (status_details.reason); used by the PayPal analytics scope only.
+    "ERROR_REASON": "error_reason",
 }
 
 # ---------------------------------------------------------------------------

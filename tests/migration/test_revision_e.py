@@ -45,5 +45,5 @@ async def test_upgrade_to_revision_e_and_downgrade_roundtrip(migration_db):
     assert await schema_snapshot(engine) == schema_d
     assert await data_hashes(engine, columns_by_table(schema_d)) == hashes_d
 
-    await alembic.ok("upgrade", "head")
+    await alembic.ok("upgrade", REVISION_E)
     assert await version(engine) == REVISION_E

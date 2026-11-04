@@ -121,25 +121,27 @@ async def _training_terminal_label(session):
 
 
 # (query, module holding the constant, expected statement count, existing predicates that must remain)
+# Stage 2 and Stage 4 queries read the exclusion through the analytics scope helper
+# (src/infrastructure/analytics_scope_queries.py), so that is where the constant is patched.
 CASES = {
     "analytics.get_events_in_window": (
-        _analytics_window, "src.infrastructure.analytics_repository", 1,
+        _analytics_window, "src.infrastructure.analytics_scope_queries", 1,
         ["payment_events.timestamp >= ", "payment_events.timestamp < "],
     ),
     "analytics.get_events_ingested_after": (
-        _analytics_late, "src.infrastructure.analytics_repository", 1,
+        _analytics_late, "src.infrastructure.analytics_scope_queries", 1,
         ["payment_events.ingested_at > "],
     ),
     "rca._get_events_in_window": (
-        _rca_episode_window, "src.core.rca.service", 1,
+        _rca_episode_window, "src.infrastructure.analytics_scope_queries", 1,
         ["payment_events.timestamp >= ", "payment_events.timestamp < "],
     ),
     "rca._get_hist_error_counts": (
-        _rca_hist_error_counts, "src.core.rca.service", 2,
+        _rca_hist_error_counts, "src.infrastructure.analytics_scope_queries", 2,
         ["payment_events.event_type = "],
     ),
     "rca._get_hist_events_for_dim": (
-        _rca_hist_events_for_dim, "src.core.rca.service", 2,
+        _rca_hist_events_for_dim, "src.infrastructure.analytics_scope_queries", 2,
         ["payment_events.bank = "],
     ),
     "feature.get_historical_failure_rate[currency]": (

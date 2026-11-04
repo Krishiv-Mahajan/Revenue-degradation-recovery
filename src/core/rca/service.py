@@ -34,7 +34,8 @@ from src.core.domain.rca_models import (
     make_evaluation_id,
 )
 from src.core.domain.degradation_models import DegradationEpisode, EpisodeStatus
-from src.core.domain.source_systems import NON_RAZORPAY_PIPELINE_SOURCES
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE, SCOPE_CONFIG
+from src.infrastructure.analytics_scope_queries import scope_event_filter
 from src.core.rca.calculator import (
     assign_evidence_strength,
     build_audit_payload,
@@ -107,10 +108,11 @@ class RCAService:
             episode_status=episode.status.value,
         )
 
-        # --- Query episode-window events from Stage 1 ---
+        # --- Query episode-window events from Stage 1 (the episode's analytics scope only) ---
         episode_events = await self._get_events_in_window(
-            analysis_window_start, analysis_window_end
+            analysis_window_start, analysis_window_end, episode.provider_scope
         )
+        scope_config = SCOPE_CONFIG[episode.provider_scope]
 
         # Count terminal event types only
         episode_transactions = sum(
@@ -161,7 +163,7 @@ class RCAService:
         structural_results: List[dict] = []
         all_hist_tuples: List[tuple] = []
 
-        for dim in STRUCTURAL_DIMENSIONS:
+        for dim in scope_config.rca_structural_dimensions:
             field_name = STRUCTURAL_DIMENSION_FIELD_MAP[dim]
             dimension_lower = dim.lower()
             snapshot_dim = field_name  # Stage 2 uses field names as dimension strings
@@ -185,6 +187,7 @@ class RCAService:
                     snapshot_dim=snapshot_dim,
                     value=val,
                     all_hist_starts=all_hist_starts,
+                    provider_scope=episode.provider_scope,
                 )
                 structural_results.append(result)
                 # Collect fingerprint tuples
@@ -193,7 +196,7 @@ class RCAService:
 
         # --- Evaluate supporting error evidence ---
         supporting_evidence: List[dict] = []
-        for support_dim in SUPPORTING_DIMENSIONS:
+        for support_dim in scope_config.rca_supporting_dimensions:
             field_name = SUPPORTING_DIMENSION_FIELD_MAP[support_dim]
             support_results = await self._evaluate_supporting_dimension(
                 episode_events=episode_events,
@@ -203,6 +206,7 @@ class RCAService:
                 support_dim=support_dim,
                 field_name=field_name,
                 all_hist_starts=all_hist_starts,
+                provider_scope=episode.provider_scope,
             )
             supporting_evidence.extend(support_results)
 
@@ -225,7 +229,7 @@ class RCAService:
         # --- Episode-level expected failures (canonical denominator) ---
         # Fetch exhaustive GLOBAL snapshots across the historical windows
         global_snapshots = await self._get_hist_snapshot_for_dim(
-            all_hist_starts, "GLOBAL", "GLOBAL"
+            all_hist_starts, "GLOBAL", "GLOBAL", episode.provider_scope
         )
         
         valid_global_failures = []
@@ -273,6 +277,18 @@ class RCAService:
         qualified_candidates: List[dict] = []
         for r in structural_results:
             if not r.get("baseline_sufficient", False):
+                continue
+            if (
+                scope_config.exclude_population_wide_candidates
+                and r["episode_segment_transaction_count"] >= episode_transactions
+            ):
+                # The value covers every transaction in the episode, so it distinguishes nothing.
+                r["excess_failure_contribution"] = 0.0
+                r["evidence_strength"] = None
+                r["qualified_as_candidate"] = False
+                r["disqualification_reason"] = (
+                    "segment covers the entire episode population; not a distinguishing cause"
+                )
                 continue
             excess = r["excess_segment_failures"]
             if excess <= 0:
@@ -362,6 +378,7 @@ class RCAService:
             overlap_note=overlap_note,
             input_fingerprint=fingerprint,
         )
+        _record_scope(audit_payload, episode)
 
         # --- Determine new evaluation version ---
         # Acquire a transaction-level advisory lock to serialize version allocation
@@ -432,6 +449,7 @@ class RCAService:
                 DegradationSignalModel.segment_value == episode.segment_value,
                 DegradationSignalModel.signal_type == "BAD",
                 DegradationSignalModel.window_start >= episode.started_at_window,
+                DegradationSignalModel.provider_scope == episode.provider_scope,
             )
             .order_by(
                 DegradationSignalModel.window_start.desc(),
@@ -444,7 +462,8 @@ class RCAService:
         return row
 
     async def _get_events_in_window(
-        self, window_start: datetime, window_end: datetime
+        self, window_start: datetime, window_end: datetime,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> List[dict]:
         """
         Fetch all payment events in [window_start, window_end) from Stage 1.
@@ -460,11 +479,12 @@ class RCAService:
                 PaymentEventModel.error_code,
                 PaymentEventModel.error_source,
                 PaymentEventModel.error_step,
+                PaymentEventModel.error_reason,
             )
             .where(
                 PaymentEventModel.timestamp >= window_start,
                 PaymentEventModel.timestamp < window_end,
-                PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+                scope_event_filter(provider_scope),
             )
         )
         result = await self.session.execute(stmt)
@@ -476,6 +496,7 @@ class RCAService:
         hist_starts: List[datetime],
         snapshot_dim: str,
         value: str,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> List[PaymentHealthSnapshotModel]:
         """
         Fetch Stage 2 snapshots for a structural dimension/value at historical window starts.
@@ -486,6 +507,7 @@ class RCAService:
             PaymentHealthSnapshotModel.window_start.in_(hist_starts),
             PaymentHealthSnapshotModel.segment_dimension == snapshot_dim,
             PaymentHealthSnapshotModel.segment_value == value,
+            PaymentHealthSnapshotModel.provider_scope == provider_scope,
         )
         result = await self.session.execute(stmt)
         return result.scalars().all()
@@ -495,6 +517,7 @@ class RCAService:
         hist_starts: List[datetime],
         field_name: str,
         value: str,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> Tuple[int, int]:
         """
         Directly query Stage 1 payment_events for supporting evidence dimensions
@@ -524,14 +547,14 @@ class RCAService:
             window_conditions,
             PaymentEventModel.event_type == "payment.failed",
             field_col == value,
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+            scope_event_filter(provider_scope),
         )
         # All terminal transactions where field == value
         txn_stmt = select(func.count()).where(
             window_conditions,
             PaymentEventModel.event_type.in_(["payment.captured", "payment.failed"]),
             field_col == value,
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+            scope_event_filter(provider_scope),
         )
         fail_result = await self.session.execute(fail_stmt)
         txn_result = await self.session.execute(txn_stmt)
@@ -553,6 +576,7 @@ class RCAService:
         snapshot_dim: str,
         value: str,
         all_hist_starts: List[datetime],
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> dict:
         """
         Evaluate a single structural dimension/value pair.
@@ -572,7 +596,7 @@ class RCAService:
 
         # --- Historical baseline from Stage 2 snapshots ---
         snap_models = await self._get_hist_snapshot_for_dim(
-            all_hist_starts, snapshot_dim, value
+            all_hist_starts, snapshot_dim, value, provider_scope
         )
 
         valid_hist_failures: List[int] = []
@@ -651,6 +675,7 @@ class RCAService:
         support_dim: str,
         field_name: str,
         all_hist_starts: List[datetime],
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> List[dict]:
         """
         Evaluate all values for a supporting evidence dimension.
@@ -675,7 +700,7 @@ class RCAService:
 
             # Historical error frequency via Stage 1 direct query
             hist_error_failures, hist_total_failures = await self._get_hist_error_counts(
-                all_hist_starts, field_name, val
+                all_hist_starts, field_name, val, provider_scope
             )
             if hist_total_failures == 0:
                 baseline_freq = 0.0
@@ -702,6 +727,7 @@ class RCAService:
         hist_starts: List[datetime],
         field_name: str,
         value: str,
+        provider_scope: str = RAZORPAY_PIPELINE_SCOPE,
     ) -> Tuple[int, int]:
         """
         Return (hist_error_count, hist_total_failures) for a supporting dimension value.
@@ -726,13 +752,13 @@ class RCAService:
         total_fail_stmt = select(func.count()).where(
             window_conditions,
             PaymentEventModel.event_type == "payment.failed",
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+            scope_event_filter(provider_scope),
         )
         error_fail_stmt = select(func.count()).where(
             window_conditions,
             PaymentEventModel.event_type == "payment.failed",
             field_col == value,
-            PaymentEventModel.source_system.notin_(NON_RAZORPAY_PIPELINE_SOURCES),
+            scope_event_filter(provider_scope),
         )
 
         total_r = await self.session.execute(total_fail_stmt)
@@ -809,6 +835,7 @@ class RCAService:
             )
         if supporting_evidence:
             payload["supporting_error_evidence"] = supporting_evidence
+        _record_scope(payload, episode)
 
         import struct
         k1, k2 = struct.unpack("<ii", episode.episode_id.bytes[:8])
@@ -838,6 +865,12 @@ class RCAService:
 # ---------------------------------------------------------------------------
 # Private module-level helpers
 # ---------------------------------------------------------------------------
+
+def _record_scope(payload: dict, episode: DegradationEpisode) -> None:
+    """Name the analytics scope in the evidence of every non-default scope (default payloads are unchanged)."""
+    if episode.provider_scope != RAZORPAY_PIPELINE_SCOPE:
+        payload["provider_scope"] = episode.provider_scope
+
 
 def _build_hist_window_audit(
     hist_starts: List[datetime],

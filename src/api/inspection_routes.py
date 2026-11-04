@@ -444,6 +444,7 @@ async def get_episodes(
     return [
         {
             "episode_id": str(e.episode_id),
+            "provider_scope": e.provider_scope,
             "segment_dimension": e.segment_dimension,
             "segment_value": e.segment_value,
             "started_at_window": e.started_at_window.isoformat(),
@@ -556,6 +557,7 @@ async def get_rca_evaluation(episode_id: str, session: AsyncSession = Depends(ge
         "analysis_window_end": evaluation.analysis_window_end.isoformat(),
         "episode": {
             "episode_id": str(episode.episode_id),
+            "provider_scope": episode.provider_scope,
             "segment_dimension": episode.segment_dimension,
             "segment_value": episode.segment_value,
             "severity": episode.severity,

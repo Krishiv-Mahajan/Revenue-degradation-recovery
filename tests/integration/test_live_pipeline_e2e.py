@@ -3,8 +3,10 @@ End-to-end tests of the live recovery pipeline.
 
 Signed Razorpay webhooks go through the real POST /ingest/razorpay route, and the route's background
 task runs the real run_live_pipeline (Stages 2-8) against the validated TEST_DATABASE_URL only. PayPal
-order approvals and capture outcomes go through the real POST /webhooks/paypal route and run Stages 5-8
-for their order-level PayPal attempt; execution is always the simulator.
+order approvals and capture outcomes go through the real POST /webhooks/paypal route, feed the PayPal
+analytics scope of Stages 2-4, and run Stages 5-8 for their order-level PayPal attempt; execution is the
+simulator unless a test installs the PayPal recovery executor. tests/integration/test_paypal_stage2_4_e2e.py
+covers PayPal degradation end to end.
 
 Test seams, all installed by the e2e fixture and restored afterwards:
 - app.dependency_overrides: the test database session, a test webhook secret, the real
@@ -634,15 +636,19 @@ async def test_overlapping_paypal_events_do_not_affect_razorpay_records(e2e):
         e2e.Session, PaymentHealthSnapshotModel,
         PaymentHealthSnapshotModel.window_start == window_start,
         PaymentHealthSnapshotModel.segment_dimension == "GLOBAL",
+        PaymentHealthSnapshotModel.provider_scope == "razorpay_pipeline",
     )
     assert (global_snapshot.transaction_count, global_snapshot.successful_transaction_count) == (1, 1)
+    # The PayPal captures are counted in the PayPal scope only.
+    paypal_global = await _rows(
+        e2e.Session, PaymentHealthSnapshotModel,
+        PaymentHealthSnapshotModel.segment_dimension == "GLOBAL", PaymentHealthSnapshotModel.provider_scope == "paypal",
+    )
+    assert sum(s.transaction_count for s in paypal_global) == 2
+    assert sum(s.successful_transaction_count for s in paypal_global) == 1
 
 
 # --- PayPal attempts (Stages 5-8, simulated execution) ----------------------------------------------
-
-STAGE_2_TO_4_TABLES = ("payment_health_snapshots", "degradation_signals", "degradation_episodes",
-                       "episode_state_history", "rca_evaluations", "rca_candidate_causes")
-
 
 @pytest.mark.asyncio
 async def test_paypal_order_approval_and_capture_attribute_a_simulated_intervention(e2e, monkeypatch):
@@ -668,9 +674,13 @@ async def test_paypal_order_approval_and_capture_attribute_a_simulated_intervent
     attribution = await _for_payment(e2e.Session, CounterfactualAttributionModel, attempt_id)
     assert attribution.attribution_audit_payload["stage5_model_provenance"] == "SYNTHETIC_DEVELOPMENT"
 
-    # PayPal events never feed or re-evaluate the Razorpay-only Stages 2-4.
+    # PayPal events feed only the PayPal scope of Stages 2-4: one low-volume capture window, no episode.
+    for model in (PaymentHealthSnapshotModel, DegradationSignalModel, DegradationEpisodeModel, EpisodeStateHistoryModel):
+        assert await _rows(e2e.Session, model, model.provider_scope != "paypal") == []
+    assert await _rows(e2e.Session, PaymentHealthSnapshotModel)
+    assert {s.signal_type for s in await _rows(e2e.Session, DegradationSignalModel)} <= PAUSE_SIGNALS
     counts = await _counts(e2e.Session)
-    assert {table: counts[table] for table in STAGE_2_TO_4_TABLES} == dict.fromkeys(STAGE_2_TO_4_TABLES, 0)
+    assert (counts["degradation_episodes"], counts["rca_evaluations"], counts["rca_candidate_causes"]) == (0, 0, 0)
 
     monkeypatch.setenv("DASHBOARD_USERNAME", "e2e-dashboard-user")
     monkeypatch.setenv("DASHBOARD_PASSWORD", "e2e-dashboard-password")

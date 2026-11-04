@@ -14,6 +14,7 @@ from src.core.domain.degradation_models import (
     NAMESPACE_EPISODE
 )
 from src.core.degradation.severity import escalate_severity, evaluate_severity
+from src.core.domain.analytics_scopes import episode_identity_name
 
 def reconcile_timeline(signals: List[DegradationSignal]) -> List[DegradationEpisode]:
     """
@@ -25,6 +26,7 @@ def reconcile_timeline(signals: List[DegradationSignal]) -> List[DegradationEpis
         
     segment_dimension = signals[0].segment_dimension
     segment_value = signals[0].segment_value
+    provider_scope = signals[0].provider_scope
     
     current_state = StateMachineState.HEALTHY
     persistence_count = 0
@@ -57,7 +59,10 @@ def reconcile_timeline(signals: List[DegradationSignal]) -> List[DegradationEpis
                 if persistence_count >= REQUIRED_CONSECUTIVE_WINDOWS:
                     current_state = StateMachineState.DEGRADED
                     
-                    episode_id = uuid.uuid5(NAMESPACE_EPISODE, f"{segment_dimension}:{segment_value}:{first_bad_window.isoformat()}")
+                    episode_id = uuid.uuid5(
+                        NAMESPACE_EPISODE,
+                        episode_identity_name(provider_scope, segment_dimension, segment_value, first_bad_window.isoformat()),
+                    )
                     
                     peak_abs = max((s.absolute_drop for s in pending_signals if s.absolute_drop is not None), default=0.0)
                     sev = Severity.MODERATE
@@ -73,7 +78,8 @@ def reconcile_timeline(signals: List[DegradationSignal]) -> List[DegradationEpis
                         peak_absolute_drop=peak_abs,
                         affected_window_count=persistence_count,
                         severity=sev,
-                        ended_at_window=None
+                        ended_at_window=None,
+                        provider_scope=provider_scope,
                     )
             elif sig_type == SignalType.NORMAL:
                 current_state = StateMachineState.HEALTHY

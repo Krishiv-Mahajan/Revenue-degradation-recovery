@@ -191,12 +191,34 @@ def test_without_stage_3_4_context_the_heuristic_cannot_reach_the_act_threshold(
     assert probability < get_default_policy().act_risk_threshold
 
 
-async def test_paypal_events_never_receive_razorpay_episode_context():
-    session = AsyncMock()
+def _recording_repository():
+    repo = FeatureReconstructionRepository(AsyncMock())
+    lookups = []
+
+    async def record(dimension, value, t, provider_scope="razorpay_pipeline"):
+        lookups.append((dimension, value, provider_scope))
+        return None
+
+    repo.get_active_episode_context = record
+    return repo, lookups
+
+
+async def test_paypal_events_look_up_episode_context_in_the_paypal_scope_only():
+    """PayPal payments see PayPal episodes only; Razorpay episodes never apply to them."""
+    repo, lookups = _recording_repository()
     approval = SimpleNamespace(**_paypal(samples.order_approved).model_dump())
 
-    assert await FeatureReconstructionRepository(session).get_most_severe_active_episode(approval, T) is None
-    session.execute.assert_not_awaited()
+    assert await repo.get_most_severe_active_episode(approval, T) is None
+    assert lookups and {scope for _, _, scope in lookups} == {"paypal"}
+    assert ("GLOBAL", "ALL", "paypal") in lookups
+
+
+async def test_razorpay_events_look_up_episode_context_in_their_original_scope_only():
+    repo, lookups = _recording_repository()
+    authorized = SimpleNamespace(**_razorpay("payment.authorized", "authorized").model_dump())
+
+    assert await repo.get_most_severe_active_episode(authorized, T) is None
+    assert lookups and {scope for _, _, scope in lookups} == {"razorpay_pipeline"}
 
 
 async def test_razorpay_events_still_look_up_episode_context():

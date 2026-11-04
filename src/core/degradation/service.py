@@ -24,6 +24,9 @@ class DegradationService:
             
         segment_dimension = snapshots[0].segment_dimension
         segment_value = snapshots[0].segment_value
+        provider_scope = snapshots[0].provider_scope
+        if any(s.provider_scope != provider_scope for s in snapshots):
+            raise ValueError("process_snapshots needs snapshots of a single analytics scope")
         
         # Sort chronologically
         snapshots_sorted = sorted(snapshots, key=lambda s: s.window_start)
@@ -31,7 +34,7 @@ class DegradationService:
         # 1. Re-evaluate and append new signals
         for snapshot in snapshots_sorted:
             max_version = await self.repository.get_max_evaluation_version(
-                segment_dimension, segment_value, snapshot.window_start
+                segment_dimension, segment_value, snapshot.window_start, provider_scope
             )
             new_version = max_version + 1
             
@@ -39,7 +42,9 @@ class DegradationService:
             await self.repository.append_signal(signal)
             
         # 2. Fetch the latest evaluations for the entire segment history
-        latest_signals = await self.repository.get_latest_signals_for_segment(segment_dimension, segment_value)
+        latest_signals = await self.repository.get_latest_signals_for_segment(
+            segment_dimension, segment_value, provider_scope
+        )
         
         # 3. Reconstruct state machine
         valid_episodes = reconcile_timeline(latest_signals)
@@ -47,7 +52,9 @@ class DegradationService:
         reconciliation_run_id = uuid.uuid4()
         
         # 4. Reconcile episodes (Invalidate stale ones)
-        existing_episodes = await self.repository.get_episodes_for_segment(segment_dimension, segment_value)
+        existing_episodes = await self.repository.get_episodes_for_segment(
+            segment_dimension, segment_value, provider_scope
+        )
         valid_episode_ids = {e.episode_id for e in valid_episodes}
         
         for ep in existing_episodes:

@@ -37,3 +37,6 @@ class PaymentHealthSnapshot(BaseModel):
     insufficient_volume: bool
 
     calculated_at: datetime
+
+    # Stage 2-4 analytics scope (src/core/domain/analytics_scopes.py)
+    provider_scope: str = "razorpay_pipeline"

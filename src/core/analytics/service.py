@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import List, Set, Tuple
 
+from src.core.domain.analytics_scopes import RAZORPAY_PIPELINE_SCOPE
 from src.infrastructure.analytics_repository import AnalyticsRepository
 from src.core.analytics.calculator import (
     calculate_baseline,
@@ -23,15 +24,20 @@ class PaymentHealthAnalyticsService:
         window_end = window_start + timedelta(minutes=5)
         return window_start, window_end
 
-    async def calculate_and_save_window(self, window_start: datetime, window_end: datetime) -> None:
+    async def calculate_and_save_window(
+        self, window_start: datetime, window_end: datetime, provider_scope: str = RAZORPAY_PIPELINE_SCOPE
+    ) -> None:
         """
-        Calculates the health metrics and baselines for a specific window, and upserts them.
+        Calculates the health metrics and baselines for a specific window of one analytics scope, and
+        upserts them. Baselines come only from the same scope's history.
         """
-        # 1. Fetch all events in this window
-        events = await self.repository.get_events_in_window(window_start, window_end)
+        # 1. Fetch all events of the scope in this window
+        events = await self.repository.get_events_in_window(window_start, window_end, provider_scope)
 
         # 2. Calculate metrics (returns snapshots with baseline_success_rate = None)
-        snapshots = calculate_health_metrics_for_window(events, window_start, window_end)
+        snapshots = calculate_health_metrics_for_window(
+            events, window_start, window_end, provider_scope=provider_scope
+        )
 
         # 3. Calculate baselines for each snapshot
         for snapshot in snapshots:
@@ -40,7 +46,8 @@ class PaymentHealthAnalyticsService:
                 target_window_end=window_end,
                 segment_dimension=snapshot.segment_dimension,
                 segment_value=snapshot.segment_value,
-                weeks_back=4
+                weeks_back=4,
+                provider_scope=provider_scope,
             )
             baseline = calculate_baseline(historical_snapshots)
             mean, stddev, sample_count = calculate_baseline_statistics(historical_snapshots)
@@ -60,7 +67,9 @@ class PaymentHealthAnalyticsService:
         # 4. Upsert to database
         await self.repository.upsert_snapshots(snapshots)
 
-    async def recalculate_late_events(self, since_ingested_at: datetime) -> None:
+    async def recalculate_late_events(
+        self, since_ingested_at: datetime, provider_scope: str = RAZORPAY_PIPELINE_SCOPE
+    ) -> None:
         """
         Finds all events ingested after `since_ingested_at` and identifies their 5-minute windows.
         It then recalculates each affected window to incorporate the late-arriving events.
@@ -68,7 +77,7 @@ class PaymentHealthAnalyticsService:
         # Fetch events ingested after since_ingested_at
         # To do this cleanly, we can add a method to the repo: `get_events_ingested_after`
         # But for now we can just rely on the repo having a method for it.
-        events = await self.repository.get_events_ingested_after(since_ingested_at)
+        events = await self.repository.get_events_ingested_after(since_ingested_at, provider_scope)
 
         affected_windows: Set[Tuple[datetime, datetime]] = set()
         for event in events:
@@ -76,4 +85,4 @@ class PaymentHealthAnalyticsService:
             affected_windows.add(window)
 
         for window_start, window_end in affected_windows:
-            await self.calculate_and_save_window(window_start, window_end)
+            await self.calculate_and_save_window(window_start, window_end, provider_scope)

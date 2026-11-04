@@ -105,6 +105,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | F | Done | see F log | Z-score evidence on every signal; opt-in combined rule; hysteresis unchanged |
 | G | Done | see G log | Provider selector, PayPal payments/timeline, scopes, real-vs-simulated execution, recovery checkout |
 | H | Done (PayPal step blocked, see below) | see H log | `scripts/demo_end_to_end.py`: webhook-driven Stage 1–8 run with a provenance report |
+| I | Done (uncommitted) | see I log | PayPal Stages 2–4: provider-scoped analytics (Revision F `c9d0e1f2a3b4`); PayPal outages drive PayPal decisions |
 
 ### Milestone B log (2026-11-03)
 
@@ -275,9 +276,35 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 - **Why the demo cannot yet show a genuine PayPal recovery** (honest constraints, not faked):
   1. No PayPal sandbox credentials are configured.
   2. Under the default policy, the PayPal-backed route (FALLBACK_PAYMENT_LINK) wins only when no diagnosis-backed route is eligible. During a diagnosed outage, DEGRADATION_CIRCUIT_BYPASS has higher utility.
-  3. PayPal attempts never carry degradation or RCA context, because Stages 2–4 are Razorpay-only, so the heuristic tops out at p ≈ 0.525 (MONITOR) for them.
+  3. PayPal attempts never carry degradation or RCA context, because Stages 2–4 are Razorpay-only, so the heuristic tops out at p ≈ 0.525 (MONITOR) for them. (Resolved by Milestone I below.)
 
   The real PayPal path is proven end to end in `test_real_paypal_recovery_checkout_is_executed_observed_and_attributed` (real routes, pipeline and PostgreSQL; only PayPal's HTTP API mocked in-process).
+
+### Milestone I log (2026-11-03): PayPal Stages 2–4
+
+- **Analytics scopes** (`src/core/domain/analytics_scopes.py`). Stages 2–4 run per scope, never across scopes:
+  - `razorpay_pipeline` (Razorpay + synthetic): unchanged dimensions, RCA and episode ids. Every pre-existing row belongs here.
+  - `paypal`: PayPal events only.
+  - The scope comes from the event's provider. Every Stage 2–4 read and write filters by it, and Stage 5 resolves episodes only in the payment's own scope.
+- **PayPal scope:** Stage 2 segments by GLOBAL and currency, the only segment fields PayPal events carry.
+  - RCA is structural on CURRENCY, with supporting evidence on ERROR_REASON (PayPal `status_details.reason`).
+  - A candidate that covers the entire episode population is disqualified, so a single-currency outage is SYSTEMIC rather than an invented currency cause.
+  - Thresholds, Z-score guards, hysteresis, the heuristic and the policy are unchanged.
+- **Revision F** (`c9d0e1f2a3b4`): adds `provider_scope` to the four Stage 2–3 tables.
+  - NOT NULL, server default `razorpay_pipeline`, with a CHECK constraint; scope-aware snapshot and signal identity uniques.
+  - Downgrade refuses while PayPal-scope rows exist.
+- **Verified** (disposable PostgreSQL, real routes, real heuristic, default policy):
+  - **PayPal-wide outage** (150 capture webhooks, 80% declined; PayPal baselines 0.96): CRITICAL PayPal episodes, Z ≤ −3, SYSTEMIC RCA. The approved order reaches p = 0.725, ACT on RETRY_SECONDARY_GATEWAY, gates PASSED, executed by the simulator. PayPal has no gateway-retry action, so the execution is labelled simulated.
+  - **USD-only outage:** SEGMENT_SPECIFIC CURRENCY=USD (STRONG). The USD attempt reaches p = 0.755 (ACT) and the EUR attempt p = 0.555 (MONITOR).
+  - **Isolation:** a Razorpay payment during a PayPal outage sees no episode and no PayPal rate (p = 0.025, NO_ACTION). No PayPal event writes a Razorpay-scope row.
+- **Tests:**
+  - New: 13 unit, 4 migration (exact E ↔ F round trip, scoped uniqueness, CHECK, refused downgrade), 3 end-to-end.
+  - Characterization tests that pinned "PayPal skips Stages 2–4" were revised to pin PayPal-scope-only behaviour.
+  - Results: offline 1,713 passed; integration + API 696 passed (0 skipped); migration 109 passed (0 skipped); frontend 11 passed.
+- **Not done / limits:**
+  - A genuine PayPal FALLBACK_PAYMENT_LINK execution during an outage still depends on route utility. Diagnosis-backed routes win when eligible; see remaining item 3.
+  - Razorpay and synthetic still share one scope.
+  - RCA's GLOBAL historical query matches `GLOBAL` while Stage 2 stores `ALL`. This is pre-existing and unchanged.
 
 ## 5. Final status and remaining work (2026-11-03)
 
@@ -293,10 +320,10 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 
 **Remaining, in priority order:**
 1. **Provide sandbox credentials** and run `scripts/paypal_sandbox_recovery_smoke.py`, then the pipeline with `PAYPAL_RECOVERY_EXECUTION_ENABLED=true`. This needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and a public webhook URL (or tunnel) for PayPal events.
-2. **Provider-partitioned Stages 2–4** (a provider segment with its own baselines, provider-aware RCA, and Stage 5 episode matching for PayPal attempts), so PayPal degradation can drive PayPal recovery decisions.
+2. ~~**Provider-partitioned Stages 2–4**~~: done in Milestone I (uncommitted). PayPal degradation now drives PayPal decisions.
 3. **Route policy review:** whether the PayPal checkout should also execute PROMPT_PAYMENT_METHOD_SWITCH (offering PayPal *is* a method switch). This is a product decision, so it is not made unilaterally.
 4. **Provider-trained Stage 5 model** evaluated on genuine traffic, then registered in `VERIFIED_EMPIRICAL_MODELS` after review.
-5. **Push and CI:** commits `d40a857`…(H) are local and need approval to push.
+5. **Push and CI:** commits `d40a857`…(H) are local and need approval to push. Milestone I is uncommitted and needs approval to commit.
 6. **Pre-existing test isolation issue:** `tests/unit` + `tests/api` in one process fail 2 route tests; CI runs them separately.
 
 ## 4. External blockers

@@ -74,6 +74,8 @@ class PaymentEventModel(Base):
 # Must match the Identifier grammar in src/core/parsers/paypal.py (enforced by a test).
 PAYPAL_IDENTIFIER_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
 PAYMENT_ATTEMPT_SOURCE_SYSTEM_CHECK = "source_system IN ('razorpay', 'synthetic', 'paypal')"
+# Stage 2-4 analytics scopes; must match src/core/domain/analytics_scopes.ANALYTICS_SCOPES (enforced by a test).
+ANALYTICS_SCOPE_CHECK = "provider_scope IN ('razorpay_pipeline', 'paypal')"
 PAYMENT_ATTEMPT_NAMESPACE_CHECK = (
     "CASE WHEN source_system = 'paypal' "
     f"THEN provider_reference ~ '{PAYPAL_IDENTIFIER_PATTERN}' "
@@ -170,8 +172,15 @@ class PaymentHealthSnapshotModel(Base):
 
     calculated_at = Column(DateTime(timezone=True), nullable=False)
 
+    # Stage 2-4 analytics scope (src/core/domain/analytics_scopes.py)
+    provider_scope = Column(String(32), nullable=False, server_default="razorpay_pipeline")
+
     __table_args__ = (
-        UniqueConstraint('window_start', 'window_end', 'segment_dimension', 'segment_value', name='uq_snapshot_identity'),
+        UniqueConstraint(
+            'window_start', 'window_end', 'segment_dimension', 'segment_value', 'provider_scope',
+            name='uq_snapshot_identity',
+        ),
+        CheckConstraint(ANALYTICS_SCOPE_CHECK, name='ck_payment_health_snapshots_provider_scope'),
     )
 
 class DegradationSignalModel(Base):
@@ -194,9 +203,14 @@ class DegradationSignalModel(Base):
     z_score_status = Column(String(32), nullable=True)
 
     evaluation_timestamp = Column(DateTime(timezone=True), nullable=False)
+    provider_scope = Column(String(32), nullable=False, server_default="razorpay_pipeline")
 
     __table_args__ = (
-        UniqueConstraint('segment_dimension', 'segment_value', 'window_start', 'evaluation_version', name='uq_signal_evaluation_version'),
+        UniqueConstraint(
+            'segment_dimension', 'segment_value', 'window_start', 'evaluation_version', 'provider_scope',
+            name='uq_signal_evaluation_version',
+        ),
+        CheckConstraint(ANALYTICS_SCOPE_CHECK, name='ck_degradation_signals_provider_scope'),
         Index('ix_degradation_signals_stage3_as_of', 'segment_dimension', 'segment_value', 'evaluation_timestamp'),
     )
 
@@ -217,6 +231,11 @@ class DegradationEpisodeModel(Base):
     affected_window_count = Column(Integer, nullable=False)
 
     severity = Column(String(20), nullable=False) # MODERATE, HIGH, CRITICAL
+    provider_scope = Column(String(32), nullable=False, server_default="razorpay_pipeline")
+
+    __table_args__ = (
+        CheckConstraint(ANALYTICS_SCOPE_CHECK, name='ck_degradation_episodes_provider_scope'),
+    )
 
 class EpisodeStateHistoryModel(Base):
     """
@@ -236,8 +255,10 @@ class EpisodeStateHistoryModel(Base):
     
     effective_start_window = Column(DateTime(timezone=True), nullable=False)
     evaluation_timestamp = Column(DateTime(timezone=True), nullable=False)
+    provider_scope = Column(String(32), nullable=False, server_default="razorpay_pipeline")
 
     __table_args__ = (
+        CheckConstraint(ANALYTICS_SCOPE_CHECK, name='ck_episode_state_history_provider_scope'),
         Index('ix_episode_state_history_as_of', 'segment_dimension', 'segment_value', 'evaluation_timestamp'),
         Index('ix_episode_state_history_run', 'reconciliation_run_id'),
     )

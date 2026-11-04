@@ -735,24 +735,75 @@ The detailed plan, logs, test results and blockers live in `docs/AUTONOMOUS_ENGI
   - Real PayPal sandbox calls (no credentials configured).
   - CI for these commits (not pushed).
 
+### PayPal Stages 2–4: Provider-Scoped Analytics, Revision F (2026-11-03, uncommitted; verified locally)
+
+- **Problem:** Stages 2–4 ran on Razorpay and synthetic events only. PayPal attempts therefore never carried degradation or RCA context, and the real heuristic could never take them past p ≈ 0.525.
+- **Design:** Stages 2–4 are partitioned by **analytics scope** (`src/core/domain/analytics_scopes.py`):
+  - `razorpay_pipeline`: Razorpay and synthetic events, exactly as before. Every existing row belongs here. Dimensions, RCA dimensions and episode ids are unchanged; the episode UUID5 name is still `dim:value:start`.
+  - `paypal`: PayPal events only, with their own baselines, signals, episodes, history and RCA. Episode names are prefixed `paypal|`, so equal segments in two scopes never share an episode.
+  - Each event's scope comes from its provider (`scope_for_source`). Every Stage 2–4 read and write filters by scope, through `src/infrastructure/analytics_scope_queries.py` for `payment_events`. Stage 5 resolves episode context only in the payment's own scope.
+- **PayPal scope contents:** PayPal events carry currency and, on declines, PayPal's `status_details.reason`. They carry no method, bank, wallet or error source, so the scope uses only data that exists:
+  - Stage 2 segments by GLOBAL and currency.
+  - RCA is structural on CURRENCY, with supporting evidence on ERROR_REASON (the PayPal decline reason).
+  - A candidate covering the entire episode population is disqualified ("not a distinguishing cause"). A single-currency outage is therefore reported as SYSTEMIC, not invented as a currency cause.
+- **Unchanged:** thresholds, Z-score evidence and guards, hysteresis and persistence, the heuristic, policy thresholds and gates, and the Razorpay/synthetic scope's behaviour. Razorpay and synthetic remain one scope, as before; separating them is out of scope here.
+- **Migration:** `migrations/versions/c9d0e1f2a3b4_stage2_4_provider_scope.py`, revision `c9d0e1f2a3b4`, revises `b8c9d0e1f2a3`. It is the current head: single head, 16 linear revisions.
+  - Adds `provider_scope` (NOT NULL, server default `razorpay_pipeline`, CHECK in the scope list) to `payment_health_snapshots`, `degradation_signals`, `degradation_episodes` and `episode_state_history`.
+  - Adds `provider_scope` to the unique constraints `uq_snapshot_identity` and `uq_signal_evaluation_version`.
+  - Downgrade refuses, changing nothing, while any non-default-scope row exists. It never deletes rows.
+- **Other changes:**
+  - `/api/v1/episodes` and `/api/v1/rca/{id}` expose `provider_scope`.
+  - RCA audit payloads of non-default scopes record `provider_scope`.
+  - Scripts' raw Stage 2–4 queries are scoped to `razorpay_pipeline`.
+  - Bug found by the tests and fixed: the live-context generator's baseline upsert targeted the old snapshot identity.
+- **Verified scenarios** (`tests/integration/test_paypal_stage2_4_e2e.py`; real routes, real heuristic, default policy, nothing forced):
+  - **PayPal-wide outage**, from 150 PayPal capture webhooks (80% declined) against three weeks of PayPal history.
+    - Stage 2: PayPal snapshots with baseline 0.96.
+    - Stage 3: BAD threshold signals with Z-score ≤ −3; CRITICAL PayPal episodes on GLOBAL and currency=USD.
+    - Stage 4: SYSTEMIC, with USD disqualified as population-wide.
+    - Stage 5: p = 0.725 (0.025 + 0.5 × 0.8 + 0.30).
+    - Stage 6: ACT on RETRY_SECONDARY_GATEWAY with gates PASSED, executed by the simulator (`SIMULATOR_V1`, `is_simulation=true`; PayPal has no gateway-retry action). No Razorpay-scope row is written.
+  - **USD-only outage with healthy EUR:**
+    - Stage 4: SEGMENT_SPECIFIC CURRENCY=USD, STRONG.
+    - A USD attempt reaches p = 0.755 (ACT). A EUR attempt reaches p = 0.555 (MONITOR).
+  - **Isolation:** during a PayPal outage, a Razorpay authorization sees no episode and no PayPal failure rate (p = 0.025, NO_ACTION).
+- **Revised characterization tests** (deliberately, not weakened):
+  - The PayPal live-pipeline tests now pin "Stages 2–4 run once, in the PayPal scope" instead of "skipped".
+  - The PayPal episode-context test pins PayPal-scope-only lookups.
+  - The shared-constant tests patch the constant where it is now read.
+  - The Alembic head pins and the Revision E round trip are updated.
+- **New tests:**
+  - `tests/unit/test_analytics_scopes.py` (13).
+  - `tests/migration/test_revision_f.py` (4): exact E ↔ F round trip, per-scope uniqueness, unknown-scope rejection, refused downgrade.
+  - The three end-to-end tests above.
+- **Final local results** (disposable `db_test`, port 5434):
+  - Offline unit + boundaries: 1,713 passed.
+  - Integration + API: 696 passed, 0 skipped.
+  - Migration: 109 passed, 0 skipped.
+  - Frontend: 11 passed.
+- **Known limits:**
+  - RCA's GLOBAL historical query matches segment value `GLOBAL`, while Stage 2 stores `ALL`. This is pre-existing and unchanged.
+  - The overview's `active_degradation_episodes` count is labelled `global` and now includes PayPal-scope episodes.
+  - Before upgrading a non-test database, note that its existing rows all become `razorpay_pipeline`.
+
 ## Current State
 
 The repository is at **Phase 3 Revision C**, committed after Checkpoint 4 (`b190213`) on top of Revision B (`cddb60c`, CI green). Both milestones were reviewed, approved and pushed to `origin/main` together.
 
 - **Branch:** `main`.
 - **Checkpoint commits:** `b190213` (Checkpoint 4) and the Revision C commit that adds its section above.
-- **Alembic head:** `f4a5b6c7d8e9` (Revision C); single head, 13 linear revisions.
+- **Alembic head:** `f4a5b6c7d8e9` (Revision C); single head, 13 linear revisions. Since then, local work has moved the head to `c9d0e1f2a3b4` (Revision F, 16 revisions; see the two sections above).
 - **CI Status:** [run 40851018416](https://github.com/Krishiv-Mahajan/Revenue-degradation-recovery/actions/runs/40851018416) green on `cddb60c`. The CI result for the pushed Checkpoint 4 and Revision C commits is not yet recorded here.
 - **Working Tree:** Clean.
 
 ### What is real versus simulated (2026-11-02 audit)
 
-- **Real:** Razorpay and PayPal webhook verification, ingestion and deduplication; Stage 2–4 analytics, degradation and RCA (Razorpay/synthetic only); Stage 5–8 persistence with attempt registration and provider constraints; outcome observation from canonical events; attribution arithmetic; the authenticated read-only dashboard.
+- **Real:** Razorpay and PayPal webhook verification, ingestion and deduplication; Stage 2–4 analytics, degradation and RCA, per analytics scope (Razorpay/synthetic, and PayPal since Revision F); Stage 5–8 persistence with attempt registration and provider constraints; outcome observation from canonical events; attribution arithmetic; the authenticated read-only dashboard.
 - **Simulated or placeholder:** all intervention execution (`SimulatorInterventionExecutor`, `SIMULATOR_V1`; the PayPal client implements only OAuth and webhook verification); the live Stage 5 model (`DeterministicBaselineModel`, a heuristic); demo data (`synthetic` source, written directly to services by `scripts/demo_orchestrator.py`).
-- **Behavior to be aware of:**
-  - With the real heuristic, the tested end-to-end scenarios end in MONITOR or INSUFFICIENT_DATA. ACT → execution → attribution is exercised only with fixed-probability test models.
-  - The default policy prices routes in INR, so USD PayPal attempts never reach ACT.
-  - Degradation detection uses absolute/relative drop thresholds with persistence (hysteresis); there is no Z-score.
+- **Behavior to be aware of** (as of the audit; superseded locally by the sections above):
+  - With the real heuristic, the tested end-to-end scenarios end in MONITOR or INSUFFICIENT_DATA. ACT → execution → attribution is exercised only with fixed-probability test models. Now superseded: real-heuristic ACT is reached by the Milestone H demo and by PayPal outages (Revision F).
+  - The default policy prices routes in INR, so USD PayPal attempts never reach ACT. Now superseded: policy 1.1.0 has a USD schedule (Milestone B).
+  - Degradation detection uses absolute/relative drop thresholds with persistence (hysteresis); there is no Z-score. Now superseded: Z-score evidence was added in Milestone F.
 
 ### Remaining work (prioritized)
 
