@@ -10,8 +10,15 @@ The **Revenue Protection & Recovery Engine** is an end-to-end financial infrastr
 [![FastAPI 0.104](https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL 15](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0%20Async-D71F00)](https://www.sqlalchemy.org/)
-[![Tests Passing](https://img.shields.io/badge/Tests-271%20Passed-brightgreen)](tests/)
+[![Tests Passing](https://img.shields.io/badge/Tests-2624%20pytest%20%2B%2015%20node%20passing-brightgreen)](docs/SETUP.md#tests)
 [![Pipeline Validation](https://img.shields.io/badge/Razorpay%20Ingress-Validated%20Live-success)](#9-live-razorpay-validation)
+
+---
+
+**Start here:** [Technical brief for judges](docs/HACKATHON_BRIEF.md) · [Architecture](docs/ARCHITECTURE.md) ·
+[Setup, database and tests](docs/SETUP.md) · [Demo](docs/DEMO.md) · [PayPal sandbox setup](docs/PAYPAL_SANDBOX_SETUP.md)
+
+One-command demonstration on the disposable test database: `./scripts/run_demo.sh`
 
 ---
 
@@ -22,9 +29,10 @@ The **Revenue Protection & Recovery Engine** shifts payment management from pass
 ### Project Status
 
 - **Pipeline Architecture**: Complete, decoupled 8-stage revenue recovery pipeline with strict temporal causality.
-- **Provider Ingestion**: Live Razorpay Sandbox webhook ingestion with HMAC-SHA256 signature verification and deterministic event deduplication.
+- **Provider Ingestion**: Razorpay webhooks (HMAC-SHA256) and PayPal webhooks (PayPal signature verification API), deduplicated and processed durably through a transactional outbox with a reconciler.
+- **Provider Isolation**: Razorpay and PayPal have separate analytics scopes (baselines, incidents, RCA) and provider-exact payment attempts enforced by composite foreign keys.
 - **Prediction Model**: Deterministic, auditable point-in-time scoring heuristic (`untrained-heuristic-v2`) with 30m-to-24h fallback windowing.
-- **Intervention Execution**: Pluggable executor pattern currently backed by demonstration simulation infrastructure (`SimulatorInterventionExecutor` / `SIMULATOR_V1`).
+- **Intervention Execution**: PayPal Orders v2 **sandbox** checkouts for the fallback-link and customer-approved payment-switch routes (consent-based offers with expiry and audit trail; the engine never captures), verified against PayPal's documented responses but not yet against the live sandbox (no credentials configured). Gateway-side routes run on the clearly labelled simulator (`SIMULATOR_V1`).
 - **Causal Attribution**: Formal counterfactual calculator enforcing temporal precedence and multi-factor confidence scoring.
 - **Operator Interface**: Dedicated 4-workspace operational dashboard (Executive Overview, Incidents, Recovery, Payments) served directly from FastAPI.
 
@@ -441,23 +449,23 @@ The codebase enforces strict correctness and safety invariants:
 
 ## 14. Testing & Validation
 
-The repository includes a comprehensive, multi-layer automated test suite with **271 passing tests**:
+Latest local results (2026-11-04, disposable PostgreSQL on port 5434), all passing with nothing skipped:
 
-| Test Layer | Test Count | Scope & Coverage |
+| Suite | Tests | Scope |
 |---|---|---|
-| **Unit Tests** (`tests/unit/`) | **167 tests** | Model heuristics, normalization, signature verification, RCA math, policy gates, and live pipeline bridges. |
-| **Boundary Tests** (`tests/boundaries/`) | **21 tests** | AST-based architectural compliance tests enforcing zero LLM imports, no provider SDK leakage, and stage decoupling. |
-| **API Tests** (`tests/api/`) | **24 tests** | HTTP route contracts, query parameter validation, 404/422 handling, and error response schemas. |
-| **Integration Tests** (`tests/integration/`) | **59 tests** | End-to-end database persistence, transaction lifecycles, and temporal window evaluation. |
-| **Total Test Suite** | **271 tests** | Collected and verified via Pytest. |
+| Offline unit + boundary (`tests/unit`, `tests/boundaries`) | **1,796** | Stage logic, policy and gates, PayPal client/executor, offer lifecycle, isolation, schema parity, stage boundaries |
+| PostgreSQL integration + API (`tests/integration`, `tests/api`) | **707** | Real routes and pipeline end to end: outages, PayPal-scope analytics, payment switching, duplicates, isolation, dashboard API |
+| Migrations (`tests/migration`, `RUN_MIGRATION_TESTS=1`) | **121** | Every revision up and down with exact schema and data equality; refusing downgrades |
+| Frontend (`node --test tests/frontend/`) | **15** | Dashboard formatters and descriptions |
+
+See [docs/SETUP.md](docs/SETUP.md#tests) for the commands.
 
 ### Running the Safe Offline Test Suite
-To run all 188 isolated unit and architectural boundary tests without requiring an active PostgreSQL database:
+Unit and architectural boundary tests need no database:
 
 ```bash
 pytest tests/unit/ tests/boundaries/ -q
 ```
-*Executes 188 tests in < 2 seconds.*
 
 > **Database Safety Notice**: Integration and API tests (`tests/integration/` and `tests/api/`) truncate tables between tests, so they only ever connect to `TEST_DATABASE_URL`. They never fall back to `DATABASE_URL`, and they are skipped when `TEST_DATABASE_URL` is unset. Before any destructive operation, the shared fixtures in `tests/conftest.py` refuse URLs whose database name does not end in `_test`, URLs on the dev port 5433, and any URL that matches `DATABASE_URL`. The test schema is built with `alembic upgrade head`. In every test, the application's default session factory (`AsyncSessionLocal`, bound to `DATABASE_URL`) is replaced by a guard that fails the test if used, so no code path can quietly fall back to the development database. Tests must use the shared fixtures, pass an explicit session, or mock the caller.
 
@@ -545,7 +553,11 @@ ALEMBIC_TARGET_DATABASE=payment_recovery_test \
 > **Phase 3 notice**: during the Phase 3 provider-identity work, port 5433 is blocked for Alembic, with or without `ALEMBIC_ALLOW_NON_TEST_DATABASE`, so the development database above cannot be migrated until a separately approved change lifts the block. The Phase 3 expand revision (`9d2e4f6a8b1c`) may only remain applied on the disposable test database; other databases must apply it together with its contract revision in a single `alembic upgrade head`.
 
 ### Step 5: Run the End-to-End Demonstration
-Execute the demonstration orchestrator to seed baseline traffic, simulate a severe payment method outage, and run the pipeline through all 8 stages:
+Recommended: the five-scenario demonstration on the disposable test database (healthy baseline, Razorpay outage, customer-approved payment switch, PayPal outage, duplicates), see [docs/DEMO.md](docs/DEMO.md):
+```bash
+./scripts/run_demo.sh
+```
+The older single-scenario orchestrator below works against the development/demo database instead:
 ```bash
 PYTHONPATH=. python scripts/demo_orchestrator.py
 ```
@@ -659,12 +671,15 @@ We maintain an honest distinction between what has been implemented and what is 
 - [x] Policy-driven decisioning with 5 deterministic safety gates.
 - [x] Multi-factor counterfactual attribution ledger.
 - [x] Full operational dashboard with real-time health indicator.
-- [x] 271 automated tests across unit, boundary, API, and integration layers.
+- [x] Durable processing: transactional outbox, leased claims and a reconciler; idempotent replays.
+- [x] Provider-scoped analytics for Razorpay and PayPal; provider-exact Stage 5-8 records enforced by the database.
+- [x] Real PayPal sandbox checkout and consent-based payment-switch executors (sandbox only; never capture).
+- [x] 2,624 pytest tests (offline, PostgreSQL, migrations) and 15 frontend tests, all passing.
 
 ### Production Hardening Roadmap
-- [ ] **Persistent Message Broker**: Replace FastAPI in-memory background tasks with a distributed message queue (e.g., Redis Streams or Apache Kafka) for guaranteed webhook delivery.
+- [ ] **Persistent Message Broker**: The PostgreSQL outbox already guarantees processing; a broker (e.g., Redis Streams or Kafka) would add horizontal fan-out.
 - [ ] **Distributed Stream Aggregation**: Migrate 5-minute tumbling health snapshots to distributed stream processing (e.g., Apache Flink) for horizontal scale.
-- [ ] **Production Gateway Executors**: Implement live banking partner integrations beyond the current simulation executor (`SimulatorInterventionExecutor`).
+- [ ] **Production Gateway Executors**: Gateway-side routes (retry, circuit bypass, backoff) still run on the simulator; PayPal checkouts run only in the sandbox and await real sandbox verification.
 - [ ] **Authentication & Authorization**: Add mTLS, OAuth2/JWT role-based access control to inspection endpoints.
 - [ ] **Distributed Tracing & Metrics**: Integrate OpenTelemetry spans across stages and export Prometheus metrics for window health.
 - [ ] **Rate Limiting & Tenant Scoping**: Implement token-bucket rate limiting on ingestion endpoints.

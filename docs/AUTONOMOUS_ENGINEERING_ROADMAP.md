@@ -106,7 +106,7 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 | G | Done | see G log | Provider selector, PayPal payments/timeline, scopes, real-vs-simulated execution, recovery checkout |
 | H | Done (PayPal step blocked, see below) | see H log | `scripts/demo_end_to_end.py`: webhook-driven Stage 1–8 run with a provenance report |
 | I | Done | `8bbd414` | PayPal Stages 2–4: provider-scoped analytics (Revision F `c9d0e1f2a3b4`); PayPal outages drive PayPal decisions |
-| J | Done | see J log | Customer-approved payment method switch: consent-based PayPal sandbox offers (Revision G `d0e1f2a3b4c5`), verified-completion attribution |
+| J | Done | `a1d9141` | Customer-approved payment method switch: consent-based PayPal sandbox offers (Revision G `d0e1f2a3b4c5`), verified-completion attribution |
 
 ### Milestone B log (2026-11-03)
 
@@ -329,6 +329,24 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
   - Deadline sweep is a cron script.
   - No sandbox credentials.
 
+### Milestones K–N log (2026-11-04): final engineering and hackathon readiness
+
+| Milestone | Commit | Delivered |
+|---|---|---|
+| K Dashboard lifecycle | `17edd52` | Provider health per scope; switch offers by status; verified recovered payments apart from estimated GMV; route names (gateway retry vs customer-approved switch); scope badges; offer in the audit trail |
+| L Demonstration | `d00a2c4` | Merchant route configuration (`RECOVERY_DISABLED_ROUTES`); five-scenario demo and `scripts/run_demo.sh`; demo restricted to the disposable database |
+| M Audit | `ad2eb39`, `89916bd` | No-cache dashboard assets; forged-decline test; summary query-count characterization |
+| N Documentation | this commit | `docs/ARCHITECTURE.md`, `SETUP.md`, `PAYPAL_SANDBOX_SETUP.md`, `DEMO.md`, `HACKATHON_BRIEF.md`; README and `.env.example` |
+
+**Results:** offline 1,796; integration + API 707 (0 skipped); migration 121 (0 skipped); frontend 15. All passed.
+
+**Demo:**
+- Healthy NO_ACTION.
+- Razorpay outage: ACT on circuit bypass (simulated) with an estimated attribution.
+- Switch ACT, simulated without credentials.
+- PayPal outage: ACT on gateway retry (simulated), isolated from the Razorpay scope.
+- Duplicates are no-ops.
+
 ## 5. Final status and remaining work (2026-11-03)
 
 **Completed:** all eight stages are integrated through the real webhook routes. The work delivered:
@@ -342,11 +360,11 @@ Order: A → B → C → D → E → F → G → H (D and E need B's executor co
 - A reproducible, provenance-labelled demo.
 
 **Remaining, in priority order:**
-1. **Provide sandbox credentials** and run `scripts/paypal_sandbox_recovery_smoke.py`, then the pipeline with `PAYPAL_RECOVERY_EXECUTION_ENABLED=true`. This needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` and a public webhook URL (or tunnel) for PayPal events.
-2. ~~**Provider-partitioned Stages 2–4**~~: done in Milestone I (uncommitted). PayPal degradation now drives PayPal decisions.
+1. **Provide sandbox credentials** and follow `docs/PAYPAL_SANDBOX_SETUP.md`: the smoke script, then the pipeline with `PAYPAL_RECOVERY_EXECUTION_ENABLED=true`. This needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, a public webhook URL (or tunnel) and a sandbox buyer.
+2. ~~**Provider-partitioned Stages 2–4**~~: done in Milestone I (`8bbd414`). PayPal degradation now drives PayPal decisions.
 3. **Route policy review:** the PayPal checkout now executes PROMPT_PAYMENT_METHOD_SWITCH as a consent-based offer (Milestone J). Still open, as a product decision: whether a payment-method diagnosis should prefer the switch over DEGRADATION_CIRCUIT_BYPASS, which outscores it under the default policy except for very small amounts.
 4. **Provider-trained Stage 5 model** evaluated on genuine traffic, then registered in `VERIFIED_EMPIRICAL_MODELS` after review.
-5. **Push and CI:** commits `d40a857`…(H), `8bbd414` (I) and Milestone J are local and need approval to push.
+5. **Push and CI:** commits `d40a857` through Milestone N are local and need approval to push.
 6. **Pre-existing test isolation issue:** `tests/unit` + `tests/api` in one process fail 2 route tests; CI runs them separately.
 
 ## 4. External blockers

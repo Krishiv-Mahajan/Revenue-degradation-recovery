@@ -786,7 +786,7 @@ The detailed plan, logs, test results and blockers live in `docs/AUTONOMOUS_ENGI
   - The overview's `active_degradation_episodes` count is labelled `global` and now includes PayPal-scope episodes.
   - Before upgrading a non-test database, note that its existing rows all become `razorpay_pipeline`.
 
-### Milestone J — Customer-Approved Payment Method Switch, Revision G (2026-11-04, committed locally; not pushed)
+### Milestone J — Customer-Approved Payment Method Switch, Revision G (2026-11-04, committed locally as `a1d9141`; not pushed)
 
 - **Goal:** when a diagnosed payment-method outage makes the customer's own method unsuitable, offer a PayPal sandbox checkout as an alternative payment method. The offer requires explicit customer action. The engine never captures, charges or switches anything itself.
 - **Policy 1.2.0:** `PROMPT_PAYMENT_METHOD_SWITCH` names `paypal` as its `alternative_payment_provider`. Costs, recovery rates, thresholds, gates and the other routes are unchanged.
@@ -845,10 +845,43 @@ The detailed plan, logs, test results and blockers live in `docs/AUTONOMOUS_ENGI
   - Expiry and abandonment need the sweep script (or a later event) to run.
   - Real PayPal sandbox calls remain unverified (no credentials).
 
+### Final Engineering & Hackathon Readiness, Milestones K–N (2026-11-04, committed locally; not pushed)
+
+- **Commits** (on `main`, after `a1d9141`):
+  - `17edd52` (K): dashboard lifecycle. Per-scope provider health, switch offers by status, **verified recovered payments** (money PayPal captured through a real recovery; never simulated or estimated) kept apart from estimated protected GMV, route names that separate gateway retry from the customer-approved switch, scope badges, the offer in the audit trail.
+  - `d00a2c4` (L): `RECOVERY_DISABLED_ROUTES` merchant route configuration (only removes routes; deterministic policy variant id; disabled routes in every decision audit). Five-scenario `scripts/demo_end_to_end.py` plus `scripts/run_demo.sh`. The demo now refuses every database except the disposable one.
+  - `ad2eb39` (audit): dashboard page and assets are served `Cache-Control: no-cache, private` (a browser check had kept a stale stylesheet), theme-consistent health colours, and a test that a forged cross-site decline (text/plain or urlencoded) is rejected with 422.
+  - `89916bd`: the provider-isolation characterization counts the summary's three new queries; its PayPal-exclusion assertions are unchanged.
+  - N (this commit): architecture, setup, PayPal sandbox, demo and judges' brief documents; README and `.env.example` corrections.
+- **Verified demo** (`./scripts/run_demo.sh`, disposable database, about 10 s; real routes and pipeline, real heuristic, nothing forced):
+  1. **Healthy baseline:** p = 0.025, NO_ACTION.
+  2. **Razorpay card outage:** CRITICAL GLOBAL and card episodes, RCA SEGMENT_SPECIFIC card STRONG, p = 0.825, ACT on circuit bypass (simulated), observed CAPTURED, estimate ₹1,237.50 marked simulated.
+  3. **USD card payment, merchant without bypass:** ACT on `PROMPT_PAYMENT_METHOD_SWITCH`. Simulated, so no offer, and the report says why.
+  4. **PayPal outage:** PayPal-scope SYSTEMIC episodes, p = 0.725, ACT on gateway retry (simulated); the Razorpay scope is unaffected.
+  5. **Duplicates:** no new records.
+  - Verified recovered money: none, because no real sandbox capture has happened.
+- **Dashboard verified in a browser** against the demo data:
+  - Overview: health strip, verified-recovered and offer KPIs.
+  - Recovery: ledger route names and simulated labels, the offers table.
+  - Incidents: scope badges.
+- **Audit findings:**
+  - Webhook HMAC uses a constant-time compare; PayPal intake fails closed and never stores an unverifiable event.
+  - No secrets or bodies are logged.
+  - The decline endpoint is JSON-only (cross-site forms rejected). Offer transitions are row-locked, with unique keys against double-processing.
+  - Stale-asset caching was fixed.
+  - Noted, not changed: `scripts/demo_orchestrator.py` (older demo) may reset the `payment_recovery` dev/demo database with an explicit `--reset`, by its long-standing design.
+- **Final local results** (disposable `db_test`):
+  - Offline unit + boundaries: 1,796 passed.
+  - Integration + API: 707 passed, 0 skipped.
+  - Migration: 121 passed, 0 skipped.
+  - Frontend: 15 passed.
+- **External blockers:** PayPal sandbox client id/secret, a webhook registered to a public HTTPS URL with its webhook id, and a sandbox buyer plus merchant capture. See `docs/PAYPAL_SANDBOX_SETUP.md`.
+
 ## Current State
 
 The repository is at **Phase 3 Revision C**, committed after Checkpoint 4 (`b190213`) on top of Revision B (`cddb60c`, CI green). Both milestones were reviewed, approved and pushed to `origin/main` together.
 
+- **Latest (2026-11-04):** `main` holds Milestones A–N locally, ahead of `origin/main` (`5c601c4`) and not pushed. Alembic head `d0e1f2a3b4c5` (Revision G), single head, 17 linear revisions. Start with `docs/HACKATHON_BRIEF.md`. The rest of this section is the earlier snapshot.
 - **Branch:** `main`.
 - **Checkpoint commits:** `b190213` (Checkpoint 4) and the Revision C commit that adds its section above.
 - **Alembic head:** `f4a5b6c7d8e9` (Revision C); single head, 13 linear revisions. Since then, local work has moved the head to `c9d0e1f2a3b4` (Revision F, 16 revisions; see the two sections above).
